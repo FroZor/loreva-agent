@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/FroZor/loreva-agent/internal/agentcrypto"
 	"github.com/FroZor/loreva-agent/internal/strictjson"
 )
 
@@ -61,12 +62,13 @@ type EnrollmentRequest struct {
 
 // EnrollmentAccepted contains a newly issued node identity.
 type EnrollmentAccepted struct {
-	Type             string    `json:"type"`
-	NodeID           string    `json:"node_id"`
-	CertificateChain []string  `json:"certificate_chain"`
-	PQCredential     string    `json:"pq_credential"`
-	RenewAfter       time.Time `json:"renew_after"`
-	Sources          Sources   `json:"sources"`
+	Type             string           `json:"type"`
+	NodeID           string           `json:"node_id"`
+	CertificateChain []string         `json:"certificate_chain"`
+	PortalPQRoot     *agentcrypto.JWK `json:"portal_pq_root"`
+	PQCredential     string           `json:"pq_credential"`
+	RenewAfter       time.Time        `json:"renew_after"`
+	Sources          Sources          `json:"sources"`
 }
 
 // Sources is a versioned and expiring gateway pool.

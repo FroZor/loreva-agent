@@ -26,6 +26,22 @@ func TestDecodeStrictSignedChallengeAndRenewal(t *testing.T) {
 	}
 }
 
+func TestDecodeStrictEnrollmentAcceptedPortalRoot(t *testing.T) {
+	var accepted EnrollmentAccepted
+	raw := []byte(`{"type":"enrollment.accepted","node_id":"node","certificate_chain":[],"portal_pq_root":{"kty":"AKP","alg":"ML-DSA-65","pub":"key"},"pq_credential":"a.b.c","renew_after":"2030-01-02T03:04:05Z","sources":{"generation":1,"expires_at":"2030-01-02T03:04:05Z","items":[]}}`)
+	if err := DecodeStrict(raw, &accepted); err != nil {
+		t.Fatal(err)
+	}
+	if accepted.PortalPQRoot == nil || accepted.PortalPQRoot.Alg != "ML-DSA-65" {
+		t.Fatal("enrollment.accepted portal_pq_root changed during decoding")
+	}
+
+	duplicate := []byte(`{"type":"enrollment.accepted","node_id":"node","certificate_chain":[],"portal_pq_root":{"kty":"AKP","alg":"ML-DSA-65","pub":"one","pub":"two"},"pq_credential":"a.b.c","renew_after":"2030-01-02T03:04:05Z","sources":{"generation":1,"expires_at":"2030-01-02T03:04:05Z","items":[]}}`)
+	if err := DecodeStrict(duplicate, &accepted); err == nil {
+		t.Fatal("duplicate portal_pq_root field was accepted")
+	}
+}
+
 func TestMessageTypeRequiresType(t *testing.T) {
 	messageType, err := MessageType([]byte(`{"type":"sources.update","generation":1}`))
 	if err != nil || messageType != SourcesUpdateType {

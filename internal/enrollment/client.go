@@ -11,7 +11,6 @@ import (
 
 	"github.com/coder/websocket"
 
-	"github.com/FroZor/loreva-agent/internal/agentcrypto"
 	"github.com/FroZor/loreva-agent/internal/connectivity"
 	"github.com/FroZor/loreva-agent/internal/protocol"
 	"github.com/FroZor/loreva-agent/internal/state"
@@ -26,7 +25,6 @@ type Options struct {
 	PortalURL          string
 	Token              string
 	PortalCAPEM        string
-	PortalPQRoot       *agentcrypto.JWK
 	StateDir           string
 	Version            string
 	Hostname           string

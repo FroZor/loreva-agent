@@ -53,6 +53,8 @@ type testPortal struct {
 	connectCount     int
 	sourcesUpdate    *protocol.SourcesUpdate
 	drainAfterUpdate bool
+	omitPQRoot       bool
+	overridePQRoot   *agentcrypto.JWK
 }
 
 func TestEnrollThenConnect(t *testing.T) {
@@ -64,6 +66,9 @@ func TestEnrollThenConnect(t *testing.T) {
 
 	if identity.NodeID != portal.nodeID || identity.PortalID != portal.portalID {
 		t.Fatal("enrollment returned an unexpected identity")
+	}
+	if !agentcrypto.PublicKeysEqual(&identity.PortalPQRoot, portal.pqRootPublic) {
+		t.Fatal("enrollment did not persist the portal PQ root")
 	}
 	store, err := state.New(stateDir)
 	if err != nil {
@@ -90,6 +95,55 @@ func TestEnrollThenConnect(t *testing.T) {
 	case <-connected:
 	default:
 		t.Fatal("agent did not complete the connect handshake")
+	}
+}
+
+func TestEnrollmentRejectsMissingPortalPQRoot(t *testing.T) {
+	portal := newTestPortal(t)
+	defer portal.server.Close()
+	portal.omitPQRoot = true
+
+	assertEnrollmentRejectedWithoutIdentity(t, portal, "invalid portal_pq_root")
+}
+
+func TestEnrollmentRejectsPQCredentialSignedByDifferentRoot(t *testing.T) {
+	portal := newTestPortal(t)
+	defer portal.server.Close()
+
+	material, err := agentcrypto.Generate("different-portal-root")
+	if err != nil {
+		t.Fatal(err)
+	}
+	portal.overridePQRoot = agentcrypto.PublicJWK(material.MLDSAPub)
+
+	assertEnrollmentRejectedWithoutIdentity(t, portal, "verify pq_credential")
+}
+
+func assertEnrollmentRejectedWithoutIdentity(t *testing.T, portal *testPortal, expectedError string) {
+	t.Helper()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	stateDir := t.TempDir()
+	_, err := enrollment.Enroll(ctx, enrollment.Options{
+		PortalURL:   portal.URL(),
+		Token:       portal.token,
+		PortalCAPEM: portal.CAPEM(),
+		StateDir:    stateDir,
+		Version:     "test",
+		Hostname:    "test-node",
+	})
+	if err == nil || !strings.Contains(err.Error(), expectedError) {
+		t.Fatalf("Enroll() error = %v, want %q", err, expectedError)
+	}
+
+	store, err := state.New(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.LoadIdentity(); !errors.Is(err, state.ErrNotFound) {
+		t.Fatalf("invalid enrollment persisted identity: %v", err)
 	}
 }
 
@@ -184,13 +238,12 @@ func enrollTestAgent(t *testing.T, portal *testPortal, stateDir string) *state.I
 	defer cancel()
 
 	identity, err := enrollment.Enroll(ctx, enrollment.Options{
-		PortalURL:    portal.URL(),
-		Token:        portal.token,
-		PortalCAPEM:  portal.CAPEM(),
-		PortalPQRoot: agentcrypto.PublicJWK(portal.pqRootPublic),
-		StateDir:     stateDir,
-		Version:      "test",
-		Hostname:     "test-node",
+		PortalURL:   portal.URL(),
+		Token:       portal.token,
+		PortalCAPEM: portal.CAPEM(),
+		StateDir:    stateDir,
+		Version:     "test",
+		Hostname:    "test-node",
 	})
 	if err != nil {
 		t.Fatalf("Enroll: %v", err)
@@ -315,6 +368,12 @@ func (p *testPortal) handleEnroll(w http.ResponseWriter, r *http.Request) {
 		Type: protocol.EnrollmentAcceptedType, NodeID: p.nodeID, CertificateChain: chain,
 		PQCredential: credential, RenewAfter: time.Now().Add(p.renewAfterDelay),
 		Sources: protocol.Sources{Generation: 1, ExpiresAt: time.Now().Add(time.Hour), Items: []protocol.SourceItem{}},
+	}
+	if !p.omitPQRoot {
+		accepted.PortalPQRoot = p.overridePQRoot
+		if accepted.PortalPQRoot == nil {
+			accepted.PortalPQRoot = agentcrypto.PublicJWK(p.pqRootPublic)
+		}
 	}
 	if err := wsjson.Write(r.Context(), conn, accepted); err != nil {
 		return

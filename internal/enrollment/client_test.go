@@ -16,11 +16,7 @@ func TestPendingEnrollmentReusesIdentityAndRequestID(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	root, err := agentcrypto.Generate("portal-root-test")
-	if err != nil {
-		t.Fatal(err)
-	}
-	options := Options{PortalURL: "wss://portal.example:27460", Hostname: "node", PortalPQRoot: agentcrypto.PublicJWK(root.MLDSAPub)}
+	options := Options{PortalURL: "wss://portal.example:27460", Hostname: "node"}
 	first, firstMaterial, err := loadOrCreatePending(store, options, "wss://portal.example:27460/agent/v1/enroll", "token")
 	if err != nil {
 		t.Fatal(err)

@@ -8,34 +8,9 @@ import (
 	"fmt"
 	"io"
 	"os"
-
-	"github.com/FroZor/loreva-agent/internal/agentcrypto"
-	"github.com/FroZor/loreva-agent/internal/strictjson"
 )
 
-const (
-	maxPortalPQRootSize = 8 * 1024
-	maxPortalCASize     = 64 * 1024
-)
-
-// LoadPortalPQRoot reads a strict AKP JWK document from path.
-func LoadPortalPQRoot(path string) (*agentcrypto.JWK, error) {
-	data, err := readBoundedFile(path, "portal PQ root", maxPortalPQRootSize, "8 KiB")
-	if err != nil {
-		return nil, err
-	}
-
-	var root agentcrypto.JWK
-	if err := strictjson.Decode(data, &root); err != nil {
-		return nil, fmt.Errorf("decode portal PQ root: %w", err)
-	}
-
-	if err := agentcrypto.ValidateJWK(&root); err != nil {
-		return nil, fmt.Errorf("validate portal PQ root: %w", err)
-	}
-
-	return &root, nil
-}
+const maxPortalCASize = 64 * 1024
 
 // LoadPortalCA reads a PEM trust bundle from path.
 func LoadPortalCA(path string) (string, error) {

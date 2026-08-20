@@ -23,7 +23,7 @@ Release tags must use the exact `vMAJOR.MINOR.PATCH` format.
 
 ### Binary
 
-Place `bootstrap.json` in the current directory, then run the Linux installer:
+Run the installer and paste the portal bootstrap when prompted:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/FroZor/loreva-agent/master/install.sh -o install.sh
@@ -35,14 +35,14 @@ Self-hosted distributions only need to override `LOREVA_DOWNLOAD_BASE_URL` and, 
 
 ### Docker
 
-Place `bootstrap.json` in the current directory, then install and start the agent:
+Download Compose, paste the portal bootstrap when prompted, and start the agent:
 
 ```sh
 curl -fsSLO https://raw.githubusercontent.com/FroZor/loreva-agent/master/compose.yaml
-docker compose up -d
+docker compose run --rm loreva-agent configure && docker compose up -d
 ```
 
-On its first start, the container enrolls from `bootstrap.json` and stores its identity in a named volume. Later starts use the stored identity. No ports are published.
+Enrollment stores the node identity in the Compose volume. The long-running container receives neither the bootstrap nor an enrollment token, and no ports are published.
 
 ## Minimal configuration
 
@@ -51,18 +51,15 @@ Manual enrollment accepts strict JSON:
 ```json
 {
   "portal_url": "wss://portal.example.com:27460",
-  "enrollment_token": "0123456789abcdef.replace-with-secret",
-  "portal_pq_root": {
-    "kty": "AKP",
-    "alg": "ML-DSA-65",
-    "pub": "<portal-ml-dsa-65-public-key>"
-  }
+  "enrollment_token": "0123456789abcdef.replace-with-secret"
 }
 ```
 
-The token and trust data must be obtained from the portal through an authenticated channel. `portal_ca` is additionally required when the portal certificate is not trusted by the operating system.
+The token must be obtained from the portal through an authenticated channel. `portal_ca` is additionally required when the portal certificate is not trusted by the operating system; the portal supplies its ML-DSA root during enrollment.
 
 See [config.example.jsonc](config.example.jsonc) for every supported setting with comments. The example is documentation: remove its comments and replace its placeholders before passing it to `enroll --config`, because the agent accepts strict JSON only.
+
+To use a manual `config.json` during installation, replace the enrollment command with `sudo ./install.sh --config config.json` for the binary, or `docker compose run --rm -T loreva-agent enroll --config - < config.json && docker compose up -d` for Docker.
 
 ## Uninstallation
 

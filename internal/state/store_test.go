@@ -19,7 +19,7 @@ func TestStorePersistsStateOnceWithRestrictedPermissions(t *testing.T) {
 	}
 	pending := &PendingEnrollment{
 		PortalEndpoint:     "wss://portal.example:27460/agent/v1/enroll",
-		PortalPQRootSHA256: "sha256-root",
+		PortalPQRootSHA256: "legacy-root",
 		RequestID:          "request",
 	}
 	if err := store.SavePending(pending); err != nil {

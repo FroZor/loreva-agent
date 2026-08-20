@@ -16,17 +16,11 @@ func loadOrCreatePending(
 	portalEndpoint string,
 	tokenID string,
 ) (*state.PendingEnrollment, *agentcrypto.KeyMaterial, error) {
-	rootThumbprint, err := agentcrypto.JWKThumbprint(options.PortalPQRoot)
-	if err != nil {
-		return nil, nil, fmt.Errorf("validate portal_pq_root: %w", err)
-	}
-
 	pending, err := store.LoadPending()
 	if err == nil {
 		if pending.PortalEndpoint != portalEndpoint ||
-			pending.EnrollmentTokenID != tokenID ||
-			pending.PortalPQRootSHA256 != rootThumbprint {
-			return nil, nil, errors.New("pending enrollment belongs to another portal, token, or PQ root; explicitly reset pending state to continue")
+			pending.EnrollmentTokenID != tokenID {
+			return nil, nil, errors.New("pending enrollment belongs to another portal or token; explicitly reset pending state to continue")
 		}
 
 		material, err := agentcrypto.Restore(pending.ECDSAPrivateKey, pending.CSR, pending.MLDSASeed)
@@ -56,13 +50,12 @@ func loadOrCreatePending(
 	}
 
 	pending = &state.PendingEnrollment{
-		PortalEndpoint:     portalEndpoint,
-		EnrollmentTokenID:  tokenID,
-		PortalPQRootSHA256: rootThumbprint,
-		RequestID:          requestID,
-		ECDSAPrivateKey:    privateKey,
-		CSR:                material.CSRPEM,
-		MLDSASeed:          material.SeedBase64(),
+		PortalEndpoint:    portalEndpoint,
+		EnrollmentTokenID: tokenID,
+		RequestID:         requestID,
+		ECDSAPrivateKey:   privateKey,
+		CSR:               material.CSRPEM,
+		MLDSASeed:         material.SeedBase64(),
 	}
 	if err := store.SavePending(pending); err != nil {
 		return nil, nil, fmt.Errorf("persist pending enrollment: %w", err)
@@ -79,10 +72,6 @@ func normalizeAndValidateOptions(options *Options) error {
 	if options.Token == "" || len(options.Token) > 4096 || strings.ContainsAny(options.Token, "\r\n") {
 		return errors.New("valid enrollment token is required")
 	}
-	if err := agentcrypto.ValidateJWK(options.PortalPQRoot); err != nil {
-		return fmt.Errorf("valid portal_pq_root is required: %w", err)
-	}
-
 	if options.Version == "" {
 		options.Version = "dev"
 	}

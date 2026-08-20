@@ -6,7 +6,6 @@ import (
 	"crypto/rand"
 	"crypto/x509"
 	"crypto/x509/pkix"
-	"encoding/json"
 	"encoding/pem"
 	"math/big"
 	"os"
@@ -14,63 +13,7 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/cloudflare/circl/sign/mldsa/mldsa65"
-
-	"github.com/FroZor/loreva-agent/internal/agentcrypto"
 )
-
-func TestLoadPortalPQRoot(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "portal-pq-root.json")
-	publicKey, _, err := mldsa65.GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	data, err := json.Marshal(agentcrypto.PublicJWK(publicKey))
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if err := os.WriteFile(path, data, 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	root, err := LoadPortalPQRoot(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if !agentcrypto.PublicKeysEqual(root, publicKey) {
-		t.Fatalf("decoded portal PQ root = %#v", root)
-	}
-}
-
-func TestLoadPortalPQRootRejectsAmbiguousJSON(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "portal-pq-root.json")
-	data := `{"kty":"AKP","alg":"ML-DSA-65","pub":"one","pub":"two"}`
-
-	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	if _, err := LoadPortalPQRoot(path); err == nil {
-		t.Fatal("duplicate portal PQ root field was accepted")
-	}
-}
-
-func TestLoadPortalPQRootRejectsInvalidKey(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "portal-pq-root.json")
-	data := `{"kty":"AKP","alg":"ML-DSA-65","pub":"key"}`
-
-	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	if _, err := LoadPortalPQRoot(path); err == nil || !strings.Contains(err.Error(), "validate portal PQ root") {
-		t.Fatalf("invalid portal PQ root error = %v", err)
-	}
-}
 
 func TestLoadPortalCA(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "portal-ca.pem")
@@ -102,40 +45,15 @@ func TestLoadPortalCARejectsNonCertificateData(t *testing.T) {
 	}
 }
 
-func TestTrustFilesEnforceSizeLimits(t *testing.T) {
-	for _, test := range []struct {
-		name    string
-		load    func(string) error
-		maximum int
-	}{
-		{
-			name: "PQ root",
-			load: func(path string) error {
-				_, err := LoadPortalPQRoot(path)
-				return err
-			},
-			maximum: maxPortalPQRootSize,
-		},
-		{
-			name: "CA",
-			load: func(path string) error {
-				_, err := LoadPortalCA(path)
-				return err
-			},
-			maximum: maxPortalCASize,
-		},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			path := filepath.Join(t.TempDir(), "oversized")
+func TestLoadPortalCAEnforcesSizeLimit(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "oversized")
 
-			if err := os.WriteFile(path, []byte(strings.Repeat("x", test.maximum+1)), 0o600); err != nil {
-				t.Fatal(err)
-			}
+	if err := os.WriteFile(path, []byte(strings.Repeat("x", maxPortalCASize+1)), 0o600); err != nil {
+		t.Fatal(err)
+	}
 
-			if err := test.load(path); err == nil || !strings.Contains(err.Error(), "file must be between") {
-				t.Fatalf("oversized trust file error = %v", err)
-			}
-		})
+	if _, err := LoadPortalCA(path); err == nil || !strings.Contains(err.Error(), "file must be between") {
+		t.Fatalf("oversized portal CA error = %v", err)
 	}
 }
 

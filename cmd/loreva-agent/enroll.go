@@ -24,7 +24,6 @@ func runEnroll(arguments []string, logger *slog.Logger) error {
 	portal := flags.String("portal", "", "portal WSS base URL")
 	token := flags.String("token", "", "short-lived enrollment token")
 	portalCAPath := flags.String("portal-ca", "", "PEM certificate file for a self-hosted portal")
-	portalPQRootPath := flags.String("portal-pq-root", "", "JSON AKP JWK file for the portal ML-DSA root")
 	allowDevelopmentWS := flags.Bool("allow-development-ws", false, "allow ws:// only for a loopback development portal")
 	resetPending := flags.Bool("reset-pending", false, "discard an incomplete enrollment before retrying")
 	stateDir := flags.String("state-dir", "", "agent identity directory")
@@ -38,7 +37,7 @@ func runEnroll(arguments []string, logger *slog.Logger) error {
 	}
 
 	encodedConfig := os.Getenv("LOREVA_CONFIG_BASE64")
-	usingFlags := *portal != "" || *token != "" || *portalCAPath != "" || *portalPQRootPath != "" || *allowDevelopmentWS
+	usingFlags := *portal != "" || *token != "" || *portalCAPath != "" || *allowDevelopmentWS
 	configuredInputs := 0
 
 	if usingFlags {
@@ -65,15 +64,15 @@ func runEnroll(arguments []string, logger *slog.Logger) error {
 	var err error
 
 	if *configPath != "" {
-		bootstrap, err = config.LoadFile(*configPath)
+		if *configPath == "-" {
+			bootstrap, err = config.LoadReader(os.Stdin)
+		} else {
+			bootstrap, err = config.LoadFile(*configPath)
+		}
 	} else if encodedConfig != "" {
 		bootstrap, err = config.LoadBase64(encodedConfig)
 	} else if *portalCAPath != "" {
 		bootstrap.PortalCA, err = config.LoadPortalCA(*portalCAPath)
-	}
-
-	if err == nil && *configPath == "" && encodedConfig == "" && *portalPQRootPath != "" {
-		bootstrap.PortalPQRoot, err = config.LoadPortalPQRoot(*portalPQRootPath)
 	}
 
 	if err != nil {
@@ -110,7 +109,6 @@ func enrollBootstrap(bootstrap *config.Bootstrap, resetPending bool, logger *slo
 		PortalURL:          bootstrap.PortalURL,
 		Token:              bootstrap.EnrollmentToken,
 		PortalCAPEM:        bootstrap.PortalCA,
-		PortalPQRoot:       bootstrap.PortalPQRoot,
 		StateDir:           bootstrap.StateDir,
 		Version:            version,
 		AllowDevelopmentWS: bootstrap.AllowDevelopmentWS,

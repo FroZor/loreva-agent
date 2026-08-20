@@ -12,6 +12,19 @@ fail() {
 	exit 1
 }
 
+config_path=""
+
+if [ "$#" -gt 0 ]; then
+	if [ "$#" -ne 2 ] || [ "$1" != "--config" ]; then
+		fail "usage: ./install.sh [--config FILE]"
+	fi
+
+	config_path="$2"
+	if [ -L "$config_path" ] || [ ! -f "$config_path" ]; then
+		fail "bootstrap config must be a regular file, not a link"
+	fi
+fi
+
 require_command() {
 	command -v "$1" >/dev/null 2>&1 || fail "required command not found: $1"
 }
@@ -89,10 +102,10 @@ ensure_service_user() {
 }
 
 install_systemd_service() {
+	config_path="$1"
 	service_name="loreva-agent"
 	service_user="loreva-agent"
 	state_dir="/var/lib/loreva-agent"
-	bootstrap_path="${PWD}/bootstrap.json"
 	unit_path="/etc/systemd/system/${service_name}.service"
 
 	if [ -e "$unit_path" ] && ! grep -q '^# Managed by the Loreva Agent installer$' "$unit_path"; then
@@ -161,14 +174,14 @@ EOF
 		"$service_name" \
 		"$service_user" \
 		"$state_dir" \
-		"$bootstrap_path"
+		"$config_path"
 }
 
 enroll_and_start_service() {
 	service_name="$1"
 	service_user="$2"
 	state_dir="$3"
-	bootstrap_path="$4"
+	config_path="$4"
 
 	if [ -e "${state_dir}/identity.json" ]; then
 		systemctl restart "$service_name"
@@ -176,29 +189,18 @@ enroll_and_start_service() {
 		return
 	fi
 
-	if [ ! -e "$bootstrap_path" ]; then
-		printf 'Loreva Agent installed. Add bootstrap.json and run the installer again to enroll.\n'
-		return
-	fi
-
-	if [ -L "$bootstrap_path" ] || [ ! -f "$bootstrap_path" ]; then
-		fail "bootstrap config must be a regular file, not a link"
-	fi
-
 	require_command runuser
 
-	service_group="$(id -gn "$service_user")"
-	bootstrap_copy="${state_dir}/.bootstrap.json"
-	(
-		trap 'rm -f "$bootstrap_copy"' EXIT HUP INT TERM
-
-		install -m 0600 -o "$service_user" -g "$service_group" "$bootstrap_path" "$bootstrap_copy"
+	if [ -n "$config_path" ]; then
 		runuser -u "$service_user" -- \
-			"$install_path" enroll --config "$bootstrap_copy" --state-dir "$state_dir"
-
-		rm -f "$bootstrap_copy"
-		trap - EXIT HUP INT TERM
-	)
+			"$install_path" enroll --config - --state-dir "$state_dir" <"$config_path"
+	elif [ -t 0 ]; then
+		runuser -u "$service_user" -- \
+			"$install_path" configure --state-dir "$state_dir"
+	else
+		runuser -u "$service_user" -- \
+			"$install_path" configure --bootstrap - --state-dir "$state_dir"
+	fi
 
 	systemctl start "$service_name"
 	printf 'Loreva Agent installed, enrolled, and started.\n'
@@ -256,7 +258,7 @@ verify_download "$asset_name" "${temporary_dir}/${asset_name}" "${temporary_dir}
 install -m 0755 -- "${temporary_dir}/${asset_name}" "$install_path"
 
 if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
-	install_systemd_service
+	install_systemd_service "$config_path"
 else
 	printf 'Loreva Agent installed at %s. No supported service manager was detected.\n' "$install_path"
 fi

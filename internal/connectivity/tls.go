@@ -46,10 +46,7 @@ func newTLSConfig(portalCAPEM string, clientCertificate *tls.Certificate) (*tls.
 	}
 
 	if portalCAPEM != "" {
-		roots, err := x509.SystemCertPool()
-		if err != nil || roots == nil {
-			roots = x509.NewCertPool()
-		}
+		roots := x509.NewCertPool()
 		if !roots.AppendCertsFromPEM([]byte(portalCAPEM)) {
 			return nil, errors.New("portal_ca does not contain a valid certificate")
 		}

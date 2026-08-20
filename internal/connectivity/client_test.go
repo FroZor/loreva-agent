@@ -3,6 +3,7 @@ package connectivity
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/pem"
 	"errors"
 	"net"
@@ -33,6 +34,25 @@ func TestDialRejectsClassicalTLSWithoutRetryableError(t *testing.T) {
 	_, _, err = dialer.Dial(ctx, "wss"+strings.TrimPrefix(server.URL, "https"), DialOptions{})
 	if !errors.Is(err, ErrTLSPolicy) {
 		t.Fatalf("classical TLS error = %v, want ErrTLSPolicy", err)
+	}
+}
+
+func TestCustomPortalCAUsesDedicatedTrustPool(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	defer server.Close()
+
+	ca := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: server.Certificate().Raw})
+	config, err := newTLSConfig(string(ca), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	expected := x509.NewCertPool()
+	if !expected.AppendCertsFromPEM(ca) {
+		t.Fatal("test portal CA could not be added to expected pool")
+	}
+	if config.RootCAs == nil || !config.RootCAs.Equal(expected) {
+		t.Fatal("custom portal CA was not isolated from the system trust pool")
 	}
 }
 

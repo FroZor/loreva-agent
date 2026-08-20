@@ -5,6 +5,7 @@ go 1.26.6
 require (
 	github.com/cloudflare/circl v1.6.5
 	github.com/coder/websocket v1.8.15
+	golang.org/x/term v0.45.0
 )
 
 // Security override for GO-2026-5024 / CVE-2026-39824.

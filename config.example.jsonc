@@ -9,14 +9,6 @@
   // already trusted by the operating system. Obtain it through a trusted channel.
   "portal_ca": "-----BEGIN CERTIFICATE-----\n<portal-certificate>\n-----END CERTIFICATE-----\n",
 
-  // Required ML-DSA-65 portal identity root. Obtain it from the portal and do not
-  // replace it with an unverified value.
-  "portal_pq_root": {
-    "kty": "AKP",
-    "alg": "ML-DSA-65",
-    "pub": "<base64url-without-padding-public-key>"
-  },
-
   // Optional identity directory. When omitted, LOREVA_STATE_DIR or the platform
   // user configuration directory is used.
   "state_dir": "/var/lib/loreva-agent",
