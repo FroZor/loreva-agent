@@ -8,6 +8,17 @@ The current development milestone implements enrollment, authenticated connectiv
 
 Version tags are built by [GitHub Actions](.github/workflows/release.yml). The pipeline verifies modules, runs tests, `go vet`, and `govulncheck`, then publishes binaries, checksums, and a multi-platform container image. Installation does not require a local compiler.
 
+## Release
+
+Push a stable SemVer tag to start the release workflow:
+
+```sh
+git tag -a v0.1.0 -m "Release v0.1.0"
+git push origin v0.1.0
+```
+
+Release tags must use the exact `vMAJOR.MINOR.PATCH` format.
+
 ## Installation
 
 ### Binary
@@ -15,7 +26,7 @@ Version tags are built by [GitHub Actions](.github/workflows/release.yml). The p
 Place `bootstrap.json` in the current directory, then run the Linux installer:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/FroZor/loreva-agent/main/install.sh -o install.sh
+curl -fsSL https://raw.githubusercontent.com/FroZor/loreva-agent/master/install.sh -o install.sh
 chmod +x install.sh && sudo ./install.sh
 ```
 
@@ -27,7 +38,7 @@ Self-hosted distributions only need to override `LOREVA_DOWNLOAD_BASE_URL` and, 
 Place `bootstrap.json` in the current directory, then install and start the agent:
 
 ```sh
-curl -fsSLO https://raw.githubusercontent.com/FroZor/loreva-agent/main/compose.yaml
+curl -fsSLO https://raw.githubusercontent.com/FroZor/loreva-agent/master/compose.yaml
 docker compose up -d
 ```
 
