@@ -3,6 +3,7 @@
 package state
 
 import (
+	"errors"
 	"fmt"
 	"os"
 )
@@ -23,12 +24,16 @@ func ensureSecureFile(_ string, info os.FileInfo) error {
 	return nil
 }
 
-func syncDirectory(path string) error {
+func syncDirectory(path string) (resultErr error) {
 	directory, err := os.Open(path)
 	if err != nil {
 		return fmt.Errorf("open state directory for sync: %w", err)
 	}
-	defer directory.Close()
+	defer func() {
+		if err := directory.Close(); err != nil {
+			resultErr = errors.Join(resultErr, fmt.Errorf("close state directory after sync: %w", err))
+		}
+	}()
 
 	if err := directory.Sync(); err != nil {
 		return fmt.Errorf("sync state directory: %w", err)

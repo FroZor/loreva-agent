@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"time"
 
@@ -18,7 +19,7 @@ import (
 
 const handshakeTimeout = 30 * time.Second
 
-func (r *Runner) runEndpoint(ctx context.Context, endpoint string, onConnected func(string)) error {
+func (r *Runner) runEndpoint(ctx context.Context, endpoint string, onConnected func(string)) (resultErr error) {
 	dialer, err := connectivity.NewDialer(connectivity.Config{
 		PortalCAPEM:        r.identity.PortalCAPEM,
 		ClientCertificate:  &r.clientCertificate,
@@ -37,7 +38,21 @@ func (r *Runner) runEndpoint(ctx context.Context, endpoint string, onConnected f
 	if err != nil {
 		return r.classifyDialError(endpoint, response, err)
 	}
-	defer conn.CloseNow()
+	defer func() {
+		closeErr := conn.CloseNow()
+		if closeErr == nil || errors.Is(closeErr, net.ErrClosed) {
+			return
+		}
+
+		closeErr = fmt.Errorf("close WebSocket connection for %q: %w", endpoint, closeErr)
+
+		if connected, ok := errors.AsType[*connectedError](resultErr); ok {
+			resultErr = &connectedError{Err: errors.Join(connected.Err, closeErr)}
+			return
+		}
+
+		resultErr = errors.Join(resultErr, closeErr)
+	}()
 
 	portalChallenge, err := r.readConnectChallenge(handshakeCtx, conn, endpoint)
 	if err != nil {

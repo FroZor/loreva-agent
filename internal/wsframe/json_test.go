@@ -2,6 +2,8 @@ package wsframe
 
 import (
 	"context"
+	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -45,7 +47,7 @@ func TestWriteJSONUsesTextFrame(t *testing.T) {
 		if err != nil {
 			return
 		}
-		defer conn.CloseNow()
+		defer closeTestConnection(t, conn)
 
 		messageType, _, err := conn.Read(request.Context())
 		if err == nil {
@@ -58,7 +60,7 @@ func TestWriteJSONUsesTextFrame(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { conn.CloseNow() })
+	t.Cleanup(func() { closeTestConnection(t, conn) })
 
 	if err := WriteJSON(context.Background(), conn, struct {
 		Type string `json:"type"`
@@ -84,7 +86,7 @@ func dialFrameServer(t *testing.T, messageType websocket.MessageType, data []byt
 		if err != nil {
 			return
 		}
-		defer conn.CloseNow()
+		defer closeTestConnection(t, conn)
 
 		_ = conn.Write(request.Context(), messageType, data)
 	}))
@@ -94,11 +96,19 @@ func dialFrameServer(t *testing.T, messageType websocket.MessageType, data []byt
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { conn.CloseNow() })
+	t.Cleanup(func() { closeTestConnection(t, conn) })
 
 	return conn
 }
 
 func websocketURL(serverURL string) string {
 	return "ws" + strings.TrimPrefix(serverURL, "http")
+}
+
+func closeTestConnection(t *testing.T, conn *websocket.Conn) {
+	t.Helper()
+
+	if err := conn.CloseNow(); err != nil && !errors.Is(err, net.ErrClosed) {
+		t.Errorf("close test WebSocket connection: %v", err)
+	}
 }

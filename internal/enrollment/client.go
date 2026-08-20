@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"time"
 
@@ -31,6 +32,7 @@ type Options struct {
 	Hostname           string
 	AllowDevelopmentWS bool
 	OnRetry            func(error, time.Duration)
+	OnWarning          func(error)
 }
 
 type rejectedError struct {
@@ -139,7 +141,11 @@ func enrollOnce(ctx context.Context, options Options) (*state.Identity, error) {
 		}
 		return nil, err
 	}
-	defer conn.CloseNow()
+	defer func() {
+		if err := conn.CloseNow(); err != nil && !errors.Is(err, net.ErrClosed) && options.OnWarning != nil {
+			options.OnWarning(fmt.Errorf("close enrollment WebSocket: %w", err))
+		}
+	}()
 
 	enrolledIdentity, err := exchangeEnrollment(handshakeCtx, conn, options, pending, material)
 	if err != nil {
@@ -152,7 +158,9 @@ func enrollOnce(ctx context.Context, options Options) (*state.Identity, error) {
 		return nil, fmt.Errorf("enrolled identity committed but pending state cleanup failed: %w", err)
 	}
 
-	_ = conn.Close(websocket.StatusNormalClosure, "")
+	if err := conn.Close(websocket.StatusNormalClosure, ""); err != nil && !errors.Is(err, net.ErrClosed) && options.OnWarning != nil {
+		options.OnWarning(fmt.Errorf("complete enrollment WebSocket close handshake: %w", err))
+	}
 
 	return enrolledIdentity, nil
 }

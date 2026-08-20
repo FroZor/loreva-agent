@@ -15,6 +15,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -270,7 +271,7 @@ func (p *testPortal) handleEnroll(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		return
 	}
-	defer conn.CloseNow()
+	defer closeTestConnection(p.t, conn)
 	challenge, err := p.challenge(protocol.EnrollmentChallenge)
 	if err != nil {
 		p.t.Errorf("create enrollment challenge: %v", err)
@@ -331,7 +332,7 @@ func (p *testPortal) handleConnect(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		return
 	}
-	defer conn.CloseNow()
+	defer closeTestConnection(p.t, conn)
 	challenge, err := p.challenge(protocol.ConnectChallenge)
 	if err != nil {
 		p.t.Errorf("create connect challenge: %v", err)
@@ -576,4 +577,12 @@ func signJWS(key *mldsa65.PrivateKey, header, claims any) (string, error) {
 	}
 
 	return input + "." + rawBase64.EncodeToString(signature), nil
+}
+
+func closeTestConnection(t *testing.T, conn *websocket.Conn) {
+	t.Helper()
+
+	if err := conn.CloseNow(); err != nil && !errors.Is(err, net.ErrClosed) {
+		t.Errorf("close test WebSocket connection: %v", err)
+	}
 }

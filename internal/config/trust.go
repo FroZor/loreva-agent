@@ -51,12 +51,16 @@ func LoadPortalCA(path string) (string, error) {
 	return string(data), nil
 }
 
-func readBoundedFile(path, description string, maximum int64, maximumLabel string) ([]byte, error) {
+func readBoundedFile(path, description string, maximum int64, maximumLabel string) (data []byte, resultErr error) {
 	file, err := os.Open(path)
 	if err != nil {
 		return nil, fmt.Errorf("open %s: %w", description, err)
 	}
-	defer file.Close()
+	defer func() {
+		if err := file.Close(); err != nil {
+			resultErr = errors.Join(resultErr, fmt.Errorf("close %s: %w", description, err))
+		}
+	}()
 
 	info, err := file.Stat()
 	if err != nil {
@@ -66,7 +70,7 @@ func readBoundedFile(path, description string, maximum int64, maximumLabel strin
 		return nil, fmt.Errorf("%s path must reference a regular file", description)
 	}
 
-	data, err := io.ReadAll(io.LimitReader(file, maximum+1))
+	data, err = io.ReadAll(io.LimitReader(file, maximum+1))
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", description, err)
 	}

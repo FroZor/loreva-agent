@@ -156,7 +156,7 @@ func (s *Store) clear(name, description string) error {
 	return nil
 }
 
-func (s *Store) load(name string, target any) error {
+func (s *Store) load(name string, target any) (resultErr error) {
 	path := filepath.Join(s.dir, name)
 
 	info, err := os.Lstat(path)
@@ -177,7 +177,11 @@ func (s *Store) load(name string, target any) error {
 	if err != nil {
 		return fmt.Errorf("open state file: %w", err)
 	}
-	defer file.Close()
+	defer func() {
+		if err := file.Close(); err != nil {
+			resultErr = errors.Join(resultErr, fmt.Errorf("close state file: %w", err))
+		}
+	}()
 
 	data, err := io.ReadAll(io.LimitReader(file, maxStateSize+1))
 	if err != nil {

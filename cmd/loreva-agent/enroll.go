@@ -117,6 +117,9 @@ func enrollBootstrap(bootstrap *config.Bootstrap, resetPending bool, logger *slo
 		OnRetry: func(err error, delay time.Duration) {
 			logger.Warn("agent enrollment retry", "error", err, "retry_in", delay.String())
 		},
+		OnWarning: func(err error) {
+			logger.Warn("agent enrollment warning", "error", err)
+		},
 	})
 	if err != nil {
 		return err

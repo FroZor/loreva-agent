@@ -16,7 +16,7 @@ func ensureSecureFile(path string, _ os.FileInfo) error {
 	return applyRestrictedACL(path)
 }
 
-func syncDirectory(string) error { return nil }
+func syncDirectory(_ string) error { return nil }
 
 func commitState(tempPath, destination string) error {
 	return moveState(tempPath, destination, windows.MOVEFILE_WRITE_THROUGH)

@@ -12,8 +12,10 @@ import (
 	"github.com/FroZor/loreva-agent/internal/strictjson"
 )
 
-const maxConfigSize = 64 * 1024
-const maxEncodedConfigSize = ((maxConfigSize + 2) / 3) * 4
+const (
+	maxConfigSize        = 64 * 1024
+	maxEncodedConfigSize = ((maxConfigSize + 2) / 3) * 4
+)
 
 // Bootstrap contains the mandatory inputs needed for first enrollment.
 type Bootstrap struct {
@@ -33,12 +35,16 @@ type serverBootstrap struct {
 }
 
 // LoadFile reads a bounded bootstrap JSON file.
-func LoadFile(path string) (*Bootstrap, error) {
+func LoadFile(path string) (bootstrap *Bootstrap, resultErr error) {
 	file, err := os.Open(path)
 	if err != nil {
 		return nil, fmt.Errorf("open bootstrap config: %w", err)
 	}
-	defer file.Close()
+	defer func() {
+		if err := file.Close(); err != nil {
+			resultErr = errors.Join(resultErr, fmt.Errorf("close bootstrap config: %w", err))
+		}
+	}()
 
 	data, err := io.ReadAll(io.LimitReader(file, maxConfigSize+1))
 	if err != nil {
