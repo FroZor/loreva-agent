@@ -1,0 +1,28 @@
+services:
+  loreva-agent:
+    image: ghcr.io/frozor/loreva-agent:latest
+    restart: unless-stopped
+    user: "65532:65532"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      - type: volume
+        source: loreva-agent-state
+        target: /var/lib/loreva-agent
+      - type: bind
+        source: ./bootstrap.json
+        target: /run/secrets/bootstrap.json
+        read_only: true
+        bind:
+          create_host_path: false
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  loreva-agent-state:

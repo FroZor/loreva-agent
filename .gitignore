@@ -1,0 +1,44 @@
+# Build artifacts
+/bin/
+/build/
+/dist/
+/loreva-agent
+/loreva-agent.exe
+*.test
+*.out
+*.prof
+*.coverprofile
+coverage.*
+
+# Local Go workspace
+go.work
+go.work.sum
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+/bootstrap.json
+/identity.json
+/enrollment-pending.json
+/renewal-pending.json
+/state/
+
+# Local documentation
+/docs/
+
+# Editors and IDEs
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Operating system files
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Logs and temporary files
+*.log
+*.tmp

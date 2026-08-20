@@ -1,0 +1,13 @@
+.git
+.github
+.tmp-*
+loreva-agent
+loreva-agent.exe
+.env
+.env.*
+bootstrap.json
+identity.json
+enrollment-pending.json
+renewal-pending.json
+state
+*.pem
