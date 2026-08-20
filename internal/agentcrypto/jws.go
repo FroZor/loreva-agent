@@ -181,25 +181,6 @@ func VerifyCompactJWS(root *JWK, token string, target any) error {
 	return nil
 }
 
-// DecodeCompactPayload performs structural decoding only; it does not prove
-// authenticity. Portal-signed data must be decoded with VerifyCompactJWS.
-func DecodeCompactPayload(token string, target any) error {
-	headerBytes, payload, _, _, err := splitCompactJWS(token)
-	if err != nil {
-		return err
-	}
-
-	var header protectedHeader
-	if err := strictjson.Decode(headerBytes, &header); err != nil || header.Alg != MLDSAAlgorithm {
-		return errors.New("invalid Compact JWS protected header")
-	}
-	if err := strictjson.Decode(payload, target); err != nil {
-		return fmt.Errorf("decode Compact JWS payload: %w", err)
-	}
-
-	return nil
-}
-
 func publicKeyFromJWK(jwk *JWK) (*mldsa65.PublicKey, error) {
 	if jwk == nil {
 		return nil, errors.New("ML-DSA JWK is missing")
