@@ -46,7 +46,7 @@ func runStart(arguments []string, logger *slog.Logger) error {
 	}
 	bootstrap.StateDir = store.Dir()
 
-	if err := enrollBootstrap(bootstrap, false, logger); err != nil {
+	if err := enrollBootstrap(bootstrap, false, logger, nil); err != nil {
 		return err
 	}
 

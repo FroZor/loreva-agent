@@ -11,6 +11,8 @@ import (
 
 	"github.com/FroZor/loreva-agent/internal/agentcrypto"
 	"github.com/FroZor/loreva-agent/internal/connectivity"
+	"github.com/FroZor/loreva-agent/internal/networkinfo"
+	"github.com/FroZor/loreva-agent/internal/specifications"
 	"github.com/FroZor/loreva-agent/internal/state"
 )
 
@@ -24,7 +26,10 @@ type endpointPolicyError struct{ Err error }
 func (e *endpointPolicyError) Error() string { return e.Err.Error() }
 func (e *endpointPolicyError) Unwrap() error { return e.Err }
 
-type connectedError struct{ Err error }
+type connectedError struct {
+	Err    error
+	Stable bool
+}
 
 func (e *connectedError) Error() string { return e.Err.Error() }
 func (e *connectedError) Unwrap() error { return e.Err }
@@ -32,6 +37,27 @@ func (e *connectedError) Unwrap() error { return e.Err }
 type rejectedError struct {
 	Code    string
 	Message string
+}
+
+// Events receives synchronous lifecycle notifications. Handlers must return promptly.
+type Events struct {
+	Connected      func(endpoint string)
+	Retrying       func(ConnectionRetry)
+	ReportRejected func(NodeReportRejection)
+}
+
+// ConnectionRetry describes a failed endpoint pass and its retry delay.
+type ConnectionRetry struct {
+	Err     error
+	RetryIn time.Duration
+}
+
+// NodeReportRejection describes a correlated report rejection from the portal.
+type NodeReportRejection struct {
+	Type      string
+	Code      string
+	RetryIn   time.Duration
+	Retryable bool
 }
 
 func (e *rejectedError) Error() string {
@@ -48,15 +74,23 @@ type Runner struct {
 	material          *agentcrypto.KeyMaterial
 	clientCertificate tls.Certificate
 	masterEndpoint    string
+	collectors        Collectors
+	reports           nodeReportState
+}
+
+// Collectors provide bounded system snapshots after a connection is accepted.
+type Collectors struct {
+	Specifications func(context.Context) (specifications.Snapshot, error)
+	Network        func(context.Context) (networkinfo.Snapshot, error)
 }
 
 // New validates the persisted identity and creates a session runner.
-func New(store *state.Store, identity *state.Identity) (*Runner, error) {
+func New(store *state.Store, identity *state.Identity, collectors Collectors) (*Runner, error) {
 	if store == nil {
 		return nil, errors.New("agent state store is required")
 	}
 
-	runner := &Runner{store: store}
+	runner := &Runner{store: store, collectors: collectors}
 	if err := runner.installIdentity(identity); err != nil {
 		return nil, err
 	}
@@ -97,7 +131,7 @@ func (r *Runner) installIdentity(identity *state.Identity) error {
 }
 
 // Run connects until the context is cancelled or a permanent policy error occurs.
-func (r *Runner) Run(ctx context.Context, onConnected func(string)) error {
+func (r *Runner) Run(ctx context.Context, events Events) error {
 	attempt := 0
 	disabledEndpoints := make(map[string]struct{})
 
@@ -111,10 +145,12 @@ connectionLoop:
 				continue
 			}
 
-			err := r.runEndpoint(ctx, endpoint, onConnected)
+			err := r.runEndpoint(ctx, endpoint, events)
 
 			if connected, ok := errors.AsType[*connectedError](err); ok {
-				attempt = 0
+				if connected.Stable {
+					attempt = 0
+				}
 				err = connected.Err
 			}
 
@@ -126,6 +162,10 @@ connectionLoop:
 				disabledEndpoints = make(map[string]struct{})
 				attempt = 0
 				continue connectionLoop
+			}
+			if errors.Is(err, errDrainRequested) {
+				lastErr = err
+				continue
 			}
 
 			if err == nil || errors.Is(err, context.Canceled) {
@@ -151,6 +191,10 @@ connectionLoop:
 
 		attempt++
 		delay := retryDelay(attempt)
+		if events.Retrying != nil {
+			events.Retrying(ConnectionRetry{Err: lastErr, RetryIn: delay})
+		}
+
 		timer := time.NewTimer(delay)
 
 		select {
@@ -160,6 +204,13 @@ connectionLoop:
 		case <-timer.C:
 		}
 	}
+}
+
+// IsTerminal reports whether continuing to reconnect requires operator action.
+func IsTerminal(err error) bool {
+	_, ok := errors.AsType[*permanentError](err)
+
+	return ok
 }
 
 func (r *Runner) endpointFailure(endpoint string, err error) error {

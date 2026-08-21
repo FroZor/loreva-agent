@@ -29,6 +29,7 @@ type Options struct {
 	Version            string
 	Hostname           string
 	AllowDevelopmentWS bool
+	ResetPending       bool
 	OnRetry            func(error, time.Duration)
 	OnWarning          func(error)
 }
@@ -57,10 +58,37 @@ func Enroll(ctx context.Context, options Options) (*state.Identity, error) {
 		return nil, err
 	}
 
+	store, err := state.New(options.StateDir)
+	if err != nil {
+		return nil, err
+	}
+
+	lock, err := store.TryLockEnrollment()
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if err := lock.Close(); err != nil && options.OnWarning != nil {
+			options.OnWarning(fmt.Errorf("release enrollment lock: %w", err))
+		}
+	}()
+
+	if options.ResetPending {
+		if _, err := store.LoadIdentity(); err == nil {
+			return nil, errAlreadyEnrolled
+		} else if !errors.Is(err, state.ErrNotFound) {
+			return nil, fmt.Errorf("load existing identity: %w", err)
+		}
+
+		if err := store.ClearPending(); err != nil {
+			return nil, err
+		}
+	}
+
 	attempt := 0
 
 	for {
-		identity, err := enrollOnce(ctx, options)
+		identity, err := enrollOnce(ctx, store, options)
 		if err == nil {
 			return identity, nil
 		}
@@ -88,12 +116,7 @@ func Enroll(ctx context.Context, options Options) (*state.Identity, error) {
 	}
 }
 
-func enrollOnce(ctx context.Context, options Options) (*state.Identity, error) {
-	store, err := state.New(options.StateDir)
-	if err != nil {
-		return nil, err
-	}
-
+func enrollOnce(ctx context.Context, store *state.Store, options Options) (*state.Identity, error) {
 	if _, err := store.LoadIdentity(); err == nil {
 		return nil, errAlreadyEnrolled
 	} else if !errors.Is(err, state.ErrNotFound) {
@@ -114,11 +137,6 @@ func enrollOnce(ctx context.Context, options Options) (*state.Identity, error) {
 	}
 
 	tokenID, err := enrollmentTokenID(options.Token)
-	if err != nil {
-		return nil, err
-	}
-
-	pending, material, err := loadOrCreatePending(store, options, endpoint, tokenID)
 	if err != nil {
 		return nil, err
 	}
@@ -145,7 +163,17 @@ func enrollOnce(ctx context.Context, options Options) (*state.Identity, error) {
 		}
 	}()
 
-	enrolledIdentity, err := exchangeEnrollment(handshakeCtx, conn, options, pending, material)
+	portalChallenge, err := readEnrollmentChallenge(handshakeCtx, conn)
+	if err != nil {
+		return nil, err
+	}
+
+	pending, material, err := loadOrCreatePending(store, options, endpoint, portalChallenge.PortalID, tokenID)
+	if err != nil {
+		return nil, err
+	}
+
+	enrolledIdentity, err := exchangeEnrollment(handshakeCtx, conn, options, portalChallenge, pending, material)
 	if err != nil {
 		return nil, err
 	}

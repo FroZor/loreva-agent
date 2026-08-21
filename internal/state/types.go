@@ -11,6 +11,7 @@ import (
 type PendingEnrollment struct {
 	Version           int    `json:"version"`
 	PortalEndpoint    string `json:"portal_endpoint"`
+	PortalID          string `json:"portal_id,omitempty"`
 	EnrollmentTokenID string `json:"enrollment_token_id"`
 	// PortalPQRootSHA256 keeps compatibility with pending enrollment state
 	// created before the portal root moved into enrollment.accepted.

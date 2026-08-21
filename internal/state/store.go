@@ -83,6 +83,12 @@ func (s *Store) SavePending(pending *PendingEnrollment) error {
 	return s.saveNew(pendingName, pending)
 }
 
+// ReplacePending atomically replaces an existing incomplete enrollment.
+func (s *Store) ReplacePending(pending *PendingEnrollment) error {
+	pending.Version = currentVersion
+	return s.replaceExisting(pendingName, pending)
+}
+
 // LoadRenewal loads an incomplete identity renewal transaction.
 func (s *Store) LoadRenewal() (*PendingRenewal, error) {
 	var pending PendingRenewal

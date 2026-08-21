@@ -30,8 +30,10 @@ import (
 
 	"github.com/FroZor/loreva-agent/internal/agentcrypto"
 	"github.com/FroZor/loreva-agent/internal/enrollment"
+	"github.com/FroZor/loreva-agent/internal/networkinfo"
 	"github.com/FroZor/loreva-agent/internal/protocol"
 	"github.com/FroZor/loreva-agent/internal/session"
+	"github.com/FroZor/loreva-agent/internal/specifications"
 	"github.com/FroZor/loreva-agent/internal/state"
 )
 
@@ -55,6 +57,8 @@ type testPortal struct {
 	drainAfterUpdate bool
 	omitPQRoot       bool
 	overridePQRoot   *agentcrypto.JWK
+	invalidChallenge bool
+	reportTypes      chan string
 }
 
 func TestEnrollThenConnect(t *testing.T) {
@@ -78,16 +82,16 @@ func TestEnrollThenConnect(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	runner, err := session.New(store, stored)
+	runner, err := session.New(store, stored, session.Collectors{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	connected := make(chan struct{})
-	err = runner.Run(ctx, func(string) {
+	err = runner.Run(ctx, session.Events{Connected: func(string) {
 		close(connected)
 		cancel()
-	})
+	}})
 	if err != nil && !errors.Is(err, context.Canceled) {
 		t.Fatalf("Run: %v", err)
 	}
@@ -117,6 +121,36 @@ func TestEnrollmentRejectsPQCredentialSignedByDifferentRoot(t *testing.T) {
 	portal.overridePQRoot = agentcrypto.PublicJWK(material.MLDSAPub)
 
 	assertEnrollmentRejectedWithoutIdentity(t, portal, "verify pq_credential")
+}
+
+func TestEnrollmentDoesNotPersistPendingBeforeValidChallenge(t *testing.T) {
+	portal := newTestPortal(t)
+	defer portal.server.Close()
+	portal.invalidChallenge = true
+
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+
+	stateDir := t.TempDir()
+	_, err := enrollment.Enroll(ctx, enrollment.Options{
+		PortalURL:   portal.URL(),
+		Token:       portal.token,
+		PortalCAPEM: portal.CAPEM(),
+		StateDir:    stateDir,
+		Version:     "test",
+		Hostname:    "test-node",
+	})
+	if err == nil {
+		t.Fatal("Enroll() accepted an invalid challenge")
+	}
+
+	store, err := state.New(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.LoadPending(); !errors.Is(err, state.ErrNotFound) {
+		t.Fatalf("invalid challenge persisted enrollment state: %v", err)
+	}
 }
 
 func assertEnrollmentRejectedWithoutIdentity(t *testing.T, portal *testPortal, expectedError string) {
@@ -160,19 +194,19 @@ func TestEnrollConnectAndRenewIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	runner, err := session.New(store, identity)
+	runner, err := session.New(store, identity, session.Collectors{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	connections := 0
-	err = runner.Run(ctx, func(string) {
+	err = runner.Run(ctx, session.Events{Connected: func(string) {
 		connections++
 		if connections == 2 {
 			cancel()
 		}
-	})
+	}})
 	if err != nil && !errors.Is(err, context.Canceled) {
 		t.Fatalf("Run: %v", err)
 	}
@@ -206,19 +240,19 @@ func TestSourcesUpdateIsPersistedBeforeDrainReconnect(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	runner, err := session.New(store, identity)
+	runner, err := session.New(store, identity, session.Collectors{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	connections := 0
-	err = runner.Run(ctx, func(string) {
+	err = runner.Run(ctx, session.Events{Connected: func(string) {
 		connections++
 		if connections == 2 {
 			cancel()
 		}
-	})
+	}})
 	if err != nil && !errors.Is(err, context.Canceled) {
 		t.Fatalf("Run: %v", err)
 	}
@@ -228,6 +262,64 @@ func TestSourcesUpdateIsPersistedBeforeDrainReconnect(t *testing.T) {
 	}
 	if connections != 2 || persisted.Sources.Generation != 2 {
 		t.Fatalf("connections=%d sources generation=%d", connections, persisted.Sources.Generation)
+	}
+}
+
+func TestConnectReportsSpecificationsThenNetwork(t *testing.T) {
+	portal := newTestPortal(t)
+	defer portal.server.Close()
+
+	stateDir := t.TempDir()
+	identity := enrollTestAgent(t, portal, stateDir)
+	store, err := state.New(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	runner, err := session.New(store, identity, session.Collectors{
+		Specifications: func(context.Context) (specifications.Snapshot, error) {
+			return specifications.Snapshot{
+				ObservationScope: protocol.ObservationScopeHost,
+				Specifications: protocol.NodeSpecifications{
+					System: protocol.SystemSpecifications{Hostname: "test-node"},
+				},
+			}, nil
+		},
+		Network: func(context.Context) (networkinfo.Snapshot, error) {
+			return networkinfo.Snapshot{
+				ObservationScope: protocol.ObservationScopeHost,
+				Network: protocol.NodeNetwork{
+					Interfaces: []protocol.NetworkInterfaceConfiguration{},
+				},
+			}, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+
+	result := make(chan error, 1)
+	go func() {
+		result <- runner.Run(ctx, session.Events{})
+	}()
+
+	for _, want := range []string{protocol.NodeSpecificationsReportType, protocol.NodeNetworkReportType} {
+		select {
+		case got := <-portal.reportTypes:
+			if got != want {
+				t.Fatalf("report type = %q, want %q", got, want)
+			}
+		case <-ctx.Done():
+			t.Fatal("timed out waiting for node reports")
+		}
+	}
+
+	cancel()
+	if err := <-result; err != nil && !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run: %v", err)
 	}
 }
 
@@ -291,7 +383,7 @@ func newTestPortal(t *testing.T) *testPortal {
 	portal := &testPortal{
 		t: t, token: "1234567890abcdef.test-secret", portalID: portalID, nodeID: nodeID,
 		clientRoot: root, clientRootKey: rootKey, pqRootKey: pqRoot, pqRootPublic: pqRootPublic,
-		renewAfterDelay: time.Hour,
+		renewAfterDelay: time.Hour, reportTypes: make(chan string, 8),
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/agent/v1/enroll", portal.handleEnroll)
@@ -330,7 +422,13 @@ func (p *testPortal) handleEnroll(w http.ResponseWriter, r *http.Request) {
 		p.t.Errorf("create enrollment challenge: %v", err)
 		return
 	}
+	if p.invalidChallenge {
+		challenge.Type = protocol.ConnectChallenge
+	}
 	if wsjson.Write(r.Context(), conn, challenge) != nil {
+		return
+	}
+	if p.invalidChallenge {
 		return
 	}
 	var request protocol.EnrollmentRequest
@@ -437,48 +535,95 @@ func (p *testPortal) handleConnect(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	for {
-		var request protocol.RenewRequest
-		if wsjson.Read(r.Context(), conn, &request) != nil {
-			return
-		}
-		if request.Type != protocol.RenewRequestType {
-			p.t.Errorf("unexpected working message %q", request.Type)
-			return
-		}
-		csrBlock, rest := pem.Decode([]byte(request.CSR))
-		if csrBlock == nil || csrBlock.Type != "CERTIFICATE REQUEST" || len(strings.TrimSpace(string(rest))) != 0 {
-			p.t.Error("renewal CSR is missing")
-			return
-		}
-
-		newPublicKey, err := verifyPoP(request.PQPoP, p.portalID, challenge.Nonce, csrBlock.Bytes, nil)
+		_, data, err := conn.Read(r.Context())
 		if err != nil {
-			p.t.Errorf("verify renewal proof: %v", err)
 			return
 		}
 
-		chain, notAfter, err := p.issueCertificate(csrBlock.Bytes)
+		messageType, err := protocol.MessageType(data)
 		if err != nil {
-			p.t.Errorf("issue renewed certificate: %v", err)
+			p.t.Errorf("decode working message type: %v", err)
 			return
 		}
 
-		credential, err := p.issueCredential(newPublicKey, notAfter)
-		if err != nil {
-			p.t.Errorf("issue renewed credential: %v", err)
-			return
-		}
-
-		p.mu.Lock()
-		p.agentPublicKey = newPublicKey
-		p.mu.Unlock()
-		if err := wsjson.Write(r.Context(), conn, protocol.RenewAccepted{
-			Type: protocol.RenewAcceptedType, CertificateChain: chain, PQCredential: credential,
-			RenewAfter: notAfter.Add(-time.Hour),
-		}); err != nil {
+		switch messageType {
+		case protocol.NodeSpecificationsReportType:
+			var report protocol.NodeSpecificationsReport
+			if err := protocol.DecodeStrict(data, &report); err != nil {
+				p.t.Errorf("decode specifications report: %v", err)
+				return
+			}
+			p.reportTypes <- report.Type
+			if err := wsjson.Write(r.Context(), conn, protocol.NodeSpecificationsAccepted{
+				Type: protocol.NodeSpecificationsAcceptedType, RequestID: report.RequestID, Revision: 1,
+			}); err != nil {
+				return
+			}
+		case protocol.NodeNetworkReportType:
+			var report protocol.NodeNetworkReport
+			if err := protocol.DecodeStrict(data, &report); err != nil {
+				p.t.Errorf("decode network report: %v", err)
+				return
+			}
+			p.reportTypes <- report.Type
+			if err := wsjson.Write(r.Context(), conn, protocol.NodeNetworkAccepted{
+				Type: protocol.NodeNetworkAcceptedType, RequestID: report.RequestID, Revision: 1,
+			}); err != nil {
+				return
+			}
+		case protocol.RenewRequestType:
+			if !p.handleRenewRequest(r.Context(), conn, challenge.Nonce, data) {
+				return
+			}
+		default:
+			p.t.Errorf("unexpected working message %q", messageType)
 			return
 		}
 	}
+}
+
+func (p *testPortal) handleRenewRequest(ctx context.Context, conn *websocket.Conn, nonce string, data []byte) bool {
+	var request protocol.RenewRequest
+	if err := protocol.DecodeStrict(data, &request); err != nil {
+		p.t.Errorf("decode renewal request: %v", err)
+		return false
+	}
+
+	csrBlock, rest := pem.Decode([]byte(request.CSR))
+	if csrBlock == nil || csrBlock.Type != "CERTIFICATE REQUEST" || len(strings.TrimSpace(string(rest))) != 0 {
+		p.t.Error("renewal CSR is missing")
+		return false
+	}
+
+	newPublicKey, err := verifyPoP(request.PQPoP, p.portalID, nonce, csrBlock.Bytes, nil)
+	if err != nil {
+		p.t.Errorf("verify renewal proof: %v", err)
+		return false
+	}
+
+	chain, notAfter, err := p.issueCertificate(csrBlock.Bytes)
+	if err != nil {
+		p.t.Errorf("issue renewed certificate: %v", err)
+		return false
+	}
+
+	credential, err := p.issueCredential(newPublicKey, notAfter)
+	if err != nil {
+		p.t.Errorf("issue renewed credential: %v", err)
+		return false
+	}
+
+	p.mu.Lock()
+	p.agentPublicKey = newPublicKey
+	p.mu.Unlock()
+	if err := wsjson.Write(ctx, conn, protocol.RenewAccepted{
+		Type: protocol.RenewAcceptedType, CertificateChain: chain, PQCredential: credential,
+		RenewAfter: notAfter.Add(-time.Hour),
+	}); err != nil {
+		return false
+	}
+
+	return true
 }
 
 func (p *testPortal) challenge(messageType string) (protocol.Challenge, error) {

@@ -1,6 +1,7 @@
 services:
   loreva-agent:
     image: ghcr.io/frozor/loreva-agent:latest
+    pull_policy: always
     restart: unless-stopped
     user: "65532:65532"
     read_only: true

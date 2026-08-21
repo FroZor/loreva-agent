@@ -107,3 +107,38 @@ func TestExpiredConnectChallengeIsRecoverable(t *testing.T) {
 		t.Fatalf("expired challenge error = %v, want challenge.ErrExpired", err)
 	}
 }
+
+func TestMalformedRenewalResponseIsEndpointScoped(t *testing.T) {
+	runner := &Runner{masterEndpoint: "wss://master.example/agent/v1/connect"}
+	gateway := "wss://gateway.example/agent/v1/connect"
+
+	gatewayErr := runner.handleRenewalResponse(nil, gateway, nil, []byte(`{`))
+	if _, ok := errors.AsType[*endpointPolicyError](gatewayErr); !ok {
+		t.Fatalf("gateway renewal error = %T, want endpointPolicyError", gatewayErr)
+	}
+	if IsTerminal(gatewayErr) {
+		t.Fatal("gateway renewal error became globally terminal")
+	}
+
+	masterErr := runner.handleRenewalResponse(nil, runner.masterEndpoint, nil, []byte(`{`))
+	if !IsTerminal(masterErr) {
+		t.Fatalf("master renewal error was not terminal: %v", masterErr)
+	}
+}
+
+func TestDrainDoesNotUseImmediateReconnectReset(t *testing.T) {
+	client, _ := newWebSocketPair(t)
+	runner := &Runner{masterEndpoint: "wss://master.example/agent/v1/connect"}
+
+	err := runner.handleDrain(
+		client,
+		runner.masterEndpoint,
+		[]byte(`{"type":"drain"}`),
+	)
+	if !errors.Is(err, errDrainRequested) {
+		t.Fatalf("drain error = %v, want errDrainRequested", err)
+	}
+	if errors.Is(err, errReconnectRequested) {
+		t.Fatal("drain reused the immediate reconnect path")
+	}
+}

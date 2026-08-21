@@ -52,3 +52,43 @@ func TestMessageTypeRequiresType(t *testing.T) {
 		t.Fatal("MessageType() accepted a message without type")
 	}
 }
+
+func TestDecodeStrictNodeReports(t *testing.T) {
+	var specifications NodeSpecificationsReport
+	if err := DecodeStrict([]byte(`{
+        "type":"node.specifications.report",
+        "schema_version":1,
+        "request_id":"2ab9d734-7434-4cdf-bca4-6ce7a46cdd65",
+        "observed_at":"2030-01-02T03:04:05Z",
+        "observation_scope":"host",
+        "specifications":{
+            "system":{"hostname":"node-a","architecture":"amd64","os":{"type":"linux"}},
+            "cpu":{"architecture":"amd64","physical_core_count":2,"logical_processor_count":4,"packages":[],"numa_nodes":[],"logical_processors":[]},
+            "memory":{"total_bytes":1024,"modules":[]},
+            "gpus":[],"storage_devices":[],"network_interfaces":[]
+        }
+    }`), &specifications); err != nil {
+		t.Fatal(err)
+	}
+	if specifications.Type != NodeSpecificationsReportType || specifications.SchemaVersion != 1 {
+		t.Fatalf("unexpected specifications report: %#v", specifications)
+	}
+
+	var network NodeNetworkReport
+	if err := DecodeStrict([]byte(`{
+        "type":"node.network.report",
+        "schema_version":1,
+        "request_id":"2ab9d734-7434-4cdf-bca4-6ce7a46cdd65",
+        "observed_at":"2030-01-02T03:04:05Z",
+        "observation_scope":"host",
+        "network":{
+            "interfaces":[],"routes":[],"listening_ports":[],
+            "firewall":{"status":"inactive","providers":[],"rules":[],"truncated":false}
+        }
+    }`), &network); err != nil {
+		t.Fatal(err)
+	}
+	if network.Type != NodeNetworkReportType || network.SchemaVersion != 1 {
+		t.Fatalf("unexpected network report: %#v", network)
+	}
+}

@@ -19,17 +19,10 @@ func exchangeEnrollment(
 	ctx context.Context,
 	conn *websocket.Conn,
 	options Options,
+	portalChallenge protocol.Challenge,
 	pending *state.PendingEnrollment,
 	material *agentcrypto.KeyMaterial,
 ) (*state.Identity, error) {
-	var portalChallenge protocol.Challenge
-	if err := wsframe.ReadJSON(ctx, conn, &portalChallenge); err != nil {
-		return nil, fmt.Errorf("read enrollment challenge: %w", err)
-	}
-	if err := challenge.Validate(portalChallenge, protocol.EnrollmentChallenge, ""); err != nil {
-		return nil, err
-	}
-
 	proof, err := agentcrypto.EnrollmentPoP(
 		material,
 		portalChallenge.PortalID,
@@ -64,6 +57,18 @@ func exchangeEnrollment(
 	}
 
 	return validateAccepted(options, portalChallenge, pending, material, accepted)
+}
+
+func readEnrollmentChallenge(ctx context.Context, conn *websocket.Conn) (protocol.Challenge, error) {
+	var portalChallenge protocol.Challenge
+	if err := wsframe.ReadJSON(ctx, conn, &portalChallenge); err != nil {
+		return protocol.Challenge{}, fmt.Errorf("read enrollment challenge: %w", err)
+	}
+	if err := challenge.Validate(portalChallenge, protocol.EnrollmentChallenge, ""); err != nil {
+		return protocol.Challenge{}, err
+	}
+
+	return portalChallenge, nil
 }
 
 func readEnrollmentResult(ctx context.Context, conn *websocket.Conn) (protocol.EnrollmentAccepted, error) {

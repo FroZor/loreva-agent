@@ -19,7 +19,7 @@ import (
 
 const handshakeTimeout = 30 * time.Second
 
-func (r *Runner) runEndpoint(ctx context.Context, endpoint string, onConnected func(string)) (resultErr error) {
+func (r *Runner) runEndpoint(ctx context.Context, endpoint string, events Events) (resultErr error) {
 	dialer, err := connectivity.NewDialer(connectivity.Config{
 		PortalCAPEM:        r.identity.PortalCAPEM,
 		ClientCertificate:  &r.clientCertificate,
@@ -47,7 +47,10 @@ func (r *Runner) runEndpoint(ctx context.Context, endpoint string, onConnected f
 		closeErr = fmt.Errorf("close WebSocket connection for %q: %w", endpoint, closeErr)
 
 		if connected, ok := errors.AsType[*connectedError](resultErr); ok {
-			resultErr = &connectedError{Err: errors.Join(connected.Err, closeErr)}
+			resultErr = &connectedError{
+				Err:    errors.Join(connected.Err, closeErr),
+				Stable: connected.Stable,
+			}
 			return
 		}
 
@@ -83,11 +86,14 @@ func (r *Runner) runEndpoint(ctx context.Context, endpoint string, onConnected f
 
 	cancel()
 
-	if onConnected != nil {
-		onConnected(endpoint)
+	if events.Connected != nil {
+		events.Connected(endpoint)
 	}
 
-	return &connectedError{Err: r.maintain(ctx, conn, portalChallenge.Nonce, endpoint)}
+	heartbeatHealthy := false
+	maintainErr := r.maintain(ctx, conn, portalChallenge.Nonce, endpoint, events, &heartbeatHealthy)
+
+	return &connectedError{Err: maintainErr, Stable: heartbeatHealthy}
 }
 
 func (r *Runner) classifyDialError(endpoint string, response *http.Response, err error) error {

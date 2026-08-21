@@ -14,25 +14,77 @@ func loadOrCreatePending(
 	store *state.Store,
 	options Options,
 	portalEndpoint string,
+	portalID string,
 	tokenID string,
 ) (*state.PendingEnrollment, *agentcrypto.KeyMaterial, error) {
 	pending, err := store.LoadPending()
 	if err == nil {
-		if pending.PortalEndpoint != portalEndpoint ||
-			pending.EnrollmentTokenID != tokenID {
-			return nil, nil, errors.New("pending enrollment belongs to another portal or token; explicitly reset pending state to continue")
-		}
-
 		material, err := agentcrypto.Restore(pending.ECDSAPrivateKey, pending.CSR, pending.MLDSASeed)
 		if err != nil {
 			return nil, nil, fmt.Errorf("restore pending enrollment: %w", err)
 		}
 
-		return pending, material, nil
+		samePortal := pending.PortalEndpoint == portalEndpoint &&
+			(pending.PortalID == "" || pending.PortalID == portalID)
+		if samePortal {
+			if pending.PortalEndpoint == portalEndpoint &&
+				pending.PortalID == portalID &&
+				pending.EnrollmentTokenID == tokenID {
+				return pending, material, nil
+			}
+
+			updated := *pending
+			updated.PortalEndpoint = portalEndpoint
+			updated.PortalID = portalID
+			updated.EnrollmentTokenID = tokenID
+			if err := store.ReplacePending(&updated); err != nil {
+				return nil, nil, fmt.Errorf("update pending enrollment binding: %w", err)
+			}
+
+			return &updated, material, nil
+		}
+
+		return replacePending(store, options, portalEndpoint, portalID, tokenID)
 	}
 	if !errors.Is(err, state.ErrNotFound) {
 		return nil, nil, fmt.Errorf("load pending enrollment: %w", err)
 	}
+
+	pending, material, err := newPending(options, portalEndpoint, portalID, tokenID)
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := store.SavePending(pending); err != nil {
+		return nil, nil, fmt.Errorf("persist pending enrollment: %w", err)
+	}
+
+	return pending, material, nil
+}
+
+func replacePending(
+	store *state.Store,
+	options Options,
+	portalEndpoint string,
+	portalID string,
+	tokenID string,
+) (*state.PendingEnrollment, *agentcrypto.KeyMaterial, error) {
+	pending, material, err := newPending(options, portalEndpoint, portalID, tokenID)
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := store.ReplacePending(pending); err != nil {
+		return nil, nil, fmt.Errorf("replace pending enrollment: %w", err)
+	}
+
+	return pending, material, nil
+}
+
+func newPending(
+	options Options,
+	portalEndpoint string,
+	portalID string,
+	tokenID string,
+) (*state.PendingEnrollment, *agentcrypto.KeyMaterial, error) {
 
 	material, err := agentcrypto.Generate(options.Hostname)
 	if err != nil {
@@ -49,18 +101,15 @@ func loadOrCreatePending(
 		return nil, nil, err
 	}
 
-	pending = &state.PendingEnrollment{
+	pending := &state.PendingEnrollment{
 		PortalEndpoint:    portalEndpoint,
+		PortalID:          portalID,
 		EnrollmentTokenID: tokenID,
 		RequestID:         requestID,
 		ECDSAPrivateKey:   privateKey,
 		CSR:               material.CSRPEM,
 		MLDSASeed:         material.SeedBase64(),
 	}
-	if err := store.SavePending(pending); err != nil {
-		return nil, nil, fmt.Errorf("persist pending enrollment: %w", err)
-	}
-
 	return pending, material, nil
 }
 

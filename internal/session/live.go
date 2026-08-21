@@ -19,7 +19,10 @@ const (
 	pongTimeout  = 10 * time.Second
 )
 
-var errReconnectRequested = errors.New("portal requested reconnect")
+var (
+	errReconnectRequested = errors.New("portal requested reconnect")
+	errDrainRequested     = errors.New("portal requested drain")
+)
 
 type readResult struct {
 	data []byte
@@ -30,9 +33,19 @@ type liveState struct {
 	renewal           *activeRenewal
 	renewReplyTimer   *time.Timer
 	sourceExpiryTimer *time.Timer
+	reports           *nodeReporter
+	reportReplyTimer  *time.Timer
+	reportRetryTimer  *time.Timer
 }
 
-func (r *Runner) maintain(ctx context.Context, conn *websocket.Conn, sessionNonce, endpoint string) error {
+func (r *Runner) maintain(
+	ctx context.Context,
+	conn *websocket.Conn,
+	sessionNonce string,
+	endpoint string,
+	events Events,
+	heartbeatHealthy *bool,
+) error {
 	readCtx, cancelRead := context.WithCancel(ctx)
 	defer cancelRead()
 
@@ -52,6 +65,12 @@ func (r *Runner) maintain(ctx context.Context, conn *websocket.Conn, sessionNonc
 	renewReplyTimer := newStoppedTimer()
 	defer renewReplyTimer.Stop()
 
+	reportReplyTimer := newStoppedTimer()
+	defer reportReplyTimer.Stop()
+
+	reportRetryTimer := newStoppedTimer()
+	defer reportRetryTimer.Stop()
+
 	sourceExpiryTimer, sourceExpiry := r.newSourceExpiryTimer(endpoint)
 	if sourceExpiryTimer != nil {
 		defer sourceExpiryTimer.Stop()
@@ -60,6 +79,9 @@ func (r *Runner) maintain(ctx context.Context, conn *websocket.Conn, sessionNonc
 	live := liveState{
 		renewReplyTimer:   renewReplyTimer,
 		sourceExpiryTimer: sourceExpiryTimer,
+		reports:           newNodeReporter(readCtx, r.collectors, &r.reports),
+		reportReplyTimer:  reportReplyTimer,
+		reportRetryTimer:  reportRetryTimer,
 	}
 
 	for {
@@ -72,9 +94,27 @@ func (r *Runner) maintain(ctx context.Context, conn *websocket.Conn, sessionNonc
 				return result.err
 			}
 
-			if err := r.handleWorkingMessage(conn, endpoint, result.data, &live); err != nil {
+			if err := r.handleWorkingMessage(readCtx, conn, endpoint, result.data, &live, events); err != nil {
 				return err
 			}
+		case report := <-live.reports.results:
+			if err := live.reports.writeResult(readCtx, conn, report); err != nil {
+				return err
+			}
+
+			reportReplyTimer.Reset(nodeReportReplyTimeout)
+		case <-reportReplyTimer.C:
+			r.scheduleNodeReportRetry(&live, events, "ack_timeout")
+		case <-reportRetryTimer.C:
+			active := live.reports.state.active
+			if active == nil {
+				return errors.New("node report retry fired without an active report")
+			}
+			if err := live.reports.writeActive(readCtx, conn, active.kind); err != nil {
+				return err
+			}
+
+			reportReplyTimer.Reset(nodeReportReplyTimeout)
 		case <-renewTimer.C:
 			if live.renewal != nil {
 				return &permanentError{Err: errors.New("renewal timer fired while a request is pending")}
@@ -96,6 +136,7 @@ func (r *Runner) maintain(ctx context.Context, conn *websocket.Conn, sessionNonc
 				return err
 			}
 
+			*heartbeatHealthy = true
 			pingTimer.Reset(nextPingDelay())
 		}
 	}
@@ -134,10 +175,12 @@ func sendReadResult(ctx context.Context, results chan<- readResult, result readR
 }
 
 func (r *Runner) handleWorkingMessage(
+	ctx context.Context,
 	conn *websocket.Conn,
 	endpoint string,
 	data []byte,
 	live *liveState,
+	events Events,
 ) error {
 	messageType, err := protocol.MessageType(data)
 	if err != nil {
@@ -145,6 +188,45 @@ func (r *Runner) handleWorkingMessage(
 	}
 
 	switch messageType {
+	case protocol.NodeSpecificationsAcceptedType,
+		protocol.NodeSpecificationsRejectedType,
+		protocol.NodeNetworkAcceptedType,
+		protocol.NodeNetworkRejectedType:
+		reportType := live.reports.activeType()
+		if err := live.reports.handleResponse(ctx, data); err != nil {
+			if errors.Is(err, errDuplicateNodeReportAcknowledgement) {
+				return nil
+			}
+
+			rejection, ok := errors.AsType[*nodeReportRejection](err)
+			if !ok {
+				return err
+			}
+
+			stopTimer(live.reportReplyTimer)
+			stopTimer(live.reportRetryTimer)
+
+			if identityNodeReportRejection(rejection.code) {
+				return r.endpointFailure(endpoint, rejection)
+			}
+			if !terminalNodeReportRejection(rejection.code) {
+				r.scheduleNodeReportRetry(live, events, rejection.code)
+				return nil
+			}
+
+			live.reports.skip(ctx)
+			notifyNodeReportRejection(events, NodeReportRejection{
+				Type: reportType,
+				Code: rejection.code,
+			})
+
+			return nil
+		}
+
+		stopTimer(live.reportReplyTimer)
+		stopTimer(live.reportRetryTimer)
+
+		return nil
 	case protocol.SourcesUpdateType:
 		return r.handleSourcesUpdate(conn, endpoint, data, live.sourceExpiryTimer)
 	case protocol.DrainType:
@@ -156,9 +238,28 @@ func (r *Runner) handleWorkingMessage(
 
 		stopTimer(live.renewReplyTimer)
 
-		return r.handleRenewalResponse(conn, live.renewal, data)
+		return r.handleRenewalResponse(conn, endpoint, live.renewal, data)
 	default:
 		return r.endpointFailure(endpoint, fmt.Errorf("unsupported working message type %q", messageType))
+	}
+}
+
+func (r *Runner) scheduleNodeReportRetry(live *liveState, events Events, code string) {
+	delay := live.reports.retryDelay()
+	stopTimer(live.reportRetryTimer)
+	live.reportRetryTimer.Reset(delay)
+
+	notifyNodeReportRejection(events, NodeReportRejection{
+		Type:      live.reports.activeType(),
+		Code:      code,
+		RetryIn:   delay,
+		Retryable: true,
+	})
+}
+
+func notifyNodeReportRejection(events Events, rejection NodeReportRejection) {
+	if events.ReportRejected != nil {
+		events.ReportRejected(rejection)
 	}
 }
 
@@ -198,7 +299,7 @@ func (r *Runner) handleDrain(conn *websocket.Conn, endpoint string, data []byte)
 
 	_ = conn.Close(websocket.StatusNormalClosure, "portal drain")
 
-	return errReconnectRequested
+	return errDrainRequested
 }
 
 func (r *Runner) startRenewal(ctx context.Context, conn *websocket.Conn, sessionNonce string) (*activeRenewal, error) {

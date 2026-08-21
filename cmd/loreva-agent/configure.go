@@ -36,7 +36,7 @@ func runConfigure(arguments []string, logger *slog.Logger) error {
 		bootstrap.StateDir = *stateDir
 	}
 
-	return enrollBootstrap(bootstrap, *resetPending, logger)
+	return enrollBootstrap(bootstrap, *resetPending, logger, os.Stdout)
 }
 
 func loadPortalBootstrap(encoded string) (*config.Bootstrap, error) {

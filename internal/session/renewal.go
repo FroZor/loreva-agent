@@ -105,37 +105,42 @@ func (r *Runner) loadOrCreateRenewal() (*state.PendingRenewal, *agentcrypto.KeyM
 	return pending, material, nil
 }
 
-func (r *Runner) handleRenewalResponse(conn *websocket.Conn, renewal *activeRenewal, message []byte) error {
+func (r *Runner) handleRenewalResponse(
+	conn *websocket.Conn,
+	endpoint string,
+	renewal *activeRenewal,
+	message []byte,
+) error {
 	messageType, err := protocol.MessageType(message)
 	if err != nil {
-		return &permanentError{Err: errors.New("renewal result is not valid JSON")}
+		return r.endpointFailure(endpoint, errors.New("renewal result is not valid JSON"))
 	}
 
 	if messageType == protocol.RenewRejectedType {
 		var rejected protocol.Rejected
 		if err := protocol.DecodeStrict(message, &rejected); err != nil {
-			return &permanentError{Err: err}
+			return r.endpointFailure(endpoint, err)
 		}
 
 		rejection := &rejectedError{Code: rejected.Code, Message: rejected.Message}
 		if terminalRejection(rejected.Code) {
-			return &permanentError{Err: rejection}
+			return r.endpointFailure(endpoint, rejection)
 		}
 
 		return rejection
 	}
 	if messageType != protocol.RenewAcceptedType {
-		return &permanentError{Err: fmt.Errorf("unexpected renewal result type %q", messageType)}
+		return r.endpointFailure(endpoint, fmt.Errorf("unexpected renewal result type %q", messageType))
 	}
 
 	var accepted protocol.RenewAccepted
 	if err := protocol.DecodeStrict(message, &accepted); err != nil {
-		return &permanentError{Err: err}
+		return r.endpointFailure(endpoint, err)
 	}
 
 	replacement, err := identity.ValidateRenewal(r.identity, renewal.pending, renewal.material, accepted)
 	if err != nil {
-		return &permanentError{Err: fmt.Errorf("validate renewed identity: %w", err)}
+		return r.endpointFailure(endpoint, fmt.Errorf("validate renewed identity: %w", err))
 	}
 
 	if err := r.store.ReplaceIdentity(replacement); err != nil {

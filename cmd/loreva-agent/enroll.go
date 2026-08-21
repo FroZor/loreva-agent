@@ -83,23 +83,12 @@ func runEnroll(arguments []string, logger *slog.Logger) error {
 		bootstrap.StateDir = *stateDir
 	}
 
-	return enrollBootstrap(bootstrap, *resetPending, logger)
+	return enrollBootstrap(bootstrap, *resetPending, logger, os.Stdout)
 }
 
-func enrollBootstrap(bootstrap *config.Bootstrap, resetPending bool, logger *slog.Logger) error {
+func enrollBootstrap(bootstrap *config.Bootstrap, resetPending bool, logger *slog.Logger, output io.Writer) error {
 	if bootstrap == nil {
 		return errors.New("bootstrap config is required")
-	}
-
-	if resetPending {
-		store, err := state.New(bootstrap.StateDir)
-		if err != nil {
-			return err
-		}
-
-		if err := store.ClearPending(); err != nil {
-			return err
-		}
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -112,6 +101,7 @@ func enrollBootstrap(bootstrap *config.Bootstrap, resetPending bool, logger *slo
 		StateDir:           bootstrap.StateDir,
 		Version:            version,
 		AllowDevelopmentWS: bootstrap.AllowDevelopmentWS,
+		ResetPending:       resetPending,
 		OnRetry: func(err error, delay time.Duration) {
 			logger.Warn("agent enrollment retry", "error", err, "retry_in", delay.String())
 		},
@@ -128,7 +118,22 @@ func enrollBootstrap(bootstrap *config.Bootstrap, resetPending bool, logger *slo
 		return err
 	}
 
-	logger.Info("agent enrollment completed", "node_id", identity.NodeID, "state_dir", store.Dir())
+	if output == nil {
+		logger.Info("agent enrollment completed", "node_id", identity.NodeID, "state_dir", store.Dir())
+		return nil
+	}
+
+	if err := writeEnrollmentResult(output, identity.NodeID); err != nil {
+		logger.Warn("write enrollment result", "error", err)
+	}
+
+	return nil
+}
+
+func writeEnrollmentResult(output io.Writer, nodeID string) error {
+	if _, err := fmt.Fprintf(output, "Loreva Agent enrolled successfully.\nNode ID: %s\n", nodeID); err != nil {
+		return fmt.Errorf("write enrollment result: %w", err)
+	}
 
 	return nil
 }
