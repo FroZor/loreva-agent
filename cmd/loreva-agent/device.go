@@ -58,10 +58,6 @@ func runDevicePair(ctx context.Context, arguments []string) error {
 	if *credentialsPath == "" {
 		return errors.New("--credentials is required")
 	}
-	if _, err := os.Lstat(*credentialsPath); !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("credentials file %s already exists", *credentialsPath)
-	}
-
 	deviceName := *name
 	if deviceName == "" {
 		hostname, err := os.Hostname()
@@ -81,6 +77,11 @@ func runDevicePair(ctx context.Context, arguments []string) error {
 		return err
 	}
 
+	file, err := client.CreateCredentials(*credentialsPath)
+	if err != nil {
+		return err
+	}
+
 	credentials, err := client.Pair(ctx, invite, client.PairOptions{
 		DeviceName: deviceName,
 		ShowSAS: func(sas string) {
@@ -88,10 +89,10 @@ func runDevicePair(ctx context.Context, arguments []string) error {
 		},
 	})
 	if err != nil {
-		return err
+		return errors.Join(err, file.Discard())
 	}
 
-	if err := client.SaveCredentials(*credentialsPath, credentials); err != nil {
+	if err := file.Write(credentials); err != nil {
 		return err
 	}
 

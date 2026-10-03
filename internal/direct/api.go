@@ -27,7 +27,10 @@ const (
 	peerRemovalDelay = time.Second
 )
 
-var errForbidden = newAPIError(http.StatusForbidden, "forbidden", "this peer may not call this endpoint")
+var (
+	errForbidden   = newAPIError(http.StatusForbidden, "forbidden", "this peer may not call this endpoint")
+	errUnavailable = newAPIError(http.StatusServiceUnavailable, "unavailable", "the node is busy or shutting down; retry later")
+)
 
 // apiError is an error with a stable code that the API returns as is.
 type apiError struct {
@@ -55,6 +58,34 @@ type api struct {
 	registry *registry
 	tunnel   *tunnel.Tunnel
 	logger   *slog.Logger
+
+	// Each collector runs at most once at a time, so paired devices cannot
+	// pile up expensive snapshot collections.
+	specificationsSlot chan struct{}
+	networkSlot        chan struct{}
+}
+
+func newAPI(node *localNode, options Options, pending *pairings, devices *registry, tun *tunnel.Tunnel) *api {
+	return &api{
+		node:               node,
+		options:            options,
+		pairings:           pending,
+		registry:           devices,
+		tunnel:             tun,
+		logger:             options.Logger,
+		specificationsSlot: make(chan struct{}, 1),
+		networkSlot:        make(chan struct{}, 1),
+	}
+}
+
+// acquire waits for a collector slot; release it by receiving from slot.
+func acquire(ctx context.Context, slot chan struct{}) error {
+	select {
+	case slot <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return errUnavailable
+	}
 }
 
 func (a *api) handler() http.Handler {
@@ -175,6 +206,11 @@ func (a *api) getSpecifications(w http.ResponseWriter, r *http.Request) error {
 	ctx, cancel := context.WithTimeout(r.Context(), collectorTimeout)
 	defer cancel()
 
+	if err := acquire(ctx, a.specificationsSlot); err != nil {
+		return err
+	}
+	defer func() { <-a.specificationsSlot }()
+
 	snapshot, err := a.options.Collectors.Specifications(ctx)
 	if err != nil {
 		return err
@@ -190,6 +226,11 @@ func (a *api) getSpecifications(w http.ResponseWriter, r *http.Request) error {
 func (a *api) getNetwork(w http.ResponseWriter, r *http.Request) error {
 	ctx, cancel := context.WithTimeout(r.Context(), collectorTimeout)
 	defer cancel()
+
+	if err := acquire(ctx, a.networkSlot); err != nil {
+		return err
+	}
+	defer func() { <-a.networkSlot }()
 
 	snapshot, err := a.options.Collectors.Network(ctx)
 	if err != nil {

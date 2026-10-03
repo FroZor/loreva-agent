@@ -35,28 +35,42 @@ type Credentials struct {
 	Address       string   `json:"address"`
 }
 
-// SaveCredentials writes a new credentials file. It never overwrites one.
-func SaveCredentials(path string, credentials *Credentials) (resultErr error) {
-	data, err := json.MarshalIndent(credentials, "", "  ")
-	if err != nil {
-		return fmt.Errorf("encode credentials: %w", err)
-	}
+// CredentialsFile is a new credentials file, created before pairing so a
+// path problem is found before the node registers the device.
+type CredentialsFile struct {
+	file *os.File
+}
 
+// CreateCredentials creates path with mode 0600. It never overwrites a file.
+func CreateCredentials(path string) (*CredentialsFile, error) {
 	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
-		return fmt.Errorf("create credentials file: %w", err)
-	}
-	defer func() {
-		if err := file.Close(); err != nil {
-			resultErr = errors.Join(resultErr, fmt.Errorf("close credentials file: %w", err))
-		}
-	}()
-
-	if _, err := file.Write(append(data, '\n')); err != nil {
-		return fmt.Errorf("write credentials file: %w", err)
+		return nil, fmt.Errorf("create credentials file: %w", err)
 	}
 
-	return file.Sync()
+	return &CredentialsFile{file: file}, nil
+}
+
+// Write stores credentials, syncs, and closes the file.
+func (f *CredentialsFile) Write(credentials *Credentials) error {
+	data, err := json.MarshalIndent(credentials, "", "  ")
+	if err != nil {
+		return errors.Join(fmt.Errorf("encode credentials: %w", err), f.file.Close())
+	}
+
+	if _, err := f.file.Write(append(data, '\n')); err != nil {
+		return errors.Join(fmt.Errorf("write credentials file: %w", err), f.file.Close())
+	}
+	if err := f.file.Sync(); err != nil {
+		return errors.Join(fmt.Errorf("sync credentials file: %w", err), f.file.Close())
+	}
+
+	return f.file.Close()
+}
+
+// Discard closes and removes a file that was never written.
+func (f *CredentialsFile) Discard() error {
+	return errors.Join(f.file.Close(), os.Remove(f.file.Name()))
 }
 
 // LoadCredentials reads a credentials file and refuses one that other users

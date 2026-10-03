@@ -303,3 +303,63 @@ func TestNoConfirmPairingAndDeviceRemoval(t *testing.T) {
 		t.Fatalf("devices after removal = %+v", devices.Devices)
 	}
 }
+
+func TestClosingInviteExpiresPendingPairing(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
+
+	node := startNode(t)
+	conn := node.dialControl(t)
+	invite := createInvite(t, conn, false)
+
+	paired := pairAsync(ctx, invite, make(chan string, 1))
+	receive(t, conn, control.TypePairingRequested)
+	if err := conn.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if result := <-paired; !errors.Is(result.err, client.ErrPairingExpired) {
+		t.Fatalf("Pair() error = %v, want expiry", result.err)
+	}
+}
+
+func TestShutdownEndsPendingPairing(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
+
+	store, err := state.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	node, err := direct.Init(store, direct.InitOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	runCtx, stop := context.WithCancel(ctx)
+	done := make(chan error, 1)
+	go func() {
+		done <- direct.Run(runCtx, store, node, direct.Options{Collectors: direct.Collectors{
+			Specifications: func(context.Context) (specifications.Snapshot, error) { return specifications.Snapshot{}, nil },
+			Network:        func(context.Context) (networkinfo.Snapshot, error) { return networkinfo.Snapshot{}, nil },
+		}})
+	}()
+
+	conn := (&testNode{node: node, stateDir: store.Dir()}).dialControl(t)
+	invite := createInvite(t, conn, false)
+	paired := pairAsync(ctx, invite, make(chan string, 1))
+	receive(t, conn, control.TypePairingRequested)
+
+	started := time.Now()
+	stop()
+	if err := <-done; err != nil {
+		t.Fatalf("Run() error = %v, want clean shutdown", err)
+	}
+	if elapsed := time.Since(started); elapsed > 4*time.Second {
+		t.Fatalf("shutdown took %s", elapsed)
+	}
+
+	// The device only sees its own timeout once the node is gone.
+	cancel()
+	<-paired
+}

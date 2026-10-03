@@ -42,7 +42,9 @@ type inviteSession struct {
 	events    chan control.Message
 	timer     *time.Timer
 	pairing   *pairingSession
-	done      bool
+	// graceUntil is when the temporary peer may go after a decision.
+	graceUntil time.Time
+	done       bool
 }
 
 type pairingSession struct {
@@ -322,7 +324,7 @@ func (p *pairings) status(ctx context.Context, from netip.Addr, pairingID string
 		case <-changed:
 		case <-wait.C:
 		case <-ctx.Done():
-			return agentapi.PairingStatus{}, ctx.Err()
+			return agentapi.PairingStatus{}, errUnavailable
 		}
 	}
 
@@ -411,10 +413,13 @@ func (p *pairings) finishLocked(session *inviteSession, status string) {
 		p.notifyLocked(session, control.Message{Type: control.TypeInviteExpired})
 	}
 
+	session.graceUntil = time.Now().Add(decisionGrace)
 	session.timer.Reset(decisionGrace)
 }
 
-// expire ends an invite when its lifetime or grace period runs out.
+// expire ends an invite when its lifetime or grace period runs out. A
+// pending pairing first becomes expired and keeps the peer for the grace
+// period, so the device learns the result instead of timing out.
 func (p *pairings) expire(session *inviteSession) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -423,13 +428,17 @@ func (p *pairings) expire(session *inviteSession) {
 		return
 	}
 
-	if session.pairing == nil {
+	switch {
+	case session.pairing == nil:
 		p.notifyLocked(session, control.Message{Type: control.TypeInviteExpired})
-	} else if session.pairing.status == agentapi.PairingPending {
+		p.removeLocked(session)
+	case session.pairing.status == agentapi.PairingPending:
 		p.finishLocked(session, agentapi.PairingExpired)
+	case time.Now().Before(session.graceUntil):
+		// A decision re-armed the timer while this call waited for the lock.
+	default:
+		p.removeLocked(session)
 	}
-
-	p.removeLocked(session)
 }
 
 // cancel ends an invite whose CLI connection closed. A decided pairing keeps
@@ -441,15 +450,13 @@ func (p *pairings) cancel(session *inviteSession) {
 	if session.done {
 		return
 	}
-	if session.pairing != nil && session.pairing.status != agentapi.PairingPending {
-		return
-	}
 
-	if session.pairing != nil {
+	switch {
+	case session.pairing == nil:
+		p.removeLocked(session)
+	case session.pairing.status == agentapi.PairingPending:
 		p.finishLocked(session, agentapi.PairingExpired)
 	}
-
-	p.removeLocked(session)
 }
 
 // closeAll ends every invite when the server stops.

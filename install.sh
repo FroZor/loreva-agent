@@ -180,26 +180,28 @@ EOF
 	systemctl daemon-reload
 	systemctl enable "$service_name" >/dev/null
 
-	if [ -e "${state_dir}/identity.json" ] || [ -e "${state_dir}/node.json" ]; then
-		systemctl restart "$service_name"
-		printf 'Loreva Agent installed and started.\n'
-		if [ -e "${state_dir}/node.json" ]; then
-			printf 'Run "sudo loreva-agent invite" to connect a device.\n'
-		fi
-		return
-	fi
-
-	if [ "$mode" = "portal" ]; then
+	if [ "$mode" = "portal" ] && [ ! -e "${state_dir}/identity.json" ]; then
 		enroll_and_start_service \
 			"$service_name" \
 			"$service_user" \
 			"$state_dir" \
 			"$config_path"
-	else
+		return
+	fi
+
+	if [ "$mode" = "standalone" ] && [ ! -e "${state_dir}/node.json" ] && [ ! -e "${state_dir}/identity.json" ]; then
 		init_and_start_service \
 			"$service_name" \
 			"$service_user" \
 			"$state_dir"
+		return
+	fi
+
+	# Upgrade: keep the existing setup and never add a mode on its own.
+	systemctl restart "$service_name"
+	printf 'Loreva Agent installed and restarted.\n'
+	if [ -e "${state_dir}/node.json" ]; then
+		printf 'Run "sudo loreva-agent invite" to connect a device.\n'
 	fi
 }
 
@@ -254,7 +256,7 @@ enroll_and_start_service() {
 			"$install_path" configure --bootstrap - --state-dir "$state_dir"
 	fi
 
-	systemctl start "$service_name"
+	systemctl restart "$service_name"
 	printf 'Loreva Agent installed, enrolled, and started.\n'
 }
 

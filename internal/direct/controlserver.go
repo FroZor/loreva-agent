@@ -20,6 +20,7 @@ type controlServer struct {
 
 	mu       sync.Mutex
 	conns    map[*control.Conn]struct{}
+	closed   bool
 	handlers sync.WaitGroup
 }
 
@@ -39,20 +40,28 @@ func (c *controlServer) serve(listener net.Listener) error {
 			continue
 		}
 
-		wrapped := control.NewConn(conn)
-		c.track(wrapped)
-		c.handlers.Go(func() { c.handle(wrapped) })
+		if !c.start(control.NewConn(conn)) {
+			_ = conn.Close()
+			return nil
+		}
 	}
 }
 
-func (c *controlServer) track(conn *control.Conn) {
+// start tracks and handles a connection unless the server is closing.
+func (c *controlServer) start(conn *control.Conn) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	if c.closed {
+		return false
+	}
 	if c.conns == nil {
 		c.conns = make(map[*control.Conn]struct{})
 	}
 	c.conns[conn] = struct{}{}
+	c.handlers.Go(func() { c.handle(conn) })
+
+	return true
 }
 
 func (c *controlServer) untrack(conn *control.Conn) {
@@ -65,6 +74,7 @@ func (c *controlServer) untrack(conn *control.Conn) {
 // closeConnections disconnects every CLI client and waits for its handler.
 func (c *controlServer) closeConnections() {
 	c.mu.Lock()
+	c.closed = true
 	for conn := range c.conns {
 		_ = conn.Close()
 	}

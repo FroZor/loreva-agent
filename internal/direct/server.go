@@ -126,7 +126,7 @@ func Run(ctx context.Context, store *state.Store, node *state.Node, options Opti
 	pending := newPairings(local, tun, devices, options.Logger)
 	defer pending.closeAll()
 
-	service := &api{node: local, options: options, pairings: pending, registry: devices, tunnel: tun, logger: options.Logger}
+	service := newAPI(local, options, pending, devices, tun)
 	controller := &controlServer{pairings: pending, api: service, logger: options.Logger}
 
 	return serve(ctx, service, apiListener, controller, controlListener, options.Logger, local)
@@ -135,8 +135,14 @@ func Run(ctx context.Context, store *state.Store, node *state.Node, options Opti
 func serve(ctx context.Context, service *api, apiListener net.Listener, controller *controlServer,
 	controlListener net.Listener, logger *slog.Logger, local *localNode,
 ) error {
+	// Requests get a context that is cancelled before shutdown, so pairing
+	// long polls end at once instead of outlasting the shutdown timeout.
+	requestCtx, cancelRequests := context.WithCancel(context.Background())
+	defer cancelRequests()
+
 	server := &http.Server{
 		Handler:           service.handler(),
+		BaseContext:       func(net.Listener) context.Context { return requestCtx },
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second,
 		WriteTimeout:      2 * collectorTimeout,
@@ -166,6 +172,7 @@ func serve(ctx context.Context, service *api, apiListener net.Listener, controll
 	case result = <-errs:
 	}
 
+	cancelRequests()
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
 
