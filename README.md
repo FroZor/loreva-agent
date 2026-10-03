@@ -9,10 +9,7 @@ The current milestone implements direct access (setup, pairing, and a read-only 
 
 Linux is the supported node platform. Windows and macOS builds are published but are not supported for nodes.
 
-Documentation:
-
-- [docs/api/openapi.yaml](docs/api/openapi.yaml): the HTTP API that the agent serves to paired devices.
-- [docs/protocol.md](docs/protocol.md): the connection key format, pairing, WireGuard settings, the local control socket, and the portal protocol.
+The HTTP API that the agent serves to paired devices is specified in [api/openapi.yaml](api/openapi.yaml). A test keeps the specification in line with the Go types in `internal/agentapi`. The connection key format and pairing are implemented in `internal/pairing`, and `internal/client` is the reference client.
 
 ## Quick start
 

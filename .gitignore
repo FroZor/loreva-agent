@@ -24,10 +24,8 @@ go.work.sum
 /renewal-pending.json
 /state/
 
-# Local documentation; the API and protocol specifications are published.
-/docs/*
-!/docs/api/
-!/docs/protocol.md
+# Local documentation
+/docs/
 
 # Editors and IDEs
 .idea/

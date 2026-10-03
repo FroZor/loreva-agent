@@ -6,8 +6,9 @@ info:
   description: |
     The agent serves this API on `http://[<node tunnel address>]:80`. The address is
     reachable only through the node's userspace WireGuard listener; the agent opens no
-    TCP port on the host. See [docs/protocol.md](../protocol.md) for the invite format,
-    the WireGuard configuration a client must use, and the pairing key agreement.
+    TCP port on the host. The connection key format and the pairing key agreement
+    (transcript, code, and PSK derivation) are defined by the reference implementation in
+    `internal/pairing`; `internal/client` shows the WireGuard settings a client must use.
 
     **Transport security.** Plain HTTP is intentional: WireGuard authenticates the node
     by its static key, authenticates each peer by its key and PSK, and encrypts every

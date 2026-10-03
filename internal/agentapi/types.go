@@ -1,5 +1,5 @@
 // Package agentapi defines the JSON documents of the HTTP API that the agent
-// serves to paired devices inside the WireGuard tunnel. docs/api/openapi.yaml
+// serves to paired devices inside the WireGuard tunnel. api/openapi.yaml
 // is the human-readable contract for the same types.
 package agentapi
 
