@@ -53,3 +53,41 @@ type Identity struct {
 	RenewAfter         time.Time        `json:"renew_after"`
 	Sources            protocol.Sources `json:"sources"`
 }
+
+// Node is the locally created identity that lets devices connect to the agent
+// directly over WireGuard, without a portal.
+type Node struct {
+	Version int    `json:"version"`
+	NodeID  string `json:"node_id"`
+	// WireGuardPrivateKey is the standard Base64 encoding of the node's
+	// Curve25519 private key.
+	WireGuardPrivateKey string `json:"wireguard_private_key"`
+	ListenPort          int    `json:"listen_port"`
+	// TunnelPrefix is the node's random unique local IPv6 /64. The node uses
+	// the first address and assigns every peer its own address from it.
+	TunnelPrefix string `json:"tunnel_prefix"`
+	// Endpoints are operator-supplied host:port values advertised in invites
+	// before the automatically detected interface addresses.
+	Endpoints []string  `json:"endpoints,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// Devices is the registry of devices paired with the local node.
+type Devices struct {
+	Version int      `json:"version"`
+	Items   []Device `json:"items"`
+}
+
+// Device is one paired client device and its WireGuard peer configuration.
+type Device struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+	// WireGuardPublicKey is the standard Base64 encoding of the device's
+	// Curve25519 public key for this node.
+	WireGuardPublicKey string `json:"wireguard_public_key"`
+	// PresharedKey is the standard Base64 encoding of the WireGuard PSK
+	// derived during pairing.
+	PresharedKey  string    `json:"preshared_key"`
+	TunnelAddress string    `json:"tunnel_address"`
+	PairedAt      time.Time `json:"paired_at"`
+}
