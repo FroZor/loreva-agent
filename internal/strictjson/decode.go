@@ -7,9 +7,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"unicode"
+	"unicode/utf8"
 )
 
 // Decode decodes exactly one JSON value, rejecting duplicate and unknown fields.
+// Keys are duplicates when they differ only by case, because encoding/json
+// matches struct fields case-insensitively and lets the last value win.
 func Decode(data []byte, target any) error {
 	if target == nil {
 		return errors.New("JSON target is nil")
@@ -65,11 +69,12 @@ func scanValue(decoder *json.Decoder) error {
 			if !ok {
 				return errors.New("JSON object key is not a string")
 			}
-			if _, exists := seen[key]; exists {
+			folded := foldKey(key)
+			if _, exists := seen[folded]; exists {
 				return fmt.Errorf("duplicate JSON field %q", key)
 			}
 
-			seen[key] = struct{}{}
+			seen[folded] = struct{}{}
 
 			if err := scanValue(decoder); err != nil {
 				return err
@@ -96,6 +101,35 @@ func scanValue(decoder *json.Decoder) error {
 	}
 
 	return nil
+}
+
+// foldKey returns the same canonical form for keys that bytes.EqualFold
+// considers equal, matching how encoding/json resolves struct field names.
+func foldKey(key string) string {
+	folded := make([]byte, 0, len(key))
+
+	for _, r := range key {
+		if r < utf8.RuneSelf {
+			folded = append(folded, byte(unicode.ToUpper(r)))
+			continue
+		}
+
+		folded = utf8.AppendRune(folded, foldRune(r))
+	}
+
+	return string(folded)
+}
+
+// foldRune returns the smallest rune of r's simple case-folding orbit.
+func foldRune(r rune) rune {
+	for {
+		next := unicode.SimpleFold(r)
+		if next <= r {
+			return next
+		}
+
+		r = next
+	}
 }
 
 func ensureEOF(decoder *json.Decoder) error {
