@@ -78,3 +78,36 @@ func signPortalCommand(t *testing.T, command protocol.WorkloadCommand) (*agentcr
 
 	return agentcrypto.PublicJWK(publicKey), signingInput + "." + encoding.EncodeToString(signature)
 }
+
+func TestDeviceCommandUsesTheNodeControllerScope(t *testing.T) {
+	nodeID := "65a1876f-a715-45fc-9ac0-e4bc31067059"
+	request := protocol.DeviceWorkloadCommand{
+		Type:          protocol.WorkloadStopRequestType,
+		SchemaVersion: protocol.WorkloadSchemaVersion,
+		RequestID:     "6e0c1d91-5145-440f-bf97-d84db4f83644",
+		WorkloadID:    "2ab9d734-7434-4cdf-bca4-6ce7a46cdd65",
+		Payload:       json.RawMessage(`{"timeout_seconds":30}`),
+	}
+
+	command, err := DeviceCommand(request, nodeID, time.Now())
+	if err != nil {
+		t.Fatalf("DeviceCommand() error = %v", err)
+	}
+	if command.PortalID != nodeID || command.NodeID != nodeID || command.SessionNonce != "" {
+		t.Fatalf("command = %+v", command)
+	}
+
+	invalid := []func(*protocol.DeviceWorkloadCommand){
+		func(r *protocol.DeviceWorkloadCommand) { r.SchemaVersion = 2 },
+		func(r *protocol.DeviceWorkloadCommand) { r.Type = protocol.WorkloadPlanResultType },
+		func(r *protocol.DeviceWorkloadCommand) { r.RequestID = "not-a-uuid" },
+		func(r *protocol.DeviceWorkloadCommand) { r.Payload = json.RawMessage("null") },
+	}
+	for index, mutate := range invalid {
+		candidate := request
+		mutate(&candidate)
+		if _, err := DeviceCommand(candidate, nodeID, time.Now()); err == nil {
+			t.Errorf("invalid request %d accepted", index)
+		}
+	}
+}

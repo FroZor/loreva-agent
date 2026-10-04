@@ -5,11 +5,11 @@ Loreva Agent runs on a Linux server (VPS, VDS, or bare metal) and lets Loreva Ap
 - **Direct access** (default): the app connects straight to the node over WireGuard, with no account and no Loreva service in between. The agent runs WireGuard in userspace, so it adds no network interface, route, or firewall rule; it opens one UDP port and no TCP port.
 - **Portal**: the agent keeps an outbound WSS connection to a public or self-hosted Loreva portal, so the node needs no inbound port at all.
 
-The current milestone implements direct access (setup, pairing, and a read-only API for node information, hardware, and network), plus portal enrollment, connectivity, gateway failover, identity renewal, system and network reporting, one-second metrics, and portal-controlled OCI, Docker Compose, Dockerfile, and Pterodactyl Egg workloads. Workload management is available in portal mode.
+Both modes speak the same protocol: node information, hardware and network reports, one-second metrics, and OCI, Docker Compose, Dockerfile, and Pterodactyl Egg workloads. They differ only in connectivity, that is, who opens the connection and how the peers authenticate. The portal mode also covers enrollment, gateway failover, and identity renewal.
 
 Linux is the supported node platform. Windows and macOS builds are published but are not supported for nodes.
 
-The HTTP API that the agent serves to paired devices is specified in [api/openapi.yaml](api/openapi.yaml). A test keeps the specification in line with the Go types in `internal/agentapi`. The connection key format and pairing are implemented in `internal/pairing`, and `internal/client` is the reference client.
+The protocol is specified in [contract/v1](contract/v1/README.md); a test keeps the JSON Schema in line with the Go types in `internal/protocol`. The connection key format and pairing are implemented in `internal/pairing`, and `internal/client` is the device side that Loreva App runs as a sidecar.
 
 ## Quick start
 
@@ -20,7 +20,7 @@ curl -fsSL https://raw.githubusercontent.com/FroZor/loreva-agent/master/install.
 chmod +x install.sh && sudo ./install.sh
 ```
 
-The installer verifies the release checksum, creates the `loreva-agent` system user, initializes the node, starts the service, and prints a single-use connection key (`loreva1:...`). Paste the key into Loreva App. When the app shows a code such as `ABCD-EFGH`, check that the server shows the same code and answer `y`.
+The installer verifies the release checksum, creates the `loreva-agent` system user, initializes the node, starts the service, and prints a single-use connection key (`loreva://connect/...`). Paste the key into Loreva App. When the app shows a code such as `ABCD-EFGH`, check that the server shows the same code and answer `y`.
 
 If inbound UDP is filtered, allow the UDP port printed by the installer. The agent never changes the firewall.
 
@@ -34,16 +34,16 @@ sudo loreva-agent devices remove ID # revoke a device
 
 `invite` also restores access when no paired device is left. A connection key expires after 15 minutes (`--ttl`, at most 1h) and works only while `invite` keeps running. If the server's public address is not on one of its interfaces (for example behind NAT), add it with `--endpoint 203.0.113.10` or set it once with `init --endpoint`.
 
-### Command-line client
+### Device side (Loreva App sidecar)
 
-The binary includes a reference client that is useful for testing and scripts:
+The binary also contains the device side of direct access. Loreva App runs it as a sidecar process and exchanges JSON lines over standard input and output, so the tunnel, pairing, and post-quantum key exchange live in the sidecar and the app opens no network port:
 
 ```sh
-loreva-agent device pair --credentials my-server.json --name laptop   # paste the connection key
-loreva-agent device call --credentials my-server.json /v1/node
+loreva-agent device pair --json --name laptop < key       # events: pairing.code, pairing.completed with credentials
+loreva-agent device connect --credentials - < frames     # first line: credentials; then one protocol frame per line
 ```
 
-The credentials file holds the device's WireGuard key and is created with mode 0600.
+For scripts, `device pair --credentials FILE` writes the credentials to a new file with mode 0600, and `device connect --credentials FILE` reads them from it.
 
 ## Requirements
 
@@ -219,6 +219,10 @@ After enrollment, run the `./cmd/loreva-agent` package from the IDE without argu
 
 | Command | Purpose |
 | --- | --- |
+| `init` | Create the node identity for direct access. |
+| `invite` | Print a single-use connection key and approve the device that uses it. |
+| `devices`, `devices remove ID` | List or revoke paired devices. |
+| `device pair`, `device connect` | Device side of direct access, run by Loreva App as a sidecar. |
 | `configure` | Enroll or safely replace the current identity using a portal-issued bootstrap. |
 | `disconnect` | Close the portal connection while preserving the identity. |
 | `connect` | Allow the agent process to restore the portal connection. |

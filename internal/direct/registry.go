@@ -138,3 +138,10 @@ func devicePeer(device state.Device) (tunnel.Peer, error) {
 
 	return tunnel.Peer{PublicKey: publicKey, PresharedKey: presharedKey, Address: address}, nil
 }
+
+func (r *registry) has(id string) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	return slices.ContainsFunc(r.devices, func(device state.Device) bool { return device.ID == id })
+}

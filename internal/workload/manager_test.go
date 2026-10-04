@@ -61,3 +61,31 @@ func mustCommandDigest(t *testing.T, command protocol.WorkloadCommand) string {
 
 	return digest
 }
+
+func TestManagerRoutesResultsToTheCommandController(t *testing.T) {
+	manager := &Manager{ctx: t.Context(), results: make(map[string]chan any)}
+	portal := manager.Results(testPortalID)
+	devices := manager.Results(testNodeID)
+
+	manager.emit(testNodeID, "device result")
+	manager.emit(testPortalID, "portal result")
+
+	if result := <-devices; result != "device result" {
+		t.Fatalf("device controller got %v", result)
+	}
+	if result := <-portal; result != "portal result" {
+		t.Fatalf("portal controller got %v", result)
+	}
+}
+
+func TestManagerDropsResultsForAFullQueue(t *testing.T) {
+	manager := &Manager{ctx: t.Context(), results: make(map[string]chan any)}
+
+	for range resultQueueCapacity + 1 {
+		manager.emit(testPortalID, "result")
+	}
+
+	if queued := len(manager.Results(testPortalID)); queued != resultQueueCapacity {
+		t.Fatalf("queued results = %d, want %d", queued, resultQueueCapacity)
+	}
+}

@@ -16,7 +16,6 @@ require (
 	go.yaml.in/yaml/v4 v4.0.0-rc.6
 	golang.org/x/term v0.45.0
 	golang.zx2c4.com/wireguard v0.0.0-20260522210424-ecfc5a8d5446
-	gopkg.in/yaml.v3 v3.0.1
 )
 
 require (

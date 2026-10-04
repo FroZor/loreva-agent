@@ -289,9 +289,8 @@ func artifactPlanBuilder(t *testing.T, artifact []byte) (planBuilder, protocol.A
 	return planBuilder{
 		stateRoot: stateRoot,
 		artifacts: artifactStore{
-			root:       filepath.Join(stateRoot, "workloads", "artifacts"),
-			baseURL:    server.URL + "/",
-			httpClient: server.Client(),
+			root:   filepath.Join(stateRoot, "workloads", "artifacts"),
+			source: portalArtifacts{baseURL: server.URL + "/", httpClient: server.Client()},
 		},
 	}, reference
 }

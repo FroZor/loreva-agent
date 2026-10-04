@@ -6,15 +6,14 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"net/http"
 	"net/netip"
 	"sync"
 	"time"
 
-	"github.com/FroZor/loreva-agent/internal/agentapi"
 	"github.com/FroZor/loreva-agent/internal/agentcrypto"
 	"github.com/FroZor/loreva-agent/internal/control"
 	"github.com/FroZor/loreva-agent/internal/pairing"
+	"github.com/FroZor/loreva-agent/internal/protocol"
 	"github.com/FroZor/loreva-agent/internal/state"
 	"github.com/FroZor/loreva-agent/internal/tunnel"
 )
@@ -190,40 +189,40 @@ func (p *pairings) isInvite(address netip.Addr) bool {
 	return found
 }
 
-// start handles POST /v1/pairing from an invite peer.
-func (p *pairings) start(from netip.Addr, request agentapi.PairingRequest) (agentapi.PairingStarted, error) {
+// start handles pairing.request from an invite peer.
+func (p *pairings) start(from netip.Addr, request protocol.PairingRequest) (protocol.PairingStarted, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
 	session := p.invites[from]
 	if session == nil {
-		return agentapi.PairingStarted{}, errForbidden
+		return protocol.PairingStarted{}, errForbidden
 	}
 	if session.pairing != nil {
-		return agentapi.PairingStarted{}, newAPIError(http.StatusConflict, "invite_used", "this invite has already been used")
+		return protocol.PairingStarted{}, newSessionError("invite_used", "this invite has already been used")
 	}
 
 	transcript, sharedSecret, err := p.transcriptLocked(session, request)
 	if err != nil {
-		return agentapi.PairingStarted{}, err
+		return protocol.PairingStarted{}, err
 	}
 
 	pairingID, err := agentcrypto.NewUUID()
 	if err != nil {
-		return agentapi.PairingStarted{}, err
+		return protocol.PairingStarted{}, err
 	}
 	deviceID, err := agentcrypto.NewUUID()
 	if err != nil {
-		return agentapi.PairingStarted{}, err
+		return protocol.PairingStarted{}, err
 	}
 	presharedKey, err := transcript.PresharedKey(sharedSecret, session.invite.PresharedKey)
 	if err != nil {
-		return agentapi.PairingStarted{}, err
+		return protocol.PairingStarted{}, err
 	}
 
 	session.pairing = &pairingSession{
 		id:     pairingID,
-		status: agentapi.PairingPending,
+		status: pairingPending,
 		sas:    transcript.SAS(),
 		device: state.Device{
 			ID:                 deviceID,
@@ -244,11 +243,12 @@ func (p *pairings) start(from netip.Addr, request agentapi.PairingRequest) (agen
 
 	if session.noConfirm {
 		if err := p.decideLocked(session, true); err != nil {
-			return agentapi.PairingStarted{}, err
+			return protocol.PairingStarted{}, err
 		}
 	}
 
-	return agentapi.PairingStarted{
+	return protocol.PairingStarted{
+		Type:            protocol.PairingStartedType,
 		PairingID:       pairingID,
 		NodeNonce:       base64.StdEncoding.EncodeToString(transcript.NodeNonce),
 		MLKEMCiphertext: base64.StdEncoding.EncodeToString(transcript.Ciphertext),
@@ -258,24 +258,24 @@ func (p *pairings) start(from netip.Addr, request agentapi.PairingRequest) (agen
 
 // transcriptLocked validates the device's commitment and completes the node
 // side of the key agreement.
-func (p *pairings) transcriptLocked(session *inviteSession, request agentapi.PairingRequest) (*pairing.Transcript, []byte, error) {
+func (p *pairings) transcriptLocked(session *inviteSession, request protocol.PairingRequest) (*pairing.Transcript, []byte, error) {
 	if err := pairing.ValidateDeviceName(request.DeviceName); err != nil {
-		return nil, nil, newAPIError(http.StatusBadRequest, "invalid_device_name", err.Error())
+		return nil, nil, newSessionError("invalid_device_name", err.Error())
 	}
 
 	devicePublicKey, err := tunnel.ParseKey(request.WireGuardPublicKey)
 	if err != nil || devicePublicKey.IsZero() || devicePublicKey == p.node.publicKey ||
 		devicePublicKey == session.peerKey || p.registry.hasPublicKey(devicePublicKey) {
-		return nil, nil, newAPIError(http.StatusBadRequest, "invalid_public_key", "wireguard_public_key must be a new 32-byte key")
+		return nil, nil, newSessionError("invalid_public_key", "wireguard_public_key must be a new 32-byte key")
 	}
 
 	encapsulationKey, err := base64.StdEncoding.Strict().DecodeString(request.MLKEMEncapsulationKey)
 	if err != nil {
-		return nil, nil, newAPIError(http.StatusBadRequest, "invalid_mlkem_key", "mlkem_encapsulation_key must be standard Base64")
+		return nil, nil, newSessionError("invalid_mlkem_key", "mlkem_encapsulation_key must be standard Base64")
 	}
 	sharedSecret, ciphertext, err := pairing.Encapsulate(encapsulationKey)
 	if err != nil {
-		return nil, nil, newAPIError(http.StatusBadRequest, "invalid_mlkem_key", "mlkem_encapsulation_key is not a valid ML-KEM-768 key")
+		return nil, nil, newSessionError("invalid_mlkem_key", "mlkem_encapsulation_key is not a valid ML-KEM-768 key")
 	}
 
 	deviceAddress, err := p.freeAddressLocked()
@@ -302,18 +302,18 @@ func (p *pairings) transcriptLocked(session *inviteSession, request agentapi.Pai
 	return transcript, sharedSecret, nil
 }
 
-// status handles GET /v1/pairing/{id}. While the pairing is pending it waits
-// up to statusWait for a decision.
-func (p *pairings) status(ctx context.Context, from netip.Addr, pairingID string) (agentapi.PairingStatus, error) {
+// status reports the pairing status and, once approved, the device ID. While
+// the pairing is pending it waits up to statusWait for a decision.
+func (p *pairings) status(ctx context.Context, from netip.Addr, pairingID string) (string, string, error) {
 	p.mu.Lock()
 	session := p.invites[from]
 	if session == nil || session.pairing == nil || session.pairing.id != pairingID {
 		p.mu.Unlock()
-		return agentapi.PairingStatus{}, newAPIError(http.StatusNotFound, "not_found", "pairing not found")
+		return "", "", newSessionError("not_found", "pairing not found")
 	}
 	current := session.pairing
 	changed := current.changed
-	pending := current.status == agentapi.PairingPending
+	pending := current.status == pairingPending
 	p.mu.Unlock()
 
 	if pending {
@@ -324,19 +324,18 @@ func (p *pairings) status(ctx context.Context, from netip.Addr, pairingID string
 		case <-changed:
 		case <-wait.C:
 		case <-ctx.Done():
-			return agentapi.PairingStatus{}, errUnavailable
+			return "", "", errUnavailable
 		}
 	}
 
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	result := agentapi.PairingStatus{Status: current.status}
-	if current.status == agentapi.PairingApproved {
-		result.DeviceID = current.device.ID
+	if current.status == protocol.PairingApproved {
+		return current.status, current.device.ID, nil
 	}
 
-	return result, nil
+	return current.status, "", nil
 }
 
 // decide applies the operator's answer from the control socket.
@@ -345,7 +344,7 @@ func (p *pairings) decide(session *inviteSession, pairingID string, approve bool
 	defer p.mu.Unlock()
 
 	if session.done || session.pairing == nil || session.pairing.id != pairingID ||
-		session.pairing.status != agentapi.PairingPending {
+		session.pairing.status != pairingPending {
 		return errors.New("no pending pairing with this ID")
 	}
 
@@ -358,17 +357,17 @@ func (p *pairings) decideLocked(session *inviteSession, approve bool) error {
 	if approve {
 		current.device.PairedAt = time.Now().UTC()
 		if err := p.addDevice(current.device); err != nil {
-			p.finishLocked(session, agentapi.PairingRejected)
+			p.finishLocked(session, protocol.PairingRejected)
 			return err
 		}
 
-		p.finishLocked(session, agentapi.PairingApproved)
+		p.finishLocked(session, protocol.PairingApproved)
 		p.logger.Info("device paired", "device_id", current.device.ID, "device_name", current.device.Name)
 
 		return nil
 	}
 
-	p.finishLocked(session, agentapi.PairingRejected)
+	p.finishLocked(session, protocol.PairingRejected)
 
 	return nil
 }
@@ -400,16 +399,16 @@ func (p *pairings) finishLocked(session *inviteSession, status string) {
 	close(current.changed)
 
 	switch status {
-	case agentapi.PairingApproved:
+	case protocol.PairingApproved:
 		p.notifyLocked(session, control.Message{
 			Type:       control.TypePairingCompleted,
 			PairingID:  current.id,
 			DeviceID:   current.device.ID,
 			DeviceName: current.device.Name,
 		})
-	case agentapi.PairingRejected:
+	case protocol.PairingRejected:
 		p.notifyLocked(session, control.Message{Type: control.TypePairingRejected, PairingID: current.id})
-	case agentapi.PairingExpired:
+	case protocol.PairingExpired:
 		p.notifyLocked(session, control.Message{Type: control.TypeInviteExpired})
 	}
 
@@ -432,8 +431,8 @@ func (p *pairings) expire(session *inviteSession) {
 	case session.pairing == nil:
 		p.notifyLocked(session, control.Message{Type: control.TypeInviteExpired})
 		p.removeLocked(session)
-	case session.pairing.status == agentapi.PairingPending:
-		p.finishLocked(session, agentapi.PairingExpired)
+	case session.pairing.status == pairingPending:
+		p.finishLocked(session, protocol.PairingExpired)
 	case time.Now().Before(session.graceUntil):
 		// A decision re-armed the timer while this call waited for the lock.
 	default:
@@ -454,8 +453,8 @@ func (p *pairings) cancel(session *inviteSession) {
 	switch {
 	case session.pairing == nil:
 		p.removeLocked(session)
-	case session.pairing.status == agentapi.PairingPending:
-		p.finishLocked(session, agentapi.PairingExpired)
+	case session.pairing.status == pairingPending:
+		p.finishLocked(session, protocol.PairingExpired)
 	}
 }
 

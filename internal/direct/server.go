@@ -11,9 +11,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/FroZor/loreva-agent/internal/agentapi"
 	"github.com/FroZor/loreva-agent/internal/control"
+	"github.com/FroZor/loreva-agent/internal/metrics"
 	"github.com/FroZor/loreva-agent/internal/networkinfo"
+	"github.com/FroZor/loreva-agent/internal/protocol"
+	"github.com/FroZor/loreva-agent/internal/session"
 	"github.com/FroZor/loreva-agent/internal/specifications"
 	"github.com/FroZor/loreva-agent/internal/state"
 	"github.com/FroZor/loreva-agent/internal/tunnel"
@@ -21,10 +23,37 @@ import (
 
 const shutdownTimeout = 5 * time.Second
 
-// Collectors provide system snapshots for the API.
+// Collectors provide system snapshots and metrics for device sessions.
 type Collectors struct {
 	Specifications func(context.Context) (specifications.Snapshot, error)
 	Network        func(context.Context) (networkinfo.Snapshot, error)
+	Metrics        func(context.Context) <-chan metrics.Sample
+}
+
+func (c Collectors) session() session.Collectors {
+	return session.Collectors{Specifications: c.Specifications, Network: c.Network, Metrics: c.Metrics}
+}
+
+// serialized runs each snapshot collector at most once at a time, so devices
+// that open many sessions cannot pile up expensive collections.
+func (c Collectors) serialized() Collectors {
+	var specificationsMu, networkMu sync.Mutex
+
+	collectSpecifications, collectNetwork := c.Specifications, c.Network
+	c.Specifications = func(ctx context.Context) (specifications.Snapshot, error) {
+		specificationsMu.Lock()
+		defer specificationsMu.Unlock()
+
+		return collectSpecifications(ctx)
+	}
+	c.Network = func(ctx context.Context) (networkinfo.Snapshot, error) {
+		networkMu.Lock()
+		defer networkMu.Unlock()
+
+		return collectNetwork(ctx)
+	}
+
+	return c
 }
 
 // Options configures the direct server.
@@ -32,7 +61,9 @@ type Options struct {
 	Version        string
 	PortalEnrolled bool
 	Collectors     Collectors
-	Logger         *slog.Logger
+	// Workloads may be nil when the node has no workload runtime.
+	Workloads session.WorkloadController
+	Logger    *slog.Logger
 }
 
 // localNode is the validated form of state.Node.
@@ -83,6 +114,7 @@ func Run(ctx context.Context, store *state.Store, node *state.Node, options Opti
 	if options.Collectors.Specifications == nil || options.Collectors.Network == nil {
 		return errors.New("direct server collectors are required")
 	}
+	options.Collectors = options.Collectors.serialized()
 
 	local, err := parseNode(node)
 	if err != nil {
@@ -114,29 +146,36 @@ func Run(ctx context.Context, store *state.Store, node *state.Node, options Opti
 	}
 	defer tun.Close()
 
-	apiListener, err := tun.ListenTCP(netip.AddrPortFrom(local.address, agentapi.Port))
+	sessionListener, err := tun.ListenTCP(netip.AddrPortFrom(local.address, protocol.DirectSessionPort))
 	if err != nil {
 		return err
 	}
 	controlListener, err := control.Listen(store.Dir())
 	if err != nil {
-		return errors.Join(err, apiListener.Close())
+		return errors.Join(err, sessionListener.Close())
 	}
 
 	pending := newPairings(local, tun, devices, options.Logger)
 	defer pending.closeAll()
 
-	service := newAPI(local, options, pending, devices, tun)
-	controller := &controlServer{pairings: pending, api: service, logger: options.Logger}
+	service := newSessions(local, options, pending, devices, tun)
+	controller := &controlServer{pairings: pending, sessions: service, logger: options.Logger}
 
-	return serve(ctx, service, apiListener, controller, controlListener, options.Logger, local)
+	if options.Workloads != nil {
+		fanOutCtx, cancel := context.WithCancel(ctx)
+		defer cancel()
+
+		go service.fanOut(fanOutCtx, options.Workloads.Results(local.id))
+	}
+
+	return serve(ctx, service, sessionListener, controller, controlListener, options.Logger, local)
 }
 
-func serve(ctx context.Context, service *api, apiListener net.Listener, controller *controlServer,
+func serve(ctx context.Context, service *sessions, sessionListener net.Listener, controller *controlServer,
 	controlListener net.Listener, logger *slog.Logger, local *localNode,
 ) error {
-	// Requests get a context that is cancelled before shutdown, so pairing
-	// long polls end at once instead of outlasting the shutdown timeout.
+	// Sessions get a context that is cancelled before shutdown, so they end at
+	// once instead of outlasting the shutdown timeout.
 	requestCtx, cancelRequests := context.WithCancel(context.Background())
 	defer cancelRequests()
 
@@ -144,8 +183,6 @@ func serve(ctx context.Context, service *api, apiListener net.Listener, controll
 		Handler:           service.handler(),
 		BaseContext:       func(net.Listener) context.Context { return requestCtx },
 		ReadHeaderTimeout: 10 * time.Second,
-		ReadTimeout:       30 * time.Second,
-		WriteTimeout:      2 * collectorTimeout,
 		IdleTimeout:       2 * time.Minute,
 		MaxHeaderBytes:    16 * 1024,
 		ErrorLog:          slog.NewLogLogger(logger.Handler(), slog.LevelDebug),
@@ -154,8 +191,8 @@ func serve(ctx context.Context, service *api, apiListener net.Listener, controll
 	errs := make(chan error, 2)
 	var workers sync.WaitGroup
 	workers.Go(func() {
-		if err := server.Serve(apiListener); !errors.Is(err, http.ErrServerClosed) {
-			errs <- fmt.Errorf("direct API stopped: %w", err)
+		if err := server.Serve(sessionListener); !errors.Is(err, http.ErrServerClosed) {
+			errs <- fmt.Errorf("direct sessions stopped: %w", err)
 		}
 	})
 	workers.Go(func() {

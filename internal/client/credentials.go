@@ -1,7 +1,7 @@
 // Package client is the device side of direct access: it pairs with a node
-// from an invite and calls the agent API through userspace WireGuard. The
-// loreva-agent device commands and the end-to-end tests use it, and it is
-// the reference for other clients such as loreva-app.
+// from an invite and opens the node protocol session through userspace
+// WireGuard. The loreva-agent device commands (the Loreva App sidecar) and
+// the end-to-end tests use it.
 package client
 
 import (
@@ -102,9 +102,18 @@ func LoadCredentials(path string) (result *Credentials, resultErr error) {
 		return nil, errors.New("credentials file is too large")
 	}
 
+	return ParseCredentials(data)
+}
+
+// ParseCredentials decodes credentials, for example from an app keychain.
+func ParseCredentials(data []byte) (*Credentials, error) {
+	if len(data) > maxCredentialsSize {
+		return nil, errors.New("credentials are too large")
+	}
+
 	var credentials Credentials
 	if err := strictjson.Decode(data, &credentials); err != nil {
-		return nil, fmt.Errorf("decode credentials file: %w", err)
+		return nil, fmt.Errorf("decode credentials: %w", err)
 	}
 	if credentials.Version != credentialsVersion {
 		return nil, fmt.Errorf("unsupported credentials version %d", credentials.Version)

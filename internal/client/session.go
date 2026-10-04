@@ -1,34 +1,39 @@
 package client
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
 	"net/netip"
-	"strconv"
 	"time"
 
-	"github.com/FroZor/loreva-agent/internal/agentapi"
+	"github.com/coder/websocket"
+
 	"github.com/FroZor/loreva-agent/internal/pairing"
+	"github.com/FroZor/loreva-agent/internal/protocol"
 	"github.com/FroZor/loreva-agent/internal/tunnel"
+	"github.com/FroZor/loreva-agent/internal/wsframe"
 )
 
 const (
 	probeTimeout      = 5 * time.Second
 	keepaliveInterval = 25
-	maxResponseSize   = 4 * 1024 * 1024
+	// maxFrameBytes bounds a frame from the node. Node reports are bounded
+	// to 512 KiB by the protocol.
+	maxFrameBytes = 1024 * 1024
 )
 
-// Session is an open tunnel to one node with an HTTP client for its API.
+// Session is an open direct session with one node: a userspace WireGuard
+// tunnel and the node protocol WebSocket inside it.
 type Session struct {
+	// Hello is the node's first frame.
+	Hello protocol.SessionHello
+
 	tunnel   *tunnel.Tunnel
-	http     *http.Client
-	baseURL  string
+	conn     *websocket.Conn
 	endpoint netip.AddrPort
 }
 
@@ -37,22 +42,32 @@ type endpointConfig struct {
 	privateKey    tunnel.Key
 	presharedKey  tunnel.Key
 	address       netip.Addr
+	nodeID        string
 	nodePublicKey tunnel.Key
 	nodeAddress   netip.Addr
 	endpoints     []netip.AddrPort
 }
 
-// Connect opens a session with the credentials saved by Pair.
+// Connect opens a device session with the credentials saved by Pair.
 func Connect(ctx context.Context, credentials *Credentials) (*Session, error) {
 	config, err := credentials.endpointConfig()
 	if err != nil {
 		return nil, err
 	}
 
-	return open(ctx, config)
+	session, err := open(ctx, config)
+	if err != nil {
+		return nil, err
+	}
+	if session.Hello.Peer != protocol.SessionPeerDevice || session.Hello.DeviceID != credentials.DeviceID {
+		session.Close()
+		return nil, errors.New("the node does not recognize this device; it may have been revoked")
+	}
+
+	return session, nil
 }
 
-// open tries each endpoint until a TCP connection to the API succeeds, which
+// open tries each endpoint until the session handshake succeeds, which
 // proves the WireGuard handshake with the node's key completed.
 func open(ctx context.Context, config endpointConfig) (*Session, error) {
 	var failures []error
@@ -84,119 +99,92 @@ func openEndpoint(ctx context.Context, config endpointConfig, endpoint netip.Add
 		return nil, err
 	}
 
-	apiAddress := netip.AddrPortFrom(config.nodeAddress, agentapi.Port).String()
+	address := netip.AddrPortFrom(config.nodeAddress, protocol.DirectSessionPort).String()
+	httpClient := &http.Client{Transport: &http.Transport{
+		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			return tun.DialContext(ctx, "tcp", address)
+		},
+	}}
 
-	probeCtx, cancel := context.WithTimeout(ctx, probeTimeout)
+	dialCtx, cancel := context.WithTimeout(ctx, probeTimeout)
 	defer cancel()
 
-	probe, err := tun.DialContext(probeCtx, "tcp", apiAddress)
+	conn, _, err := websocket.Dial(dialCtx, "ws://"+address+protocol.DirectSessionPath, &websocket.DialOptions{
+		HTTPClient:   httpClient,
+		Subprotocols: []string{protocol.DirectSessionSubprotocol},
+	})
 	if err != nil {
 		tun.Close()
 		return nil, err
 	}
-	_ = probe.Close()
+	conn.SetReadLimit(maxFrameBytes)
 
-	transport := &http.Transport{
-		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-			return tun.DialContext(ctx, "tcp", apiAddress)
-		},
-		MaxIdleConns:          2,
-		IdleConnTimeout:       30 * time.Second,
-		ResponseHeaderTimeout: 2 * time.Minute,
-	}
-
-	return &Session{
-		tunnel:   tun,
-		http:     &http.Client{Transport: transport},
-		baseURL:  "http://" + apiAddress,
-		endpoint: endpoint,
-	}, nil
-}
-
-// Close shuts the tunnel down.
-func (s *Session) Close() {
-	s.http.CloseIdleConnections()
-	s.tunnel.Close()
-}
-
-// Do sends one API request with an optional JSON body and returns the
-// response body. A non-2xx response is returned as an *APIError.
-func (s *Session) Do(ctx context.Context, method, path string, body any) ([]byte, error) {
-	var reader io.Reader
-	if body != nil {
-		data, err := json.Marshal(body)
-		if err != nil {
-			return nil, fmt.Errorf("encode request: %w", err)
-		}
-
-		reader = bytes.NewReader(data)
-	}
-
-	request, err := http.NewRequestWithContext(ctx, method, s.baseURL+path, reader)
-	if err != nil {
-		return nil, fmt.Errorf("build request: %w", err)
-	}
-	if body != nil {
-		request.Header.Set("Content-Type", "application/json")
-	}
-
-	response, err := s.http.Do(request)
-	if err != nil {
+	session := &Session{tunnel: tun, conn: conn, endpoint: endpoint}
+	if err := session.readHello(dialCtx, config.nodeID); err != nil {
+		session.Close()
 		return nil, err
 	}
-	defer response.Body.Close()
 
-	data, err := io.ReadAll(io.LimitReader(response.Body, maxResponseSize+1))
-	if err != nil {
-		return nil, fmt.Errorf("read response: %w", err)
-	}
-	if len(data) > maxResponseSize {
-		return nil, errors.New("response exceeds 4 MiB")
-	}
-	if response.StatusCode < 200 || response.StatusCode > 299 {
-		return nil, parseAPIError(response.StatusCode, data)
-	}
-
-	return data, nil
+	return session, nil
 }
 
-func (s *Session) doJSON(ctx context.Context, method, path string, body, target any) error {
-	data, err := s.Do(ctx, method, path, body)
-	if err != nil {
-		return err
+func (s *Session) readHello(ctx context.Context, nodeID string) error {
+	if s.conn.Subprotocol() != protocol.DirectSessionSubprotocol {
+		return errors.New("node did not accept the " + protocol.DirectSessionSubprotocol + " subprotocol")
 	}
-
-	if err := json.Unmarshal(data, target); err != nil {
-		return fmt.Errorf("decode %s response: %w", path, err)
+	if err := wsframe.ReadJSON(ctx, s.conn, &s.Hello); err != nil {
+		return fmt.Errorf("read session hello: %w", err)
+	}
+	if s.Hello.Type != protocol.SessionHelloType || s.Hello.Protocol != protocol.DirectSessionSubprotocol {
+		return errors.New("node sent an invalid session hello")
+	}
+	if s.Hello.NodeID != nodeID {
+		return errors.New("node ID in the session hello does not match")
 	}
 
 	return nil
 }
 
-// APIError is a non-2xx response from the agent.
-type APIError struct {
-	Status  int
+// Read returns the next frame from the node as raw JSON.
+func (s *Session) Read(ctx context.Context) ([]byte, error) {
+	return wsframe.ReadRawJSON(ctx, s.conn)
+}
+
+// Write sends one JSON frame to the node. The node validates it strictly.
+func (s *Session) Write(ctx context.Context, frame []byte) error {
+	if !json.Valid(frame) {
+		return errors.New("frame is not valid JSON")
+	}
+
+	return s.conn.Write(ctx, websocket.MessageText, frame)
+}
+
+// WriteJSON encodes value and sends it as one frame.
+func (s *Session) WriteJSON(ctx context.Context, value any) error {
+	return wsframe.WriteJSON(ctx, s.conn, value)
+}
+
+// Close ends the session and shuts the tunnel down.
+func (s *Session) Close() {
+	_ = s.conn.Close(websocket.StatusNormalClosure, "")
+	s.tunnel.Close()
+}
+
+// RemoteError is an error frame from the node.
+type RemoteError struct {
 	Code    string
 	Message string
 }
 
-func (e *APIError) Error() string {
-	return "agent API " + strconv.Itoa(e.Status) + " " + e.Code + ": " + e.Message
-}
-
-func parseAPIError(status int, data []byte) error {
-	var body agentapi.Error
-	if err := json.Unmarshal(data, &body); err != nil || body.Error.Code == "" {
-		return &APIError{Status: status, Code: "unknown", Message: http.StatusText(status)}
-	}
-
-	return &APIError{Status: status, Code: body.Error.Code, Message: body.Error.Message}
+func (e *RemoteError) Error() string {
+	return "node refused the request: " + e.Code + ": " + e.Message
 }
 
 func (c *Credentials) endpointConfig() (endpointConfig, error) {
 	var config endpointConfig
 	var err error
 
+	config.nodeID = c.NodeID
 	if config.privateKey, err = tunnel.ParseKey(c.PrivateKey); err != nil {
 		return config, fmt.Errorf("credentials private_key: %w", err)
 	}

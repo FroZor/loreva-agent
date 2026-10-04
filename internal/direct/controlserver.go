@@ -15,7 +15,7 @@ import (
 // as the connection that created it, so invite secrets never touch disk.
 type controlServer struct {
 	pairings *pairings
-	api      *api
+	sessions *sessions
 	logger   *slog.Logger
 
 	mu       sync.Mutex
@@ -141,7 +141,7 @@ func (c *controlServer) dispatch(conn *control.Conn, session **inviteSession, me
 
 	case control.TypeDevicesList:
 		devices := []control.Device{}
-		for _, device := range c.api.registry.list() {
+		for _, device := range c.sessions.registry.list() {
 			devices = append(devices, control.Device{
 				ID:                 device.ID,
 				Name:               device.Name,
@@ -154,7 +154,7 @@ func (c *controlServer) dispatch(conn *control.Conn, session **inviteSession, me
 		return control.Message{Type: control.TypeDevices, Devices: devices}, nil
 
 	case control.TypeDeviceRemove:
-		if err := c.api.revoke(message.DeviceID); err != nil {
+		if err := c.sessions.revoke(message.DeviceID, ""); err != nil {
 			return control.Message{}, err
 		}
 

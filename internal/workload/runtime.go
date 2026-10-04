@@ -75,11 +75,16 @@ func (runtime *dockerRuntime) close() error {
 
 func (runtime *dockerRuntime) execute(
 	ctx context.Context,
+	store planStore,
 	plan *storedPlan,
 	progress func(string),
 ) error {
 	operationCtx, cancel := context.WithTimeout(ctx, runtimeOperationTimeout)
 	defer cancel()
+
+	if err := runtime.ensureSameController(operationCtx, store, plan); err != nil {
+		return err
+	}
 
 	switch plan.Format {
 	case protocol.WorkloadFormatOCI:
@@ -457,4 +462,46 @@ func validateDockerEndpoint(endpoint string) error {
 	}
 
 	return errors.New("Docker endpoint must use a local socket, SSH, or verified TLS")
+}
+
+// ensureSameController refuses to execute a plan when containers or volumes
+// of its workload ID were created under another controller's plan. Resource
+// names depend only on the workload ID, so without this check a paired device
+// could recreate a portal workload, or mount its preserved volumes, by
+// reusing the workload ID, and the other way round.
+func (runtime *dockerRuntime) ensureSameController(ctx context.Context, store planStore, plan *storedPlan) error {
+	filters := make(client.Filters).Add("label", managedLabel+"=true", workloadIDLabel+"="+plan.WorkloadID)
+
+	containers, err := runtime.client.ContainerList(ctx, client.ContainerListOptions{All: true, Filters: filters})
+	if err != nil {
+		return fmt.Errorf("list managed workload containers: %w", err)
+	}
+	volumes, err := runtime.client.VolumeList(ctx, client.VolumeListOptions{Filters: filters})
+	if err != nil {
+		return fmt.Errorf("list managed workload volumes: %w", err)
+	}
+
+	digests := make(map[string]struct{})
+	for _, summary := range containers.Items {
+		digests[summary.Labels[planDigestLabel]] = struct{}{}
+	}
+	for _, volume := range volumes.Items {
+		digests[volume.Labels[planDigestLabel]] = struct{}{}
+	}
+
+	for digest := range digests {
+		if digest == plan.PlanDigest {
+			continue
+		}
+
+		owner, err := store.loadPlan(digest)
+		if err != nil {
+			return fmt.Errorf("workload %s has resources of an unknown plan: %w", plan.WorkloadID, err)
+		}
+		if owner.PortalID != plan.PortalID {
+			return errors.New("workload ID belongs to another controller")
+		}
+	}
+
+	return nil
 }

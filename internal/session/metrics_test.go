@@ -75,7 +75,7 @@ func TestMetricReporterQueuesNodeBeforeContainers(t *testing.T) {
 	state := metricState{}
 	reporter := metricReporter{state: &state}
 
-	err := reporter.enqueue(metricCollection{snapshot: metrics.Snapshot{
+	err := reporter.enqueue(metrics.Sample{Snapshot: metrics.Snapshot{
 		ObservedAt:       time.Unix(1, 0).UTC(),
 		Interval:         time.Second,
 		ObservationScope: protocol.ObservationScopeHost,
@@ -114,7 +114,7 @@ func TestMetricReporterBoundsQueueAndMarksTruncation(t *testing.T) {
 	reporter := metricReporter{state: &state}
 
 	for sequence := uint64(1); sequence <= maxQueuedMetricRequests/2+1; sequence++ {
-		if err := reporter.enqueue(metricCollection{snapshot: metrics.Snapshot{
+		if err := reporter.enqueue(metrics.Sample{Snapshot: metrics.Snapshot{
 			ObservedAt:       time.Unix(int64(sequence), 0).UTC(),
 			Interval:         time.Second,
 			ObservationScope: protocol.ObservationScopeHost,

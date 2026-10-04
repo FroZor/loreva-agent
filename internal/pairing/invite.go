@@ -17,8 +17,9 @@ import (
 )
 
 const (
-	// InvitePrefix starts every encoded invite and carries the format version.
-	InvitePrefix   = "loreva1:"
+	// InvitePrefix starts every encoded invite. It is a URI, so the operating
+	// system can open Loreva App from it; the format version is the "v" field.
+	InvitePrefix   = "loreva://connect/"
 	inviteVersion  = 1
 	maxInviteSize  = 4096
 	maxEndpoints   = 16
@@ -54,7 +55,7 @@ type inviteDocument struct {
 	ExpiresAt     time.Time `json:"expires_at"`
 }
 
-// Encode returns the printable loreva1: form of the invite.
+// Encode returns the printable loreva://connect/ form of the invite.
 func (invite *Invite) Encode() (string, error) {
 	if err := invite.validate(); err != nil {
 		return "", err
@@ -84,8 +85,8 @@ func (invite *Invite) Encode() (string, error) {
 	return InvitePrefix + base64.RawURLEncoding.EncodeToString(data), nil
 }
 
-// ParseInvite decodes and validates a loreva1: invite. It does not check
-// expiry; the node is the authority on that.
+// ParseInvite decodes and validates a loreva://connect/ invite. It does not
+// check expiry; the node is the authority on that.
 func ParseInvite(encoded string) (*Invite, error) {
 	encoded = strings.TrimSpace(encoded)
 	if len(encoded) > maxInviteSize {

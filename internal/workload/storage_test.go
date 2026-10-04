@@ -1,10 +1,16 @@
 package workload
 
 import (
+	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/FroZor/loreva-agent/internal/protocol"
 )
 
 func TestSaveImmutableJSONReplaysIdenticalValue(t *testing.T) {
@@ -63,5 +69,42 @@ func TestLoadProtectedJSONRejectsDirectory(t *testing.T) {
 	err := loadProtectedJSON(path, &value)
 	if err == nil || errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("unexpected protected JSON error: %v", err)
+	}
+}
+
+func TestArtifactStoreVerifiesUploads(t *testing.T) {
+	store := artifactStore{root: t.TempDir()}
+	content := []byte("compose artifact")
+	sum := sha256.Sum256(content)
+	reference := protocol.ArtifactReference{
+		ArtifactID: "df9ffacf-fd65-4643-967b-422b2d4c826c",
+		SHA256:     "sha256:" + hex.EncodeToString(sum[:]),
+		SizeBytes:  int64(len(content)),
+	}
+
+	if err := store.store(reference, bytes.NewReader([]byte("tampered artifact"))); err == nil {
+		t.Fatal("store accepted content that does not match the digest")
+	}
+	if err := store.store(reference, bytes.NewReader(content)); err != nil {
+		t.Fatalf("store() error = %v", err)
+	}
+	// A repeated upload of a cached artifact is still verified.
+	if err := store.store(reference, bytes.NewReader([]byte("tampered artifact"))); err == nil {
+		t.Fatal("store accepted a mismatching upload of a cached artifact")
+	}
+
+	path, err := store.acquire(t.Context(), reference)
+	if err != nil {
+		t.Fatalf("acquire() of an uploaded artifact error = %v", err)
+	}
+	if stored, err := os.ReadFile(path); err != nil || !bytes.Equal(stored, content) {
+		t.Fatalf("cached artifact = %q, %v", stored, err)
+	}
+
+	missing := reference
+	missing.ArtifactID = "6e0c1d91-5145-440f-bf97-d84db4f83644"
+	missing.SHA256 = "sha256:" + strings.Repeat("b", 64)
+	if _, err := store.acquire(t.Context(), missing); err == nil {
+		t.Fatal("acquire() without a source returned an artifact that was never uploaded")
 	}
 }

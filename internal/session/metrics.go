@@ -17,18 +17,11 @@ import (
 )
 
 const (
-	metricsInterval         = time.Second
-	metricsCollectTimeout   = 900 * time.Millisecond
 	metricsWriteTimeout     = 10 * time.Second
 	metricsReplyTimeout     = 30 * time.Second
 	maxMetricsReportSize    = 512 * 1024
 	maxQueuedMetricRequests = 120
 )
-
-type metricCollection struct {
-	snapshot metrics.Snapshot
-	err      error
-}
 
 type activeMetricReport struct {
 	requestID  string
@@ -51,8 +44,7 @@ type metricState struct {
 }
 
 type metricReporter struct {
-	collect func(context.Context) (metrics.Snapshot, error)
-	results chan metricCollection
+	results <-chan metrics.Sample
 	state   *metricState
 }
 
@@ -73,7 +65,7 @@ func (rejection *metricRejection) Error() string {
 
 func newMetricReporter(
 	ctx context.Context,
-	collect func(context.Context) (metrics.Snapshot, error),
+	subscribe func(context.Context) <-chan metrics.Sample,
 	state *metricState,
 ) (*metricReporter, error) {
 	if state.streamID == "" {
@@ -84,47 +76,20 @@ func newMetricReporter(
 		state.streamID = streamID
 	}
 
-	reporter := &metricReporter{
-		collect: collect,
-		results: make(chan metricCollection, 1),
-		state:   state,
-	}
-	if collect != nil {
-		go reporter.collectLoop(ctx)
+	reporter := &metricReporter{state: state}
+	if subscribe != nil {
+		reporter.results = subscribe(ctx)
 	}
 
 	return reporter, nil
 }
 
-func (reporter *metricReporter) collectLoop(ctx context.Context) {
-	ticker := time.NewTicker(metricsInterval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-		}
-
-		collectionCtx, cancel := context.WithTimeout(ctx, metricsCollectTimeout)
-		snapshot, err := reporter.collect(collectionCtx)
-		cancel()
-
-		select {
-		case reporter.results <- metricCollection{snapshot: snapshot, err: err}:
-		case <-ctx.Done():
-			return
-		}
-	}
-}
-
-func (reporter *metricReporter) enqueue(collection metricCollection) error {
-	if collection.err != nil {
-		return collection.err
+func (reporter *metricReporter) enqueue(collection metrics.Sample) error {
+	if collection.Err != nil {
+		return collection.Err
 	}
 
-	intervalMS := collection.snapshot.Interval.Milliseconds()
+	intervalMS := collection.Snapshot.Interval.Milliseconds()
 	if intervalMS < 1 {
 		intervalMS = 1
 	}
@@ -132,19 +97,19 @@ func (reporter *metricReporter) enqueue(collection metricCollection) error {
 		intervalMS = math.MaxUint32
 	}
 
-	nodeIssues, containerIssues := splitMetricIssues(collection.snapshot.CollectionIssues)
-	node := collection.snapshot.Node
+	nodeIssues, containerIssues := splitMetricIssues(collection.Snapshot.CollectionIssues)
+	node := collection.Snapshot.Node
 	containers := protocol.ContainerMetricSet{
-		Items: append([]protocol.ContainerMetrics(nil), collection.snapshot.Containers...),
+		Items: append([]protocol.ContainerMetrics(nil), collection.Snapshot.Containers...),
 	}
 
 	reporter.enqueueSample(queuedMetricSample{
 		metricType: protocol.MetricTypeNode,
 		sample: protocol.MetricSample{
 			Sequence:         reporter.nextSequence(),
-			ObservedAt:       collection.snapshot.ObservedAt,
+			ObservedAt:       collection.Snapshot.ObservedAt,
 			IntervalMS:       uint64(intervalMS),
-			ObservationScope: collection.snapshot.ObservationScope,
+			ObservationScope: collection.Snapshot.ObservationScope,
 			Node:             &node,
 			CollectionIssues: nodeIssues,
 		},
@@ -153,9 +118,9 @@ func (reporter *metricReporter) enqueue(collection metricCollection) error {
 		metricType: protocol.MetricTypeContainer,
 		sample: protocol.MetricSample{
 			Sequence:         reporter.nextSequence(),
-			ObservedAt:       collection.snapshot.ObservedAt,
+			ObservedAt:       collection.Snapshot.ObservedAt,
 			IntervalMS:       uint64(intervalMS),
-			ObservationScope: collection.snapshot.ObservationScope,
+			ObservationScope: collection.Snapshot.ObservationScope,
 			Containers:       &containers,
 			CollectionIssues: containerIssues,
 		},

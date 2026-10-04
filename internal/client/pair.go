@@ -6,12 +6,11 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
-	"net/http"
 	"net/netip"
 
-	"github.com/FroZor/loreva-agent/internal/agentapi"
 	"github.com/FroZor/loreva-agent/internal/agentcrypto"
 	"github.com/FroZor/loreva-agent/internal/pairing"
+	"github.com/FroZor/loreva-agent/internal/protocol"
 	"github.com/FroZor/loreva-agent/internal/tunnel"
 )
 
@@ -59,13 +58,18 @@ func Pair(ctx context.Context, invite *pairing.Invite, options PairOptions) (*Cr
 	defer session.Close()
 
 	encapsulationKey := decapsulationKey.EncapsulationKey().Bytes()
-	var started agentapi.PairingStarted
-	err = session.doJSON(ctx, http.MethodPost, agentapi.PairingPath, agentapi.PairingRequest{
+	err = session.WriteJSON(ctx, protocol.PairingRequest{
+		Type:                  protocol.PairingRequestType,
 		DeviceName:            options.DeviceName,
 		WireGuardPublicKey:    devicePublicKey.String(),
 		MLKEMEncapsulationKey: base64.StdEncoding.EncodeToString(encapsulationKey),
-	}, &started)
+	})
 	if err != nil {
+		return nil, fmt.Errorf("send pairing request: %w", err)
+	}
+
+	var started protocol.PairingStarted
+	if err := readReply(ctx, session, protocol.PairingStartedType, &started); err != nil {
 		return nil, err
 	}
 
@@ -111,19 +115,29 @@ func Pair(ctx context.Context, invite *pairing.Invite, options PairOptions) (*Cr
 }
 
 // ConnectInvite opens a session as the temporary invite peer. The node lets
-// this peer call only the pairing endpoints.
+// this peer only pair.
 func ConnectInvite(ctx context.Context, invite *pairing.Invite) (*Session, error) {
-	return open(ctx, endpointConfig{
+	session, err := open(ctx, endpointConfig{
 		privateKey:    invite.PrivateKey,
 		presharedKey:  invite.PresharedKey,
 		address:       invite.Address,
+		nodeID:        invite.NodeID,
 		nodePublicKey: invite.NodePublicKey,
 		nodeAddress:   invite.NodeAddress,
 		endpoints:     invite.Endpoints,
 	})
+	if err != nil {
+		return nil, err
+	}
+	if session.Hello.Peer != protocol.SessionPeerInvite {
+		session.Close()
+		return nil, errors.New("node did not accept the connection key as an invite")
+	}
+
+	return session, nil
 }
 
-func pairingTranscript(invite *pairing.Invite, started agentapi.PairingStarted, devicePublicKey tunnel.Key,
+func pairingTranscript(invite *pairing.Invite, started protocol.PairingStarted, devicePublicKey tunnel.Key,
 	deviceName string, encapsulationKey []byte,
 ) (*pairing.Transcript, error) {
 	if !agentcrypto.ValidUUID(started.PairingID) {
@@ -156,29 +170,55 @@ func pairingTranscript(invite *pairing.Invite, started agentapi.PairingStarted, 
 	}, nil
 }
 
-// waitForApproval long-polls the pairing status until the operator decides.
+// waitForApproval reads the operator's decision, which the node sends once.
 func waitForApproval(ctx context.Context, session *Session, pairingID string) (string, error) {
-	for {
-		var status agentapi.PairingStatus
-		if err := session.doJSON(ctx, http.MethodGet, agentapi.PairingPath+"/"+pairingID, nil, &status); err != nil {
-			return "", err
-		}
-
-		switch status.Status {
-		case agentapi.PairingPending:
-			continue
-		case agentapi.PairingApproved:
-			if status.DeviceID == "" {
-				return "", errors.New("node approved pairing without a device ID")
-			}
-
-			return status.DeviceID, nil
-		case agentapi.PairingRejected:
-			return "", ErrPairingRejected
-		case agentapi.PairingExpired:
-			return "", ErrPairingExpired
-		default:
-			return "", fmt.Errorf("unknown pairing status %q", status.Status)
-		}
+	var result protocol.PairingResult
+	if err := readReply(ctx, session, protocol.PairingResultType, &result); err != nil {
+		return "", err
 	}
+	if result.PairingID != pairingID {
+		return "", errors.New("node sent the result of another pairing")
+	}
+
+	switch result.Status {
+	case protocol.PairingApproved:
+		if result.DeviceID == "" {
+			return "", errors.New("node approved pairing without a device ID")
+		}
+
+		return result.DeviceID, nil
+	case protocol.PairingRejected:
+		return "", ErrPairingRejected
+	case protocol.PairingExpired:
+		return "", ErrPairingExpired
+	default:
+		return "", fmt.Errorf("unknown pairing status %q", result.Status)
+	}
+}
+
+// readReply reads the next frame and decodes it as wantType, turning an
+// error frame into a *RemoteError.
+func readReply(ctx context.Context, session *Session, wantType string, target any) error {
+	data, err := session.Read(ctx)
+	if err != nil {
+		return err
+	}
+
+	messageType, err := protocol.MessageType(data)
+	if err != nil {
+		return errors.New("node sent a frame that is not valid JSON")
+	}
+	if messageType == protocol.ErrorType {
+		var refusal protocol.Error
+		if err := protocol.DecodeStrict(data, &refusal); err != nil {
+			return fmt.Errorf("decode error frame: %w", err)
+		}
+
+		return &RemoteError{Code: refusal.Code, Message: refusal.Message}
+	}
+	if messageType != wantType {
+		return fmt.Errorf("node sent %q, want %q", messageType, wantType)
+	}
+
+	return protocol.DecodeStrict(data, target)
 }
