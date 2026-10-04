@@ -14,7 +14,7 @@ type platformEnrollmentLock struct {
 	file *os.File
 }
 
-func tryLockEnrollment(path string) (platformEnrollmentLock, error) {
+func tryLockFile(path string, lockedErr error) (platformEnrollmentLock, error) {
 	fd, err := unix.Open(path, unix.O_CREAT|unix.O_RDWR|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0o600)
 	if err != nil {
 		return platformEnrollmentLock{}, fmt.Errorf("open enrollment lock: %w", err)
@@ -43,7 +43,7 @@ func tryLockEnrollment(path string) (platformEnrollmentLock, error) {
 
 	if err := unix.Flock(fd, unix.LOCK_EX|unix.LOCK_NB); err != nil {
 		if errors.Is(err, unix.EWOULDBLOCK) || errors.Is(err, unix.EAGAIN) {
-			return closeOnError(ErrEnrollmentLocked)
+			return closeOnError(lockedErr)
 		}
 
 		return closeOnError(fmt.Errorf("lock enrollment state: %w", err))

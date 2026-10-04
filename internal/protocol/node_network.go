@@ -23,7 +23,6 @@ type NodeNetworkReport struct {
 type NodeNetworkAccepted struct {
 	Type      string `json:"type"`
 	RequestID string `json:"request_id"`
-	Revision  int64  `json:"revision"`
 }
 
 // NodeReportRejected rejects either node report and identifies its request.

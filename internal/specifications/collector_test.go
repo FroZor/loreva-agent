@@ -3,6 +3,7 @@ package specifications
 import (
 	"context"
 	"encoding/json"
+	"math"
 	"runtime"
 	"strings"
 	"testing"
@@ -31,6 +32,32 @@ func TestCollectReturnsCoreSpecifications(t *testing.T) {
 	}
 	if snapshot.Specifications.Memory.TotalBytes == 0 {
 		t.Fatal("memory total was not collected")
+	}
+	if snapshot.Specifications.Memory.Modules == nil || snapshot.Specifications.GPUs == nil ||
+		snapshot.Specifications.StorageDevices == nil {
+		t.Fatal("specification collections must be arrays, not null")
+	}
+}
+
+func TestInstalledMemoryBytes(t *testing.T) {
+	modules := []protocol.MemoryModuleSpecifications{
+		{SizeBytes: 32 * 1024 * 1024 * 1024},
+		{SizeBytes: 32 * 1024 * 1024 * 1024},
+	}
+
+	if total := installedMemoryBytes(modules); total != 64*1024*1024*1024 {
+		t.Fatalf("installed memory = %d", total)
+	}
+}
+
+func TestInstalledMemoryBytesRejectsOverflow(t *testing.T) {
+	modules := []protocol.MemoryModuleSpecifications{
+		{SizeBytes: math.MaxUint64},
+		{SizeBytes: 1},
+	}
+
+	if total := installedMemoryBytes(modules); total != 0 {
+		t.Fatalf("overflowed installed memory = %d", total)
 	}
 }
 

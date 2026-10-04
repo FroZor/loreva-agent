@@ -25,7 +25,6 @@ func runEnroll(arguments []string, logger *slog.Logger) error {
 	token := flags.String("token", "", "short-lived enrollment token")
 	portalCAPath := flags.String("portal-ca", "", "PEM certificate file for a self-hosted portal")
 	allowDevelopmentWS := flags.Bool("allow-development-ws", false, "allow ws:// only for a loopback development portal")
-	resetPending := flags.Bool("reset-pending", false, "discard an incomplete enrollment before retrying")
 	stateDir := flags.String("state-dir", "", "agent identity directory")
 	configPath := flags.String("config", "", "bootstrap JSON file")
 
@@ -83,10 +82,10 @@ func runEnroll(arguments []string, logger *slog.Logger) error {
 		bootstrap.StateDir = *stateDir
 	}
 
-	return enrollBootstrap(bootstrap, *resetPending, logger, os.Stdout)
+	return enrollBootstrap(bootstrap, false, logger, os.Stdout)
 }
 
-func enrollBootstrap(bootstrap *config.Bootstrap, resetPending bool, logger *slog.Logger, output io.Writer) error {
+func enrollBootstrap(bootstrap *config.Bootstrap, replaceIdentity bool, logger *slog.Logger, output io.Writer) error {
 	if bootstrap == nil {
 		return errors.New("bootstrap config is required")
 	}
@@ -101,7 +100,7 @@ func enrollBootstrap(bootstrap *config.Bootstrap, resetPending bool, logger *slo
 		StateDir:           bootstrap.StateDir,
 		Version:            version,
 		AllowDevelopmentWS: bootstrap.AllowDevelopmentWS,
-		ResetPending:       resetPending,
+		ReplaceIdentity:    replaceIdentity,
 		OnRetry: func(err error, delay time.Duration) {
 			logger.Warn("agent enrollment retry", "error", err, "retry_in", delay.String())
 		},
@@ -117,6 +116,9 @@ func enrollBootstrap(bootstrap *config.Bootstrap, resetPending bool, logger *slo
 	if err != nil {
 		return err
 	}
+	if err := store.CompleteConfiguration(); err != nil {
+		return fmt.Errorf("identity configured but connection state was not updated: %w", err)
+	}
 
 	if output == nil {
 		logger.Info("agent enrollment completed", "node_id", identity.NodeID, "state_dir", store.Dir())
@@ -131,7 +133,7 @@ func enrollBootstrap(bootstrap *config.Bootstrap, resetPending bool, logger *slo
 }
 
 func writeEnrollmentResult(output io.Writer, nodeID string) error {
-	if _, err := fmt.Fprintf(output, "Loreva Agent enrolled successfully.\nNode ID: %s\n", nodeID); err != nil {
+	if _, err := fmt.Fprintf(output, "Loreva Agent configured successfully.\nNode ID: %s\n", nodeID); err != nil {
 		return fmt.Errorf("write enrollment result: %w", err)
 	}
 

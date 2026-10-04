@@ -103,6 +103,159 @@ func TestEnrollThenConnect(t *testing.T) {
 	}
 }
 
+func TestEnrollmentReplacesExistingIdentityAfterAcceptance(t *testing.T) {
+	portal := newTestPortal(t)
+	defer portal.server.Close()
+
+	stateDir := t.TempDir()
+	original := enrollTestAgent(t, portal, stateDir)
+
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+
+	replacement, err := enrollment.Enroll(ctx, enrollment.Options{
+		PortalURL:       portal.URL(),
+		Token:           portal.token,
+		PortalCAPEM:     portal.CAPEM(),
+		StateDir:        stateDir,
+		Version:         "test",
+		Hostname:        "test-node",
+		ReplaceIdentity: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if replacement.ECDSAPrivateKey == original.ECDSAPrivateKey {
+		t.Fatal("replacement enrollment reused the active ECDSA identity")
+	}
+
+	store, err := state.New(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	persisted, err := store.LoadIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if persisted.ECDSAPrivateKey != replacement.ECDSAPrivateKey {
+		t.Fatal("accepted replacement identity was not committed")
+	}
+}
+
+func TestEnrollmentWithoutReplacementRefusesExistingIdentity(t *testing.T) {
+	portal := newTestPortal(t)
+	defer portal.server.Close()
+
+	stateDir := t.TempDir()
+	original := enrollTestAgent(t, portal, stateDir)
+
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+
+	_, err := enrollment.Enroll(ctx, enrollment.Options{
+		PortalURL:   portal.URL(),
+		Token:       portal.token,
+		PortalCAPEM: portal.CAPEM(),
+		StateDir:    stateDir,
+		Version:     "test",
+		Hostname:    "test-node",
+	})
+	if err == nil || !strings.Contains(err.Error(), "identity already exists") {
+		t.Fatalf("second initial enrollment error = %v", err)
+	}
+
+	store, err := state.New(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	persisted, err := store.LoadIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if persisted.ECDSAPrivateKey != original.ECDSAPrivateKey {
+		t.Fatal("refused initial enrollment changed the existing identity")
+	}
+}
+
+func TestReplacementFailurePreservesExistingIdentity(t *testing.T) {
+	portal := newTestPortal(t)
+	defer portal.server.Close()
+
+	stateDir := t.TempDir()
+	original := enrollTestAgent(t, portal, stateDir)
+	portal.omitPQRoot = true
+
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+
+	_, err := enrollment.Enroll(ctx, enrollment.Options{
+		PortalURL:       portal.URL(),
+		Token:           portal.token,
+		PortalCAPEM:     portal.CAPEM(),
+		StateDir:        stateDir,
+		Version:         "test",
+		Hostname:        "test-node",
+		ReplaceIdentity: true,
+	})
+	if err == nil {
+		t.Fatal("replacement accepted an invalid portal response")
+	}
+
+	store, err := state.New(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	persisted, err := store.LoadIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if persisted.ECDSAPrivateKey != original.ECDSAPrivateKey {
+		t.Fatal("failed replacement changed the existing identity")
+	}
+}
+
+func TestReplacementRefusesActiveConnection(t *testing.T) {
+	portal := newTestPortal(t)
+	defer portal.server.Close()
+
+	stateDir := t.TempDir()
+	enrollTestAgent(t, portal, stateDir)
+
+	store, err := state.New(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	connectionLock, err := store.TryLockConnection()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := connectionLock.Close(); err != nil {
+			t.Errorf("close connection lock: %v", err)
+		}
+	}()
+
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+
+	_, err = enrollment.Enroll(ctx, enrollment.Options{
+		PortalURL:       portal.URL(),
+		Token:           portal.token,
+		PortalCAPEM:     portal.CAPEM(),
+		StateDir:        stateDir,
+		Version:         "test",
+		Hostname:        "test-node",
+		ReplaceIdentity: true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "disconnect it before configuration") {
+		t.Fatalf("replacement with active connection error = %v", err)
+	}
+}
+
 func TestEnrollmentRejectsMissingPortalPQRoot(t *testing.T) {
 	portal := newTestPortal(t)
 	defer portal.server.Close()
@@ -556,7 +709,7 @@ func (p *testPortal) handleConnect(w http.ResponseWriter, r *http.Request) {
 			}
 			p.reportTypes <- report.Type
 			if err := wsjson.Write(r.Context(), conn, protocol.NodeSpecificationsAccepted{
-				Type: protocol.NodeSpecificationsAcceptedType, RequestID: report.RequestID, Revision: 1,
+				Type: protocol.NodeSpecificationsAcceptedType, RequestID: report.RequestID,
 			}); err != nil {
 				return
 			}
@@ -568,7 +721,7 @@ func (p *testPortal) handleConnect(w http.ResponseWriter, r *http.Request) {
 			}
 			p.reportTypes <- report.Type
 			if err := wsjson.Write(r.Context(), conn, protocol.NodeNetworkAccepted{
-				Type: protocol.NodeNetworkAcceptedType, RequestID: report.RequestID, Revision: 1,
+				Type: protocol.NodeNetworkAcceptedType, RequestID: report.RequestID,
 			}); err != nil {
 				return
 			}

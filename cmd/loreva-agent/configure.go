@@ -17,7 +17,6 @@ func runConfigure(arguments []string, logger *slog.Logger) error {
 	flags.SetOutput(io.Discard)
 
 	encoded := flags.String("bootstrap", "", "use - to read the portal bootstrap from stdin")
-	resetPending := flags.Bool("reset-pending", false, "discard an incomplete enrollment before retrying")
 	stateDir := flags.String("state-dir", "", "agent identity directory")
 
 	if err := flags.Parse(arguments); err != nil {
@@ -36,7 +35,7 @@ func runConfigure(arguments []string, logger *slog.Logger) error {
 		bootstrap.StateDir = *stateDir
 	}
 
-	return enrollBootstrap(bootstrap, *resetPending, logger, os.Stdout)
+	return enrollBootstrap(bootstrap, true, logger, os.Stdout)
 }
 
 func loadPortalBootstrap(encoded string) (*config.Bootstrap, error) {

@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"unicode/utf8"
 
 	"golang.org/x/sys/windows"
 
@@ -27,6 +28,10 @@ const (
 )
 
 const windowsNetworkScript = `$ErrorActionPreference = 'Stop'
+$utf8 = [System.Text.UTF8Encoding]::new($false)
+[Console]::OutputEncoding = $utf8
+$OutputEncoding = $utf8
+
 $routesAvailable = $true
 $routesTruncated = $false
 $firewallAvailable = $true
@@ -218,6 +223,9 @@ func collectWindowsNetwork(ctx context.Context) (windowsNetworkDocument, error) 
 	}
 	if stdout.exceeded {
 		return windowsNetworkDocument{}, errors.New("Windows network collector output exceeded its limit")
+	}
+	if !utf8.Valid(stdout.Bytes()) {
+		return windowsNetworkDocument{}, errors.New("Windows network collector output is not valid UTF-8")
 	}
 
 	var document windowsNetworkDocument

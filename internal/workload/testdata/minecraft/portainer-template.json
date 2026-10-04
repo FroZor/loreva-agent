@@ -1,0 +1,21 @@
+{
+  "version": "2",
+  "templates": [
+    {
+      "type": 1,
+      "title": "Minecraft Paper",
+      "description": "Portainer v2 template fixture normalized by the portal into an OCI workload",
+      "categories": ["games", "minecraft"],
+      "platform": "linux",
+      "image": "itzg/minecraft-server:latest",
+      "ports": ["25565/tcp"],
+      "volumes": [
+        {"container": "/data"}
+      ],
+      "env": [
+        {"name": "EULA", "default": "TRUE", "preset": true},
+        {"name": "TYPE", "default": "PAPER", "preset": true}
+      ]
+    }
+  ]
+}

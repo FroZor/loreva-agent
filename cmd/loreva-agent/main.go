@@ -16,18 +16,21 @@ type command func(arguments []string, logger *slog.Logger) error
 // commands maps subcommands to their handlers. "run" is also the default
 // when no subcommand is given, which keeps existing service units working.
 var commands = map[string]command{
-	"run":       runAgent,
-	"start":     runStart,
-	"enroll":    runEnroll,
-	"configure": runConfigure,
-	"init":      runInit,
-	"invite":    runInvite,
-	"devices":   runDevices,
-	"device":    runDevice,
+	"run":        runAgent,
+	"start":      runStart,
+	"enroll":     runEnroll,
+	"configure":  runConfigure,
+	"init":       runInit,
+	"invite":     runInvite,
+	"devices":    runDevices,
+	"device":     runDevice,
+	"connect":    runConnect,
+	"disconnect": runDisconnect,
+	"status":     runStatus,
 }
 
 // setupCommands print human-readable errors instead of JSON service logs.
-var setupCommands = []string{"configure", "enroll", "init", "invite", "devices", "device"}
+var setupCommands = []string{"configure", "enroll", "init", "invite", "devices", "device", "connect", "disconnect", "status"}
 
 func main() {
 	arguments := os.Args[1:]
@@ -85,5 +88,5 @@ func run(arguments []string, logger *slog.Logger) error {
 		return runAgent(arguments, logger)
 	}
 
-	return errors.New("unknown command " + arguments[0] + "; commands: run, init, invite, devices, device, enroll, configure, start")
+	return errors.New("unknown command " + arguments[0] + "; commands: run, init, invite, devices, device, enroll, configure, start, connect, disconnect, status")
 }

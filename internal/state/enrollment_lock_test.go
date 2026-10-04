@@ -32,3 +32,38 @@ func TestEnrollmentLockIsExclusiveAndReusable(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestConnectionAndProcessLocksAreIndependent(t *testing.T) {
+	store, err := New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	connection, err := store.TryLockConnection()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := connection.Close(); err != nil {
+			t.Errorf("close connection lock: %v", err)
+		}
+	}()
+
+	if _, err := store.TryLockConnection(); !errors.Is(err, ErrConnectionActive) {
+		t.Fatalf("second TryLockConnection() error = %v, want ErrConnectionActive", err)
+	}
+
+	process, err := store.TryLockProcess()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := process.Close(); err != nil {
+			t.Errorf("close process lock: %v", err)
+		}
+	}()
+
+	if _, err := store.TryLockProcess(); !errors.Is(err, ErrAgentRunning) {
+		t.Fatalf("second TryLockProcess() error = %v, want ErrAgentRunning", err)
+	}
+}

@@ -3,7 +3,7 @@ services:
     image: ghcr.io/frozor/loreva-agent:latest
     pull_policy: always
     restart: unless-stopped
-    user: "65532:65532"
+    user: "0:0"
     read_only: true
     cap_drop:
       - ALL
@@ -13,6 +13,9 @@ services:
       - type: volume
         source: loreva-agent-state
         target: /var/lib/loreva-agent
+      - type: bind
+        source: /var/run/docker.sock
+        target: /var/run/docker.sock
     logging:
       driver: json-file
       options:

@@ -25,7 +25,6 @@ type NodeSpecificationsReport struct {
 type NodeSpecificationsAccepted struct {
 	Type      string `json:"type"`
 	RequestID string `json:"request_id"`
-	Revision  int64  `json:"revision"`
 }
 
 // NodeSpecifications is a static hardware snapshot. Dynamic utilization is reported separately.

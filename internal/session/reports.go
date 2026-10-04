@@ -49,7 +49,6 @@ type nodeReportState struct {
 	retryAttempt          int
 	lastAcceptedKind      nodeReportKind
 	lastAcceptedRequestID string
-	lastAcceptedRevision  int64
 	complete              bool
 }
 
@@ -247,11 +246,11 @@ func (reporter *nodeReporter) handleResponse(ctx context.Context, data []byte) e
 		return errors.New("node report result is not valid JSON")
 	}
 	if messageType == reporter.lastAcceptedType() {
-		requestID, revision, err := decodeNodeReportAccepted(data, reporter.state.lastAcceptedKind)
+		requestID, err := decodeNodeReportAccepted(data, reporter.state.lastAcceptedKind)
 		if err != nil {
 			return err
 		}
-		if requestID != reporter.state.lastAcceptedRequestID || revision != reporter.state.lastAcceptedRevision {
+		if requestID != reporter.state.lastAcceptedRequestID {
 			return errors.New("conflicting duplicate node report acknowledgement")
 		}
 
@@ -277,17 +276,16 @@ func (reporter *nodeReporter) handleResponse(ctx context.Context, data []byte) e
 		return fmt.Errorf("unexpected node report result type %q", messageType)
 	}
 
-	requestID, revision, err := decodeNodeReportAccepted(data, reporter.state.active.kind)
+	requestID, err := decodeNodeReportAccepted(data, reporter.state.active.kind)
 	if err != nil {
 		return err
 	}
-	if requestID != reporter.state.active.requestID || revision <= 0 {
+	if requestID != reporter.state.active.requestID {
 		return errors.New("invalid node report acknowledgement")
 	}
 
 	reporter.state.lastAcceptedKind = reporter.state.active.kind
 	reporter.state.lastAcceptedRequestID = requestID
-	reporter.state.lastAcceptedRevision = revision
 	reporter.advance(ctx)
 
 	return nil
@@ -347,24 +345,24 @@ func (reporter *nodeReporter) expectedResponseTypes() (string, string) {
 	}
 }
 
-func decodeNodeReportAccepted(data []byte, kind nodeReportKind) (string, int64, error) {
+func decodeNodeReportAccepted(data []byte, kind nodeReportKind) (string, error) {
 	switch kind {
 	case nodeReportSpecifications:
 		var accepted protocol.NodeSpecificationsAccepted
 		if err := protocol.DecodeStrict(data, &accepted); err != nil {
-			return "", 0, fmt.Errorf("decode specifications acknowledgement: %w", err)
+			return "", fmt.Errorf("decode specifications acknowledgement: %w", err)
 		}
 
-		return accepted.RequestID, accepted.Revision, nil
+		return accepted.RequestID, nil
 	case nodeReportNetwork:
 		var accepted protocol.NodeNetworkAccepted
 		if err := protocol.DecodeStrict(data, &accepted); err != nil {
-			return "", 0, fmt.Errorf("decode network acknowledgement: %w", err)
+			return "", fmt.Errorf("decode network acknowledgement: %w", err)
 		}
 
-		return accepted.RequestID, accepted.Revision, nil
+		return accepted.RequestID, nil
 	default:
-		return "", 0, errors.New("unknown node report kind")
+		return "", errors.New("unknown node report kind")
 	}
 }
 

@@ -13,7 +13,7 @@ func TestWriteEnrollmentResult(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	want := "Loreva Agent enrolled successfully.\nNode ID: " + nodeID + "\n"
+	want := "Loreva Agent configured successfully.\nNode ID: " + nodeID + "\n"
 	if output.String() != want {
 		t.Fatalf("writeEnrollmentResult() = %q, want %q", output.String(), want)
 	}
@@ -26,7 +26,10 @@ func TestIsSetupCommand(t *testing.T) {
 		want      bool
 	}{
 		{name: "configure", arguments: []string{"configure"}, want: true},
+		{name: "connect", arguments: []string{"connect"}, want: true},
+		{name: "disconnect", arguments: []string{"disconnect"}, want: true},
 		{name: "enroll", arguments: []string{"enroll"}, want: true},
+		{name: "status", arguments: []string{"status"}, want: true},
 		{name: "run", arguments: []string{"run"}, want: false},
 		{name: "empty", arguments: nil, want: false},
 	} {
