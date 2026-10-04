@@ -29,7 +29,7 @@ type Options struct {
 	Version            string
 	Hostname           string
 	AllowDevelopmentWS bool
-	ResetPending       bool
+	ReplaceIdentity    bool
 	OnRetry            func(error, time.Duration)
 	OnWarning          func(error)
 }
@@ -67,28 +67,31 @@ func Enroll(ctx context.Context, options Options) (*state.Identity, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer func() {
-		if err := lock.Close(); err != nil && options.OnWarning != nil {
-			options.OnWarning(fmt.Errorf("release enrollment lock: %w", err))
-		}
-	}()
+	defer closeLock(lock, "release enrollment lock", options.OnWarning)
 
-	if options.ResetPending {
-		if _, err := store.LoadIdentity(); err == nil {
-			return nil, errAlreadyEnrolled
-		} else if !errors.Is(err, state.ErrNotFound) {
-			return nil, fmt.Errorf("load existing identity: %w", err)
+	connectionLock, err := store.TryLockConnection()
+	if err != nil {
+		if errors.Is(err, state.ErrConnectionActive) {
+			return nil, errors.New("agent is connected or connecting; disconnect it before configuration")
 		}
 
-		if err := store.ClearPending(); err != nil {
-			return nil, err
-		}
+		return nil, err
+	}
+	defer closeLock(connectionLock, "release connection lock", options.OnWarning)
+
+	_, identityErr := store.LoadIdentity()
+	replacingIdentity := identityErr == nil
+	if identityErr != nil && !errors.Is(identityErr, state.ErrNotFound) {
+		return nil, fmt.Errorf("load existing identity: %w", identityErr)
+	}
+	if replacingIdentity && !options.ReplaceIdentity {
+		return nil, errAlreadyEnrolled
 	}
 
 	attempt := 0
 
 	for {
-		identity, err := enrollOnce(ctx, store, options)
+		identity, err := enrollOnce(ctx, store, options, replacingIdentity)
 		if err == nil {
 			return identity, nil
 		}
@@ -116,13 +119,12 @@ func Enroll(ctx context.Context, options Options) (*state.Identity, error) {
 	}
 }
 
-func enrollOnce(ctx context.Context, store *state.Store, options Options) (*state.Identity, error) {
-	if _, err := store.LoadIdentity(); err == nil {
-		return nil, errAlreadyEnrolled
-	} else if !errors.Is(err, state.ErrNotFound) {
-		return nil, fmt.Errorf("load existing identity: %w", err)
-	}
-
+func enrollOnce(
+	ctx context.Context,
+	store *state.Store,
+	options Options,
+	replacingIdentity bool,
+) (*state.Identity, error) {
 	dialer, err := connectivity.NewDialer(connectivity.Config{
 		PortalCAPEM:        options.PortalCAPEM,
 		AllowDevelopmentWS: options.AllowDevelopmentWS,
@@ -177,7 +179,7 @@ func enrollOnce(ctx context.Context, store *state.Store, options Options) (*stat
 	if err != nil {
 		return nil, err
 	}
-	if err := store.SaveIdentity(enrolledIdentity); err != nil {
+	if err := commitIdentity(store, enrolledIdentity, replacingIdentity); err != nil {
 		return nil, fmt.Errorf("persist enrolled identity: %w", err)
 	}
 	if err := store.ClearPending(); err != nil {
@@ -189,4 +191,18 @@ func enrollOnce(ctx context.Context, store *state.Store, options Options) (*stat
 	}
 
 	return enrolledIdentity, nil
+}
+
+func commitIdentity(store *state.Store, identity *state.Identity, replace bool) error {
+	if replace {
+		return store.ReplaceIdentity(identity)
+	}
+
+	return store.SaveIdentity(identity)
+}
+
+func closeLock(lock *state.Lock, operation string, onWarning func(error)) {
+	if err := lock.Close(); err != nil && onWarning != nil {
+		onWarning(fmt.Errorf("%s: %w", operation, err))
+	}
 }

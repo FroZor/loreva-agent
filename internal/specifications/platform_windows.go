@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"unicode/utf8"
 
 	"golang.org/x/sys/windows"
 
@@ -23,6 +24,10 @@ import (
 const maxWindowsSpecificationsOutput = 4 * 1024 * 1024
 
 const windowsSpecificationsScript = `$ErrorActionPreference = 'Stop'
+$utf8 = [System.Text.UTF8Encoding]::new($false)
+[Console]::OutputEncoding = $utf8
+$OutputEncoding = $utf8
+
 $memoryAvailable = $true
 $gpusAvailable = $true
 $storageAvailable = $true
@@ -211,7 +216,10 @@ func readWindowsSpecifications(ctx context.Context) (windowsSpecificationsDocume
 		"-NonInteractive",
 		"-Command", windowsSpecificationsScript,
 	)
-	command.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, NoInheritHandles: true}
+	// os/exec restricts inheritance to the configured standard handles. They
+	// must remain inheritable so the bounded stdout and stderr buffers receive
+	// the collector result.
+	command.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 
 	var stdout limitedSpecificationsBuffer
 	var stderr limitedSpecificationsBuffer
@@ -232,6 +240,9 @@ func readWindowsSpecifications(ctx context.Context) (windowsSpecificationsDocume
 	}
 	if stdout.exceeded {
 		return windowsSpecificationsDocument{}, errors.New("Windows specifications output exceeded its limit")
+	}
+	if !utf8.Valid(stdout.Bytes()) {
+		return windowsSpecificationsDocument{}, errors.New("Windows specifications output is not valid UTF-8")
 	}
 
 	var document windowsSpecificationsDocument

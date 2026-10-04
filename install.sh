@@ -101,6 +101,31 @@ ensure_service_user() {
 	fail "system user management is not supported on this host"
 }
 
+grant_docker_socket_access() {
+	service_user="$1"
+	docker_socket="/var/run/docker.sock"
+
+	if [ ! -S "$docker_socket" ]; then
+		printf 'Loreva Agent: Docker socket not found; container management will remain unavailable.\n' >&2
+		return
+	fi
+
+	require_command docker
+	require_command stat
+	require_command usermod
+	docker compose version >/dev/null 2>&1 || fail "Docker Compose plugin is required for Compose workloads"
+
+	docker_group_id="$(stat -c '%g' "$docker_socket")"
+	case "$docker_group_id" in
+		*[!0-9]* | "") fail "Docker socket has an invalid group" ;;
+		0) fail "Docker socket is owned by the root group; refusing to grant the service broad root-group access" ;;
+	esac
+
+	if ! id -G "$service_user" | tr ' ' '\n' | grep -qx "$docker_group_id"; then
+		usermod -a -G "$docker_group_id" "$service_user"
+	fi
+}
+
 install_systemd_service() {
 	config_path="$1"
 	service_name="loreva-agent"
@@ -113,6 +138,7 @@ install_systemd_service() {
 	fi
 
 	ensure_service_user "$service_user" "$state_dir"
+	grant_docker_socket_access "$service_user"
 	service_group="$(id -gn "$service_user")"
 	install -d -m 0750 -o "$service_user" -g "$service_group" "$state_dir"
 

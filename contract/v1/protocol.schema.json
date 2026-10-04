@@ -1,0 +1,1418 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:loreva:agent:wss:protocol:v1",
+  "title": "Loreva agent WSS protocol v1",
+  "description": "Normative JSON contract for text frames exchanged by the Loreva agent and portal.",
+  "oneOf": [
+    { "$ref": "#/$defs/enrollmentChallenge" },
+    { "$ref": "#/$defs/enrollmentRequest" },
+    { "$ref": "#/$defs/enrollmentAccepted" },
+    { "$ref": "#/$defs/enrollmentRejected" },
+    { "$ref": "#/$defs/connectChallenge" },
+    { "$ref": "#/$defs/connectProof" },
+    { "$ref": "#/$defs/connectAccepted" },
+    { "$ref": "#/$defs/connectRejected" },
+    { "$ref": "#/$defs/renewRequest" },
+    { "$ref": "#/$defs/renewAccepted" },
+    { "$ref": "#/$defs/renewRejected" },
+    { "$ref": "#/$defs/sourcesUpdate" },
+    { "$ref": "#/$defs/drain" },
+    { "$ref": "#/$defs/nodeSpecificationsReport" },
+    { "$ref": "#/$defs/nodeSpecificationsAccepted" },
+    { "$ref": "#/$defs/nodeSpecificationsRejected" },
+    { "$ref": "#/$defs/nodeNetworkReport" },
+    { "$ref": "#/$defs/nodeNetworkAccepted" },
+    { "$ref": "#/$defs/nodeNetworkRejected" },
+    { "$ref": "#/$defs/metricsReport" },
+    { "$ref": "#/$defs/metricsAccepted" },
+    { "$ref": "#/$defs/metricsRejected" },
+    { "$ref": "#/$defs/portalCommand" },
+    { "$ref": "#/$defs/workloadPlanResult" },
+    { "$ref": "#/$defs/workloadOperationEvent" },
+    { "$ref": "#/$defs/workloadOperationResult" }
+  ],
+  "$defs": {
+    "uuid": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "compactJWS": {
+      "type": "string",
+      "minLength": 5,
+      "maxLength": 65536,
+      "pattern": "^[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+$"
+    },
+    "pemCSR": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 16384,
+      "pattern": "^-----BEGIN (NEW )?CERTIFICATE REQUEST-----"
+    },
+    "pemCertificate": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 16384,
+      "pattern": "^-----BEGIN CERTIFICATE-----"
+    },
+    "certificateChain": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 8,
+      "items": { "$ref": "#/$defs/pemCertificate" }
+    },
+    "jwk": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kty", "alg", "pub"],
+      "properties": {
+        "kty": { "const": "AKP" },
+        "alg": { "const": "ML-DSA-65" },
+        "pub": {
+          "type": "string",
+          "minLength": 2603,
+          "maxLength": 2603,
+          "pattern": "^[A-Za-z0-9_-]+$",
+          "description": "Canonical unpadded Base64URL encoding of a 1952-byte ML-DSA-65 public key."
+        }
+      }
+    },
+    "agentKeyProofHeader": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["alg", "jwk"],
+      "properties": {
+        "alg": { "const": "ML-DSA-65" },
+        "jwk": { "$ref": "#/$defs/jwk" }
+      }
+    },
+    "agentSessionProofHeader": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["alg"],
+      "properties": {
+        "alg": { "const": "ML-DSA-65" }
+      }
+    },
+    "portalJWSHeader": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["alg"],
+      "properties": {
+        "alg": { "const": "ML-DSA-65" }
+      }
+    },
+    "popClaims": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["aud", "jti", "challenge", "iat", "exp"],
+      "properties": {
+        "aud": { "$ref": "#/$defs/uuid" },
+        "jti": { "$ref": "#/$defs/uuid" },
+        "challenge": {
+          "type": "string",
+          "minLength": 43,
+          "maxLength": 43,
+          "pattern": "^[A-Za-z0-9_-]+$"
+        },
+        "csr_sha256": {
+          "type": "string",
+          "minLength": 43,
+          "maxLength": 43,
+          "pattern": "^[A-Za-z0-9_-]+$"
+        },
+        "iat": { "type": "integer", "minimum": 0 },
+        "exp": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "pqCredentialClaims": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["iss", "sub", "iat", "exp", "cnf"],
+      "properties": {
+        "iss": { "$ref": "#/$defs/uuid" },
+        "sub": { "$ref": "#/$defs/uuid" },
+        "iat": { "type": "integer", "minimum": 0 },
+        "exp": { "type": "integer", "minimum": 1 },
+        "cnf": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["jwk"],
+          "properties": {
+            "jwk": { "$ref": "#/$defs/jwk" }
+          }
+        }
+      }
+    },
+    "connectChallengeClaims": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "challenge_id", "nonce", "portal_id", "issued_at", "expires_at"],
+      "properties": {
+        "type": { "const": "connect.challenge" },
+        "challenge_id": { "$ref": "#/$defs/uuid" },
+        "nonce": {
+          "type": "string",
+          "minLength": 43,
+          "maxLength": 43,
+          "pattern": "^[A-Za-z0-9_-]+$"
+        },
+        "portal_id": { "$ref": "#/$defs/uuid" },
+        "issued_at": { "$ref": "#/$defs/timestamp" },
+        "expires_at": { "$ref": "#/$defs/timestamp" }
+      }
+    },
+    "agentInfo": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "os", "arch", "hostname", "capabilities"],
+      "properties": {
+        "version": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "os": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "arch": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "hostname": { "type": "string", "minLength": 1, "maxLength": 255 },
+        "capabilities": {
+          "type": "array",
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1, "maxLength": 64 }
+        }
+      }
+    },
+    "sources": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["generation", "expires_at", "items"],
+      "properties": {
+        "generation": { "type": "integer", "minimum": 1 },
+        "expires_at": { "$ref": "#/$defs/timestamp" },
+        "items": {
+          "type": "array",
+          "maxItems": 256,
+          "items": { "$ref": "#/$defs/sourceItem" }
+        }
+      }
+    },
+    "sourceItem": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["url", "priority", "weight", "security_profile"],
+      "properties": {
+        "url": {
+          "type": "string",
+          "format": "uri",
+          "minLength": 1,
+          "maxLength": 2048,
+          "pattern": "^wss://[^/?#]+/agent/v1/connect$"
+        },
+        "priority": { "type": "integer", "minimum": 0, "maximum": 65535 },
+        "weight": { "type": "integer", "minimum": 1, "maximum": 10000 },
+        "security_profile": { "const": "pqc-hybrid-v1" }
+      }
+    },
+    "errorCode": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[a-z][a-z0-9_]*$"
+    },
+    "enrollmentChallenge": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "challenge_id", "nonce", "portal_id", "issued_at", "expires_at"],
+      "properties": {
+        "type": { "const": "enrollment.challenge" },
+        "challenge_id": { "$ref": "#/$defs/uuid" },
+        "nonce": {
+          "type": "string",
+          "minLength": 43,
+          "maxLength": 43,
+          "pattern": "^[A-Za-z0-9_-]+$"
+        },
+        "portal_id": { "$ref": "#/$defs/uuid" },
+        "issued_at": { "$ref": "#/$defs/timestamp" },
+        "expires_at": { "$ref": "#/$defs/timestamp" }
+      }
+    },
+    "enrollmentRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "protocol_version", "agent", "csr", "pq_pop"],
+      "properties": {
+        "type": { "const": "enrollment.request" },
+        "protocol_version": { "const": 1 },
+        "agent": { "$ref": "#/$defs/agentInfo" },
+        "csr": { "$ref": "#/$defs/pemCSR" },
+        "pq_pop": { "$ref": "#/$defs/compactJWS" }
+      }
+    },
+    "enrollmentAccepted": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "node_id", "certificate_chain", "portal_pq_root", "pq_credential", "renew_after", "sources"],
+      "properties": {
+        "type": { "const": "enrollment.accepted" },
+        "node_id": { "$ref": "#/$defs/uuid" },
+        "certificate_chain": { "$ref": "#/$defs/certificateChain" },
+        "portal_pq_root": { "$ref": "#/$defs/jwk" },
+        "pq_credential": { "$ref": "#/$defs/compactJWS" },
+        "renew_after": { "$ref": "#/$defs/timestamp" },
+        "sources": { "$ref": "#/$defs/sources" }
+      }
+    },
+    "enrollmentRejected": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "code"],
+      "properties": {
+        "type": { "const": "enrollment.rejected" },
+        "code": { "$ref": "#/$defs/errorCode" },
+        "message": { "type": "string", "maxLength": 1024 }
+      }
+    },
+    "connectChallenge": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "signed_challenge"],
+      "properties": {
+        "type": { "const": "connect.challenge" },
+        "signed_challenge": { "$ref": "#/$defs/compactJWS" }
+      }
+    },
+    "connectProof": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "pq_credential", "pq_pop"],
+      "properties": {
+        "type": { "const": "connect.proof" },
+        "pq_credential": { "$ref": "#/$defs/compactJWS" },
+        "pq_pop": { "$ref": "#/$defs/compactJWS" }
+      }
+    },
+    "connectAccepted": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type"],
+      "properties": {
+        "type": { "const": "connect.accepted" }
+      }
+    },
+    "connectRejected": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "code"],
+      "properties": {
+        "type": { "const": "connect.rejected" },
+        "code": { "$ref": "#/$defs/errorCode" },
+        "message": { "type": "string", "maxLength": 1024 }
+      }
+    },
+    "renewRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "csr", "pq_pop"],
+      "properties": {
+        "type": { "const": "renew.request" },
+        "csr": { "$ref": "#/$defs/pemCSR" },
+        "pq_pop": { "$ref": "#/$defs/compactJWS" }
+      }
+    },
+    "renewAccepted": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "certificate_chain", "pq_credential", "renew_after"],
+      "properties": {
+        "type": { "const": "renew.accepted" },
+        "certificate_chain": { "$ref": "#/$defs/certificateChain" },
+        "pq_credential": { "$ref": "#/$defs/compactJWS" },
+        "renew_after": { "$ref": "#/$defs/timestamp" }
+      }
+    },
+    "renewRejected": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "code"],
+      "properties": {
+        "type": { "const": "renew.rejected" },
+        "code": { "$ref": "#/$defs/errorCode" },
+        "message": { "type": "string", "maxLength": 1024 }
+      }
+    },
+    "sourcesUpdate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "sources"],
+      "properties": {
+        "type": { "const": "sources.update" },
+        "sources": { "$ref": "#/$defs/sources" }
+      }
+    },
+    "drain": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type"],
+      "properties": {
+        "type": { "const": "drain" },
+        "reason": { "type": "string", "maxLength": 1024 },
+        "deadline": { "$ref": "#/$defs/timestamp" }
+      }
+    },
+    "portalCommand": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "signed_command"],
+      "properties": {
+        "type": { "const": "portal.command" },
+        "signed_command": { "$ref": "#/$defs/compactJWS" }
+      }
+    },
+    "artifactReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["artifact_id", "sha256", "size_bytes"],
+      "properties": {
+        "artifact_id": { "$ref": "#/$defs/uuid" },
+        "sha256": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+        "size_bytes": { "type": "integer", "minimum": 1, "maximum": 33554432 }
+      }
+    },
+    "workloadResources": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["cpu_millicores", "memory_bytes", "pids_limit"],
+      "properties": {
+        "cpu_millicores": { "type": "integer", "minimum": 1, "maximum": 1000000 },
+        "memory_bytes": { "type": "integer", "minimum": 67108864, "maximum": 1125899906842624 },
+        "pids_limit": { "type": "integer", "minimum": 16, "maximum": 1048576 }
+      }
+    },
+    "workloadPort": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["host_ip", "host_port", "container_port", "protocol"],
+      "properties": {
+        "host_ip": { "type": "string", "maxLength": 64 },
+        "host_port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "container_port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "protocol": { "enum": ["tcp", "udp"] }
+      }
+    },
+    "workloadMount": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "target", "read_only"],
+      "properties": {
+        "type": { "enum": ["volume", "bind", "tmpfs", "npipe"] },
+        "source": { "type": "string", "maxLength": 4096 },
+        "target": { "type": "string", "minLength": 1, "maxLength": 4096 },
+        "read_only": { "type": "boolean" }
+      }
+    },
+    "environment": {
+      "type": "object",
+      "maxProperties": 1024,
+      "propertyNames": { "pattern": "^[^=]+$" },
+      "additionalProperties": { "type": "string", "maxLength": 65536 }
+    },
+    "ociWorkloadInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["image", "resources"],
+      "properties": {
+        "image": { "type": "string", "minLength": 1, "maxLength": 512 },
+        "environment": { "$ref": "#/$defs/environment" },
+        "command": {
+          "type": "array", "maxItems": 256,
+          "items": { "type": "string", "maxLength": 65536 }
+        },
+        "resources": { "$ref": "#/$defs/workloadResources" },
+        "ports": { "type": "array", "maxItems": 256, "items": { "$ref": "#/$defs/workloadPort" } },
+        "mounts": { "type": "array", "maxItems": 256, "items": { "$ref": "#/$defs/workloadMount" } }
+      }
+    },
+    "composeWorkloadInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["artifact", "file"],
+      "properties": {
+        "artifact": { "$ref": "#/$defs/artifactReference" },
+        "file": { "type": "string", "minLength": 1, "maxLength": 1024 },
+        "profiles": {
+          "type": "array", "maxItems": 64, "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1, "maxLength": 128 }
+        },
+        "environment": { "$ref": "#/$defs/environment" }
+      }
+    },
+    "dockerfileWorkloadInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["artifact", "file", "resources"],
+      "properties": {
+        "artifact": { "$ref": "#/$defs/artifactReference" },
+        "file": { "type": "string", "minLength": 1, "maxLength": 1024 },
+        "target": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "build_args": { "$ref": "#/$defs/environment" },
+        "environment": { "$ref": "#/$defs/environment" },
+        "command": {
+          "type": "array", "maxItems": 256,
+          "items": { "type": "string", "maxLength": 8192 }
+        },
+        "resources": { "$ref": "#/$defs/workloadResources" },
+        "ports": { "type": "array", "maxItems": 256, "items": { "$ref": "#/$defs/workloadPort" } },
+        "mounts": { "type": "array", "maxItems": 256, "items": { "$ref": "#/$defs/workloadMount" } }
+      }
+    },
+    "pterodactylEggInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["artifact", "docker_image", "resources"],
+      "properties": {
+        "artifact": { "$ref": "#/$defs/artifactReference" },
+        "docker_image": { "type": "string", "minLength": 1, "maxLength": 512 },
+        "installer_image": { "type": "string", "minLength": 1, "maxLength": 512 },
+        "variables": { "$ref": "#/$defs/environment" },
+        "agreements": {
+          "type": "array", "maxItems": 16, "uniqueItems": true,
+          "items": { "enum": ["minecraft_eula"] }
+        },
+        "resources": { "$ref": "#/$defs/workloadResources" },
+        "ports": { "type": "array", "maxItems": 256, "items": { "$ref": "#/$defs/workloadPort" } }
+      }
+    },
+    "workloadPlanPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["format"],
+      "properties": {
+        "format": { "enum": ["oci", "compose", "dockerfile", "pterodactyl-egg"] },
+        "oci": { "$ref": "#/$defs/ociWorkloadInput" },
+        "compose": { "$ref": "#/$defs/composeWorkloadInput" },
+        "dockerfile": { "$ref": "#/$defs/dockerfileWorkloadInput" },
+        "pterodactyl_egg": { "$ref": "#/$defs/pterodactylEggInput" }
+      },
+      "oneOf": [
+        {
+          "properties": { "format": { "const": "oci" } },
+          "required": ["oci"],
+          "not": { "anyOf": [{ "required": ["compose"] }, { "required": ["dockerfile"] }, { "required": ["pterodactyl_egg"] }] }
+        },
+        {
+          "properties": { "format": { "const": "compose" } },
+          "required": ["compose"],
+          "not": { "anyOf": [{ "required": ["oci"] }, { "required": ["dockerfile"] }, { "required": ["pterodactyl_egg"] }] }
+        },
+        {
+          "properties": { "format": { "const": "dockerfile" } },
+          "required": ["dockerfile"],
+          "not": { "anyOf": [{ "required": ["oci"] }, { "required": ["compose"] }, { "required": ["pterodactyl_egg"] }] }
+        },
+        {
+          "properties": { "format": { "const": "pterodactyl-egg" } },
+          "required": ["pterodactyl_egg"],
+          "not": { "anyOf": [{ "required": ["oci"] }, { "required": ["compose"] }, { "required": ["dockerfile"] }] }
+        }
+      ]
+    },
+    "workloadExecutePayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["plan_digest", "approvals"],
+      "properties": {
+        "plan_digest": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+        "approvals": {
+          "type": "array", "maxItems": 256, "uniqueItems": true,
+          "items": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" }
+        }
+      }
+    },
+    "workloadStopPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["timeout_seconds"],
+      "properties": {
+        "timeout_seconds": { "type": "integer", "minimum": 1, "maximum": 300 }
+      }
+    },
+    "workloadDeletePayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["data_policy"],
+      "properties": {
+        "data_policy": { "const": "preserve" }
+      }
+    },
+    "workloadCommandClaims": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type", "schema_version", "request_id", "portal_id", "node_id",
+        "workload_id", "session_nonce", "issued_at", "expires_at", "payload"
+      ],
+      "properties": {
+        "type": {
+          "enum": [
+            "workload.plan.request", "workload.execute.request", "workload.stop.request",
+            "workload.restart.request", "workload.delete.request"
+          ]
+        },
+        "schema_version": { "const": 1 },
+        "request_id": { "$ref": "#/$defs/uuid" },
+        "portal_id": { "$ref": "#/$defs/uuid" },
+        "node_id": { "$ref": "#/$defs/uuid" },
+        "workload_id": { "$ref": "#/$defs/uuid" },
+        "session_nonce": {
+          "type": "string", "minLength": 43, "maxLength": 43,
+          "pattern": "^[A-Za-z0-9_-]+$"
+        },
+        "issued_at": { "$ref": "#/$defs/timestamp" },
+        "expires_at": { "$ref": "#/$defs/timestamp" },
+        "payload": {
+          "oneOf": [
+            { "$ref": "#/$defs/workloadPlanPayload" },
+            { "$ref": "#/$defs/workloadExecutePayload" },
+            { "$ref": "#/$defs/workloadStopPayload" },
+            { "$ref": "#/$defs/workloadDeletePayload" }
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "type": { "const": "workload.plan.request" } } },
+          "then": { "properties": { "payload": { "$ref": "#/$defs/workloadPlanPayload" } } }
+        },
+        {
+          "if": { "properties": { "type": { "const": "workload.execute.request" } } },
+          "then": { "properties": { "payload": { "$ref": "#/$defs/workloadExecutePayload" } } }
+        },
+        {
+          "if": {
+            "properties": {
+              "type": { "enum": ["workload.stop.request", "workload.restart.request"] }
+            }
+          },
+          "then": { "properties": { "payload": { "$ref": "#/$defs/workloadStopPayload" } } }
+        },
+        {
+          "if": { "properties": { "type": { "const": "workload.delete.request" } } },
+          "then": { "properties": { "payload": { "$ref": "#/$defs/workloadDeletePayload" } } }
+        }
+      ]
+    },
+    "workloadFinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "severity", "message", "finding_digest", "requires_approval"],
+      "properties": {
+        "code": { "$ref": "#/$defs/errorCode" },
+        "severity": { "enum": ["low", "medium", "high", "critical"] },
+        "message": { "type": "string", "minLength": 1, "maxLength": 2048 },
+        "finding_digest": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+        "requires_approval": { "type": "boolean" }
+      }
+    },
+    "workloadPlanStep": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sequence", "action", "resource"],
+      "properties": {
+        "sequence": { "type": "integer", "minimum": 1, "maximum": 1024 },
+        "action": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "resource": { "type": "string", "minLength": 1, "maxLength": 1024 }
+      }
+    },
+    "workloadPlanResultPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["state", "steps", "findings"],
+      "properties": {
+        "state": { "enum": ["ready", "rejected", "failed"] },
+        "plan_digest": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+        "steps": { "type": "array", "maxItems": 1024, "items": { "$ref": "#/$defs/workloadPlanStep" } },
+        "findings": { "type": "array", "maxItems": 256, "items": { "$ref": "#/$defs/workloadFinding" } },
+        "code": { "$ref": "#/$defs/errorCode" },
+        "message": { "type": "string", "maxLength": 2048 }
+      }
+    },
+    "workloadPlanResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type", "schema_version", "request_id", "portal_id", "node_id",
+        "workload_id", "occurred_at", "payload"
+      ],
+      "properties": {
+        "type": { "const": "workload.plan.result" },
+        "schema_version": { "const": 1 },
+        "request_id": { "$ref": "#/$defs/uuid" },
+        "portal_id": { "$ref": "#/$defs/uuid" },
+        "node_id": { "$ref": "#/$defs/uuid" },
+        "workload_id": { "$ref": "#/$defs/uuid" },
+        "occurred_at": { "$ref": "#/$defs/timestamp" },
+        "payload": { "$ref": "#/$defs/workloadPlanResultPayload" }
+      }
+    },
+    "workloadOperationEventPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sequence", "state", "step"],
+      "properties": {
+        "sequence": { "type": "integer", "minimum": 1 },
+        "state": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "step": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "message": { "type": "string", "maxLength": 2048 }
+      }
+    },
+    "workloadOperationEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type", "schema_version", "request_id", "portal_id", "node_id",
+        "workload_id", "occurred_at", "payload"
+      ],
+      "properties": {
+        "type": { "const": "workload.operation.event" },
+        "schema_version": { "const": 1 },
+        "request_id": { "$ref": "#/$defs/uuid" },
+        "portal_id": { "$ref": "#/$defs/uuid" },
+        "node_id": { "$ref": "#/$defs/uuid" },
+        "workload_id": { "$ref": "#/$defs/uuid" },
+        "occurred_at": { "$ref": "#/$defs/timestamp" },
+        "payload": { "$ref": "#/$defs/workloadOperationEventPayload" }
+      }
+    },
+    "workloadOperationResultPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["state"],
+      "properties": {
+        "state": { "enum": ["succeeded", "failed", "rejected", "unknown"] },
+        "code": { "$ref": "#/$defs/errorCode" },
+        "message": { "type": "string", "maxLength": 2048 }
+      }
+    },
+    "workloadOperationResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type", "schema_version", "request_id", "portal_id", "node_id",
+        "workload_id", "occurred_at", "payload"
+      ],
+      "properties": {
+        "type": { "const": "workload.operation.result" },
+        "schema_version": { "const": 1 },
+        "request_id": { "$ref": "#/$defs/uuid" },
+        "portal_id": { "$ref": "#/$defs/uuid" },
+        "node_id": { "$ref": "#/$defs/uuid" },
+        "workload_id": { "$ref": "#/$defs/uuid" },
+        "occurred_at": { "$ref": "#/$defs/timestamp" },
+        "payload": { "$ref": "#/$defs/workloadOperationResultPayload" }
+      }
+    },
+    "collectionIssue": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["component", "code"],
+      "properties": {
+        "component": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "code": { "$ref": "#/$defs/errorCode" }
+      }
+    },
+    "osSpecifications": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type"],
+      "properties": {
+        "type": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "name": { "type": "string", "maxLength": 255 },
+        "version": { "type": "string", "maxLength": 255 },
+        "kernel_version": { "type": "string", "maxLength": 255 }
+      }
+    },
+    "virtualizationSpecifications": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind"],
+      "properties": {
+        "kind": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "provider": { "type": "string", "maxLength": 128 }
+      }
+    },
+    "systemSpecifications": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["hostname", "architecture", "os"],
+      "properties": {
+        "hostname": { "type": "string", "minLength": 1, "maxLength": 255 },
+        "architecture": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "os": { "$ref": "#/$defs/osSpecifications" },
+        "virtualization": { "$ref": "#/$defs/virtualizationSpecifications" }
+      }
+    },
+    "cpuPackageSpecifications": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "vendor": { "type": "string", "maxLength": 255 },
+        "model": { "type": "string", "maxLength": 255 },
+        "socket": { "type": "string", "maxLength": 128 },
+        "physical_core_count": { "type": "integer", "minimum": 1 },
+        "logical_processor_count": { "type": "integer", "minimum": 1 },
+        "frequency_hz": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "numaNodeSpecifications": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "memory_bytes": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "logicalProcessorSpecifications": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "online"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "package_id": { "type": "string", "maxLength": 128 },
+        "core_id": { "type": "string", "maxLength": 128 },
+        "numa_node_id": { "type": "string", "maxLength": 128 },
+        "online": { "type": "boolean" }
+      }
+    },
+    "cpuSpecifications": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["architecture", "physical_core_count", "logical_processor_count", "packages", "numa_nodes", "logical_processors"],
+      "properties": {
+        "architecture": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "physical_core_count": { "type": "integer", "minimum": 0 },
+        "logical_processor_count": { "type": "integer", "minimum": 1 },
+        "packages": { "type": "array", "items": { "$ref": "#/$defs/cpuPackageSpecifications" } },
+        "numa_nodes": { "type": "array", "maxItems": 1024, "items": { "$ref": "#/$defs/numaNodeSpecifications" } },
+        "logical_processors": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/logicalProcessorSpecifications" } }
+      }
+    },
+    "memoryModuleSpecifications": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "size_bytes"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "locator": { "type": "string", "maxLength": 255 },
+        "size_bytes": { "type": "integer", "minimum": 1 },
+        "type": { "type": "string", "maxLength": 64 },
+        "speed_mt_s": { "type": "integer", "minimum": 1 },
+        "manufacturer": { "type": "string", "maxLength": 255 },
+        "part_number": { "type": "string", "maxLength": 255 }
+      }
+    },
+    "memorySpecifications": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["total_bytes", "modules"],
+      "properties": {
+        "total_bytes": { "type": "integer", "minimum": 0 },
+        "modules": { "type": "array", "maxItems": 256, "items": { "$ref": "#/$defs/memoryModuleSpecifications" } }
+      }
+    },
+    "gpuSpecifications": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "vendor": { "type": "string", "maxLength": 255 },
+        "model": { "type": "string", "maxLength": 255 },
+        "vendor_id": { "type": "string", "maxLength": 64 },
+        "device_id": { "type": "string", "maxLength": 64 },
+        "memory_bytes": { "type": "integer", "minimum": 1 },
+        "driver": { "type": "string", "maxLength": 255 },
+        "driver_version": { "type": "string", "maxLength": 255 }
+      }
+    },
+    "storageDeviceSpecifications": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name", "removable"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "name": { "type": "string", "minLength": 1, "maxLength": 255 },
+        "vendor": { "type": "string", "maxLength": 255 },
+        "model": { "type": "string", "maxLength": 255 },
+        "media_type": { "type": "string", "maxLength": 64 },
+        "transport": { "type": "string", "maxLength": 64 },
+        "capacity_bytes": { "type": "integer", "minimum": 1 },
+        "block_size_bytes": { "type": "integer", "minimum": 1 },
+        "removable": { "type": "boolean" }
+      }
+    },
+    "networkInterfaceSpecifications": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name", "physical"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "name": { "type": "string", "minLength": 1, "maxLength": 255 },
+        "kind": { "type": "string", "maxLength": 64 },
+        "physical": { "type": "boolean" },
+        "mtu": { "type": "integer", "minimum": 1 },
+        "max_speed_bps": { "type": "integer", "minimum": 1 },
+        "driver": { "type": "string", "maxLength": 255 },
+        "driver_version": { "type": "string", "maxLength": 255 }
+      }
+    },
+    "nodeSpecifications": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["system", "cpu", "memory", "gpus", "storage_devices", "network_interfaces"],
+      "properties": {
+        "system": { "$ref": "#/$defs/systemSpecifications" },
+        "cpu": { "$ref": "#/$defs/cpuSpecifications" },
+        "memory": { "$ref": "#/$defs/memorySpecifications" },
+        "gpus": { "type": "array", "maxItems": 64, "items": { "$ref": "#/$defs/gpuSpecifications" } },
+        "storage_devices": { "type": "array", "maxItems": 256, "items": { "$ref": "#/$defs/storageDeviceSpecifications" } },
+        "network_interfaces": { "type": "array", "maxItems": 256, "items": { "$ref": "#/$defs/networkInterfaceSpecifications" } },
+        "collection_issues": { "type": "array", "items": { "$ref": "#/$defs/collectionIssue" } }
+      }
+    },
+    "nodeSpecificationsReport": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "schema_version", "request_id", "observed_at", "observation_scope", "specifications"],
+      "properties": {
+        "type": { "const": "node.specifications.report" },
+        "schema_version": { "const": 1 },
+        "request_id": { "$ref": "#/$defs/uuid" },
+        "observed_at": { "$ref": "#/$defs/timestamp" },
+        "observation_scope": { "enum": ["host", "runtime"] },
+        "specifications": { "$ref": "#/$defs/nodeSpecifications" }
+      }
+    },
+    "nodeSpecificationsAccepted": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "request_id"],
+      "properties": {
+        "type": { "const": "node.specifications.accepted" },
+        "request_id": { "$ref": "#/$defs/uuid" }
+      }
+    },
+    "nodeSpecificationsRejected": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "request_id", "code"],
+      "properties": {
+        "type": { "const": "node.specifications.rejected" },
+        "request_id": { "$ref": "#/$defs/uuid" },
+        "code": { "$ref": "#/$defs/errorCode" },
+        "message": { "type": "string", "maxLength": 1024 }
+      }
+    },
+    "networkAddress": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["family", "address", "prefix_length"],
+      "properties": {
+        "family": { "enum": ["ipv4", "ipv6"] },
+        "address": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "prefix_length": { "type": "integer", "minimum": 0, "maximum": 128 }
+      }
+    },
+    "networkInterfaceConfiguration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name", "flags", "addresses"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "name": { "type": "string", "minLength": 1, "maxLength": 255 },
+        "hardware_address": { "type": "string", "maxLength": 64 },
+        "mtu": { "type": "integer", "minimum": 1 },
+        "flags": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1, "maxLength": 64 }
+        },
+        "addresses": {
+          "type": "array",
+          "maxItems": 64,
+          "items": { "$ref": "#/$defs/networkAddress" }
+        }
+      }
+    },
+    "networkRoute": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["family", "destination"],
+      "properties": {
+        "family": { "enum": ["ipv4", "ipv6"] },
+        "destination": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "gateway": { "type": "string", "maxLength": 64 },
+        "interface_id": { "type": "string", "maxLength": 128 },
+        "metric": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "listeningPort": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["protocol", "address", "port"],
+      "properties": {
+        "protocol": { "enum": ["tcp", "udp"] },
+        "address": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "process_id": { "type": "integer", "minimum": 1, "maximum": 2147483647 }
+      }
+    },
+    "firewallProvider": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "role", "status"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "role": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "status": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "backend": { "type": "string", "maxLength": 128 }
+      }
+    },
+    "portRange": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["from", "to"],
+      "properties": {
+        "from": { "type": "integer", "minimum": 0, "maximum": 65535 },
+        "to": { "type": "integer", "minimum": 0, "maximum": 65535 }
+      }
+    },
+    "firewallRule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "provider", "family", "direction", "action", "protocol", "source_cidrs", "destination_cidrs", "source_ports", "destination_ports", "interfaces", "enabled", "partial"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 255 },
+        "provider": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "family": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "table": { "type": "string", "maxLength": 128 },
+        "chain": { "type": "string", "maxLength": 128 },
+        "direction": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "action": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "protocol": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "source_cidrs": { "type": "array", "items": { "type": "string", "minLength": 1, "maxLength": 64 } },
+        "destination_cidrs": { "type": "array", "items": { "type": "string", "minLength": 1, "maxLength": 64 } },
+        "source_ports": { "type": "array", "items": { "$ref": "#/$defs/portRange" } },
+        "destination_ports": { "type": "array", "items": { "$ref": "#/$defs/portRange" } },
+        "interfaces": { "type": "array", "items": { "type": "string", "minLength": 1, "maxLength": 255 } },
+        "enabled": { "type": "boolean" },
+        "partial": { "type": "boolean" }
+      }
+    },
+    "firewallInformation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "providers", "rules", "truncated"],
+      "properties": {
+        "status": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "providers": { "type": "array", "items": { "$ref": "#/$defs/firewallProvider" } },
+        "rules": { "type": "array", "maxItems": 4096, "items": { "$ref": "#/$defs/firewallRule" } },
+        "truncated": { "type": "boolean" }
+      }
+    },
+    "nodeNetwork": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["interfaces", "routes", "listening_ports", "firewall"],
+      "properties": {
+        "interfaces": { "type": "array", "maxItems": 256, "items": { "$ref": "#/$defs/networkInterfaceConfiguration" } },
+        "routes": { "type": "array", "maxItems": 4096, "items": { "$ref": "#/$defs/networkRoute" } },
+        "listening_ports": { "type": "array", "maxItems": 4096, "items": { "$ref": "#/$defs/listeningPort" } },
+        "firewall": { "$ref": "#/$defs/firewallInformation" },
+        "collection_issues": { "type": "array", "items": { "$ref": "#/$defs/collectionIssue" } }
+      }
+    },
+    "nodeNetworkReport": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "schema_version", "request_id", "observed_at", "observation_scope", "network"],
+      "properties": {
+        "type": { "const": "node.network.report" },
+        "schema_version": { "const": 1 },
+        "request_id": { "$ref": "#/$defs/uuid" },
+        "observed_at": { "$ref": "#/$defs/timestamp" },
+        "observation_scope": { "enum": ["host", "runtime"] },
+        "network": { "$ref": "#/$defs/nodeNetwork" }
+      }
+    },
+    "nodeNetworkAccepted": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "request_id"],
+      "properties": {
+        "type": { "const": "node.network.accepted" },
+        "request_id": { "$ref": "#/$defs/uuid" }
+      }
+    },
+    "nodeNetworkRejected": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "request_id", "code"],
+      "properties": {
+        "type": { "const": "node.network.rejected" },
+        "request_id": { "$ref": "#/$defs/uuid" },
+        "code": { "$ref": "#/$defs/errorCode" },
+        "message": { "type": "string", "maxLength": 1024 }
+      }
+    },
+    "cpuUtilizationMetrics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["usage_percent", "user_percent", "system_percent", "iowait_percent", "steal_percent", "idle_percent"],
+      "properties": {
+        "usage_percent": { "type": "number", "minimum": 0, "maximum": 100 },
+        "user_percent": { "type": "number", "minimum": 0, "maximum": 100 },
+        "system_percent": { "type": "number", "minimum": 0, "maximum": 100 },
+        "iowait_percent": { "type": "number", "minimum": 0, "maximum": 100 },
+        "steal_percent": { "type": "number", "minimum": 0, "maximum": 100 },
+        "idle_percent": { "type": "number", "minimum": 0, "maximum": 100 }
+      }
+    },
+    "logicalProcessorMetrics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "usage_percent", "user_percent", "system_percent", "iowait_percent", "steal_percent", "idle_percent"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "usage_percent": { "type": "number", "minimum": 0, "maximum": 100 },
+        "user_percent": { "type": "number", "minimum": 0, "maximum": 100 },
+        "system_percent": { "type": "number", "minimum": 0, "maximum": 100 },
+        "iowait_percent": { "type": "number", "minimum": 0, "maximum": 100 },
+        "steal_percent": { "type": "number", "minimum": 0, "maximum": 100 },
+        "idle_percent": { "type": "number", "minimum": 0, "maximum": 100 }
+      }
+    },
+    "loadAverageMetrics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["1m", "5m", "15m"],
+      "properties": {
+        "1m": { "type": "number", "minimum": 0 },
+        "5m": { "type": "number", "minimum": 0 },
+        "15m": { "type": "number", "minimum": 0 }
+      }
+    },
+    "cpuMetrics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["total", "logical"],
+      "properties": {
+        "total": { "$ref": "#/$defs/cpuUtilizationMetrics" },
+        "logical": { "type": "array", "maxItems": 4096, "items": { "$ref": "#/$defs/logicalProcessorMetrics" } },
+        "load_average": { "$ref": "#/$defs/loadAverageMetrics" },
+        "context_switches_per_second": { "type": "number", "minimum": 0 },
+        "interrupts_per_second": { "type": "number", "minimum": 0 }
+      }
+    },
+    "memoryMetrics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["used_bytes", "available_bytes", "cached_bytes", "buffers_bytes", "swap_used_bytes"],
+      "properties": {
+        "used_bytes": { "type": "integer", "minimum": 0 },
+        "available_bytes": { "type": "integer", "minimum": 0 },
+        "cached_bytes": { "type": "integer", "minimum": 0 },
+        "buffers_bytes": { "type": "integer", "minimum": 0 },
+        "swap_used_bytes": { "type": "integer", "minimum": 0 },
+        "page_faults_per_second": { "type": "number", "minimum": 0 },
+        "major_page_faults_per_second": { "type": "number", "minimum": 0 }
+      }
+    },
+    "storageDeviceMetrics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["device_id", "read_bytes_per_second", "write_bytes_per_second", "read_operations_per_second", "write_operations_per_second", "io_utilization_percent", "queue_depth"],
+      "properties": {
+        "device_id": { "type": "string", "minLength": 1, "maxLength": 255 },
+        "read_bytes_per_second": { "type": "number", "minimum": 0 },
+        "write_bytes_per_second": { "type": "number", "minimum": 0 },
+        "read_operations_per_second": { "type": "number", "minimum": 0 },
+        "write_operations_per_second": { "type": "number", "minimum": 0 },
+        "io_utilization_percent": { "type": "number", "minimum": 0, "maximum": 100 },
+        "queue_depth": { "type": "number", "minimum": 0 }
+      }
+    },
+    "filesystemMetrics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["filesystem_id", "mountpoint", "used_bytes", "available_bytes", "used_percent"],
+      "properties": {
+        "filesystem_id": { "type": "string", "minLength": 1, "maxLength": 255 },
+        "mountpoint": { "type": "string", "minLength": 1, "maxLength": 1024 },
+        "used_bytes": { "type": "integer", "minimum": 0 },
+        "available_bytes": { "type": "integer", "minimum": 0 },
+        "used_percent": { "type": "number", "minimum": 0, "maximum": 100 },
+        "inodes_used_percent": { "type": "number", "minimum": 0, "maximum": 100 }
+      }
+    },
+    "storageMetrics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["devices", "filesystems"],
+      "properties": {
+        "devices": { "type": "array", "maxItems": 1024, "items": { "$ref": "#/$defs/storageDeviceMetrics" } },
+        "filesystems": { "type": "array", "maxItems": 1024, "items": { "$ref": "#/$defs/filesystemMetrics" } }
+      }
+    },
+    "networkMetrics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["interface_id", "rx_bytes_per_second", "tx_bytes_per_second", "rx_packets_per_second", "tx_packets_per_second", "rx_errors_per_second", "tx_errors_per_second", "rx_drops_per_second", "tx_drops_per_second"],
+      "properties": {
+        "interface_id": { "type": "string", "minLength": 1, "maxLength": 255 },
+        "rx_bytes_per_second": { "type": "number", "minimum": 0 },
+        "tx_bytes_per_second": { "type": "number", "minimum": 0 },
+        "rx_packets_per_second": { "type": "number", "minimum": 0 },
+        "tx_packets_per_second": { "type": "number", "minimum": 0 },
+        "rx_errors_per_second": { "type": "number", "minimum": 0 },
+        "tx_errors_per_second": { "type": "number", "minimum": 0 },
+        "rx_drops_per_second": { "type": "number", "minimum": 0 },
+        "tx_drops_per_second": { "type": "number", "minimum": 0 }
+      }
+    },
+    "gpuMetrics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["gpu_id"],
+      "properties": {
+        "gpu_id": { "type": "string", "minLength": 1, "maxLength": 255 },
+        "utilization_percent": { "type": "number", "minimum": 0, "maximum": 100 },
+        "memory_used_bytes": { "type": "integer", "minimum": 0 },
+        "temperature_celsius": { "type": "number", "minimum": -273.15 },
+        "power_watts": { "type": "number", "minimum": 0 },
+        "fan_percent": { "type": "number", "minimum": 0, "maximum": 100 },
+        "clock_hz": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "processMetric": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pid", "started_at", "name", "cpu_percent", "memory_rss_bytes", "memory_virtual_bytes", "read_bytes_per_second", "write_bytes_per_second", "threads"],
+      "properties": {
+        "pid": { "type": "integer", "minimum": 0, "maximum": 2147483647 },
+        "started_at": { "$ref": "#/$defs/timestamp" },
+        "name": { "type": "string", "maxLength": 256 },
+        "cpu_percent": { "type": "number", "minimum": 0, "maximum": 409600 },
+        "memory_rss_bytes": { "type": "integer", "minimum": 0 },
+        "memory_virtual_bytes": { "type": "integer", "minimum": 0 },
+        "read_bytes_per_second": { "type": "number", "minimum": 0 },
+        "write_bytes_per_second": { "type": "number", "minimum": 0 },
+        "threads": { "type": "integer", "minimum": 0 },
+        "file_descriptors": { "type": "integer", "minimum": 0 },
+        "container_id": { "type": "string", "minLength": 1, "maxLength": 128 }
+      }
+    },
+    "processMetrics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["total", "running", "sleeping", "blocked", "zombie", "threads", "truncated", "items"],
+      "properties": {
+        "total": { "type": "integer", "minimum": 0 },
+        "running": { "type": "integer", "minimum": 0 },
+        "sleeping": { "type": "integer", "minimum": 0 },
+        "blocked": { "type": "integer", "minimum": 0 },
+        "zombie": { "type": "integer", "minimum": 0 },
+        "threads": { "type": "integer", "minimum": 0 },
+        "truncated": { "type": "boolean" },
+        "items": { "type": "array", "maxItems": 256, "items": { "$ref": "#/$defs/processMetric" } }
+      }
+    },
+    "containerCPUMetrics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["usage_percent", "throttled_seconds_total", "throttled_periods_total"],
+      "properties": {
+        "usage_percent": { "type": "number", "minimum": 0, "maximum": 409600 },
+        "throttled_seconds_total": { "type": "number", "minimum": 0 },
+        "throttled_periods_total": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "containerMemoryMetrics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["used_bytes", "limit_bytes", "used_percent", "cache_bytes", "oom_events_total"],
+      "properties": {
+        "used_bytes": { "type": "integer", "minimum": 0 },
+        "limit_bytes": { "type": "integer", "minimum": 0 },
+        "used_percent": { "type": "number", "minimum": 0, "maximum": 100 },
+        "cache_bytes": { "type": "integer", "minimum": 0 },
+        "oom_events_total": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "containerStorageMetrics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["read_bytes_per_second", "write_bytes_per_second", "read_operations_per_second", "write_operations_per_second"],
+      "properties": {
+        "read_bytes_per_second": { "type": "number", "minimum": 0 },
+        "write_bytes_per_second": { "type": "number", "minimum": 0 },
+        "read_operations_per_second": { "type": "number", "minimum": 0 },
+        "write_operations_per_second": { "type": "number", "minimum": 0 }
+      }
+    },
+    "containerNetworkMetrics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["rx_bytes_per_second", "tx_bytes_per_second", "rx_packets_per_second", "tx_packets_per_second"],
+      "properties": {
+        "rx_bytes_per_second": { "type": "number", "minimum": 0 },
+        "tx_bytes_per_second": { "type": "number", "minimum": 0 },
+        "rx_packets_per_second": { "type": "number", "minimum": 0 },
+        "tx_packets_per_second": { "type": "number", "minimum": 0 }
+      }
+    },
+    "containerPIDMetrics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["current", "limit"],
+      "properties": {
+        "current": { "type": "integer", "minimum": 0 },
+        "limit": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "containerMetrics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["container_id", "runtime", "name", "state", "cpu", "memory", "storage", "network", "pids"],
+      "properties": {
+        "container_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "runtime": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "name": { "type": "string", "maxLength": 256 },
+        "state": { "type": "string", "maxLength": 64 },
+        "cpu": { "$ref": "#/$defs/containerCPUMetrics" },
+        "memory": { "$ref": "#/$defs/containerMemoryMetrics" },
+        "storage": { "$ref": "#/$defs/containerStorageMetrics" },
+        "network": { "$ref": "#/$defs/containerNetworkMetrics" },
+        "pids": { "$ref": "#/$defs/containerPIDMetrics" }
+      }
+    },
+    "nodeMetrics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["cpu", "memory", "storage", "network", "gpus", "processes"],
+      "properties": {
+        "cpu": { "$ref": "#/$defs/cpuMetrics" },
+        "memory": { "$ref": "#/$defs/memoryMetrics" },
+        "storage": { "$ref": "#/$defs/storageMetrics" },
+        "network": { "type": "array", "maxItems": 256, "items": { "$ref": "#/$defs/networkMetrics" } },
+        "gpus": { "type": "array", "maxItems": 256, "items": { "$ref": "#/$defs/gpuMetrics" } },
+        "processes": { "$ref": "#/$defs/processMetrics" }
+      }
+    },
+    "containerMetricSet": {
+	  "type": "object",
+	  "additionalProperties": false,
+	  "required": ["items"],
+	  "properties": {
+	    "items": { "type": "array", "maxItems": 256, "items": { "$ref": "#/$defs/containerMetrics" } }
+	  }
+	},
+	"pluginMetricSet": {
+	  "type": "object",
+	  "additionalProperties": false,
+	  "required": ["values"],
+	  "properties": {
+	    "values": {
+	      "type": "object",
+	      "minProperties": 1,
+	      "maxProperties": 1024,
+	      "propertyNames": { "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,127}$" },
+	      "additionalProperties": { "type": "number" }
+	    }
+	  }
+	},
+	"metricSample": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sequence", "observed_at", "interval_ms", "observation_scope"],
+      "properties": {
+        "sequence": { "type": "integer", "minimum": 1 },
+        "observed_at": { "$ref": "#/$defs/timestamp" },
+        "interval_ms": { "type": "integer", "minimum": 1, "maximum": 4294967295 },
+        "observation_scope": { "enum": ["host", "runtime"] },
+        "node": { "$ref": "#/$defs/nodeMetrics" },
+		"containers": { "$ref": "#/$defs/containerMetricSet" },
+		"plugin": { "$ref": "#/$defs/pluginMetricSet" },
+        "collection_issues": { "type": "array", "maxItems": 256, "items": { "$ref": "#/$defs/collectionIssue" } }
+	  },
+	  "oneOf": [
+	    { "required": ["node"], "not": { "anyOf": [{ "required": ["containers"] }, { "required": ["plugin"] }] } },
+	    { "required": ["containers"], "not": { "anyOf": [{ "required": ["node"] }, { "required": ["plugin"] }] } },
+	    { "required": ["plugin"], "not": { "anyOf": [{ "required": ["node"] }, { "required": ["containers"] }] } }
+	  ]
+    },
+	"metricSeries": {
+	  "type": "object",
+	  "additionalProperties": false,
+	  "required": ["type", "samples"],
+	  "properties": {
+	    "type": { "type": "string", "pattern": "^(node|container|plugin:[a-z0-9][a-z0-9._-]{0,63})$" },
+	    "schema_version": { "type": "integer", "minimum": 1, "maximum": 65535 },
+	    "source_id": { "type": "string", "minLength": 1, "maxLength": 256 },
+	    "samples": { "type": "array", "minItems": 1, "maxItems": 60, "items": { "$ref": "#/$defs/metricSample" } }
+	  },
+	  "allOf": [
+	    {
+	      "if": { "properties": { "type": { "const": "node" } }, "required": ["type"] },
+	      "then": { "properties": { "samples": { "items": { "required": ["node"] } } } }
+	    },
+	    {
+	      "if": { "properties": { "type": { "const": "container" } }, "required": ["type"] },
+	      "then": { "properties": { "samples": { "items": { "required": ["containers"] } } } }
+	    },
+	    {
+	      "if": { "properties": { "type": { "pattern": "^plugin:" } }, "required": ["type"] },
+	      "then": {
+	        "required": ["schema_version", "source_id"],
+	        "properties": { "samples": { "items": { "required": ["plugin"] } } }
+	      }
+	    }
+	  ]
+	},
+	"metricsReport": {
+      "type": "object",
+      "additionalProperties": false,
+	  "required": ["type", "schema_version", "request_id", "stream_id", "metric"],
+      "properties": {
+		"type": { "const": "metrics.report" },
+        "schema_version": { "const": 1 },
+        "request_id": { "$ref": "#/$defs/uuid" },
+        "stream_id": { "$ref": "#/$defs/uuid" },
+		"metric": { "$ref": "#/$defs/metricSeries" }
+      }
+    },
+	"metricsAccepted": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "request_id"],
+      "properties": {
+		"type": { "const": "metrics.accepted" },
+        "request_id": { "$ref": "#/$defs/uuid" }
+      }
+    },
+	"metricsRejected": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "request_id", "code"],
+      "properties": {
+		"type": { "const": "metrics.rejected" },
+        "request_id": { "$ref": "#/$defs/uuid" },
+        "code": { "$ref": "#/$defs/errorCode" },
+        "message": { "type": "string", "maxLength": 1024 }
+      }
+    }
+  }
+}

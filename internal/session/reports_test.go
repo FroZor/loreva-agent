@@ -59,7 +59,6 @@ func TestNodeReporterSendsSpecificationsBeforeNetwork(t *testing.T) {
 	if err := wsframe.WriteJSON(t.Context(), server, protocol.NodeSpecificationsAccepted{
 		Type:      protocol.NodeSpecificationsAcceptedType,
 		RequestID: specificationsReport.RequestID,
-		Revision:  1,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -97,8 +96,7 @@ func TestNodeReporterRejectsMismatchedAcknowledgement(t *testing.T) {
 
 	err := reporter.handleResponse(t.Context(), []byte(`{
         "type":"node.specifications.accepted",
-        "request_id":"7f039655-b659-4a7f-baa0-29e6142fd480",
-        "revision":1
+        "request_id":"7f039655-b659-4a7f-baa0-29e6142fd480"
     }`))
 	if err == nil {
 		t.Fatal("mismatched request ID was accepted")
@@ -180,6 +178,7 @@ func TestTerminalNodeReportRejectionSkipsReportWithoutEndingSession(t *testing.T
 	err := runner.handleWorkingMessage(
 		t.Context(),
 		nil,
+		"",
 		runner.masterEndpoint,
 		[]byte(`{
             "type":"node.specifications.rejected",
@@ -216,6 +215,7 @@ func TestTransientNodeReportRejectionSchedulesSameReport(t *testing.T) {
 	err := runner.handleWorkingMessage(
 		t.Context(),
 		nil,
+		"",
 		runner.masterEndpoint,
 		[]byte(`{
             "type":"node.specifications.rejected",
@@ -245,6 +245,7 @@ func TestMalformedNodeReportRejectionReconnectsWithoutBecomingTerminal(t *testin
 	err := runner.handleWorkingMessage(
 		t.Context(),
 		nil,
+		"",
 		runner.masterEndpoint,
 		[]byte(`{
             "type":"node.specifications.rejected",
@@ -271,6 +272,7 @@ func TestMissingNodeIsTerminalIdentityFailure(t *testing.T) {
 	err := runner.handleWorkingMessage(
 		t.Context(),
 		nil,
+		"",
 		runner.masterEndpoint,
 		[]byte(`{
             "type":"node.specifications.rejected",
@@ -289,17 +291,16 @@ func TestDuplicateNodeReportAcknowledgementDoesNotAdvanceActiveReport(t *testing
 	live := newTestReportLiveState(t, nodeReportNetwork)
 	live.reports.state.lastAcceptedKind = nodeReportSpecifications
 	live.reports.state.lastAcceptedRequestID = "6e0c1d91-5145-440f-bf97-d84db4f83644"
-	live.reports.state.lastAcceptedRevision = 7
 	runner := &Runner{masterEndpoint: "wss://portal.example/agent/v1/connect"}
 
 	err := runner.handleWorkingMessage(
 		t.Context(),
 		nil,
+		"",
 		runner.masterEndpoint,
 		[]byte(`{
             "type":"node.specifications.accepted",
-            "request_id":"6e0c1d91-5145-440f-bf97-d84db4f83644",
-            "revision":7
+            "request_id":"6e0c1d91-5145-440f-bf97-d84db4f83644"
         }`),
 		live,
 		Events{},

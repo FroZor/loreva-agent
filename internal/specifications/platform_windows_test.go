@@ -2,7 +2,24 @@
 
 package specifications
 
-import "testing"
+import (
+	"context"
+	"testing"
+	"time"
+)
+
+func TestReadWindowsSpecificationsCapturesOutput(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+
+	document, err := readWindowsSpecifications(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if document.Memory == nil || document.GPUs == nil || document.Storage == nil || document.Network == nil {
+		t.Fatal("Windows collector returned null collections")
+	}
+}
 
 func TestWindowsPCIIdentifiers(t *testing.T) {
 	vendor, device := windowsPCIIdentifiers(`PCI\VEN_10DE&DEV_2684&SUBSYS_00000000`)

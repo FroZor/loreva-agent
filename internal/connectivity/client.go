@@ -51,7 +51,7 @@ type Dialer struct {
 
 // NewDialer validates config and creates a portal connection dialer.
 func NewDialer(config Config) (*Dialer, error) {
-	httpClient, err := secureHTTPClient(config.PortalCAPEM, config.ClientCertificate)
+	httpClient, err := NewHTTPClient(config)
 	if err != nil {
 		return nil, err
 	}
@@ -64,6 +64,13 @@ func NewDialer(config Config) (*Dialer, error) {
 		allowDevelopmentWS: config.AllowDevelopmentWS,
 		readLimit:          config.ReadLimit,
 	}, nil
+}
+
+// NewHTTPClient creates an HTTP client with the same trust and TLS policy as
+// portal WebSocket connections. It is used for immutable portal artifacts;
+// callers must still constrain destination paths and verify signed digests.
+func NewHTTPClient(config Config) (*http.Client, error) {
+	return secureHTTPClient(config.PortalCAPEM, config.ClientCertificate)
 }
 
 // Dial opens a WebSocket and verifies its negotiated transport policy.
@@ -115,6 +122,37 @@ func Endpoint(portalURL, endpointPath string) (string, error) {
 	if err := validateEndpoint(parsed.String(), true); err != nil {
 		return "", err
 	}
+
+	return parsed.String(), nil
+}
+
+// HTTPEndpoint resolves a fixed HTTPS path under a portal WebSocket URL.
+// Plain HTTP is accepted only for explicitly enabled loopback development.
+func HTTPEndpoint(portalURL, endpointPath string, allowDevelopmentHTTP bool) (string, error) {
+	parsed, err := url.Parse(portalURL)
+	if err != nil {
+		return "", fmt.Errorf("parse portal URL: %w", err)
+	}
+	if parsed.Path != "" && parsed.Path != "/" {
+		return "", errors.New("portal URL must not contain a path")
+	}
+	if parsed.RawQuery != "" || parsed.Fragment != "" || parsed.User != nil {
+		return "", errors.New("portal URL must not contain user information, a query, or a fragment")
+	}
+
+	switch strings.ToLower(parsed.Scheme) {
+	case "wss":
+		parsed.Scheme = "https"
+	case "ws":
+		if !allowDevelopmentHTTP || !isLoopbackHost(parsed.Hostname()) {
+			return "", ErrInsecureTransport
+		}
+		parsed.Scheme = "http"
+	default:
+		return "", ErrUnsupportedScheme
+	}
+
+	parsed.Path = path.Clean("/" + strings.TrimPrefix(endpointPath, "/"))
 
 	return parsed.String(), nil
 }

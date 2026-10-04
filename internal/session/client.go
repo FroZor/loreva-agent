@@ -6,12 +6,13 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/FroZor/loreva-agent/internal/agentcrypto"
 	"github.com/FroZor/loreva-agent/internal/connectivity"
+	"github.com/FroZor/loreva-agent/internal/metrics"
 	"github.com/FroZor/loreva-agent/internal/networkinfo"
+	"github.com/FroZor/loreva-agent/internal/protocol"
 	"github.com/FroZor/loreva-agent/internal/specifications"
 	"github.com/FroZor/loreva-agent/internal/state"
 )
@@ -76,12 +77,23 @@ type Runner struct {
 	masterEndpoint    string
 	collectors        Collectors
 	reports           nodeReportState
+	metrics           metricState
+	workloads         WorkloadController
 }
 
 // Collectors provide bounded system snapshots after a connection is accepted.
 type Collectors struct {
 	Specifications func(context.Context) (specifications.Snapshot, error)
 	Network        func(context.Context) (networkinfo.Snapshot, error)
+	Metrics        func(context.Context) (metrics.Snapshot, error)
+	Workloads      WorkloadController
+}
+
+// WorkloadController accepts authenticated commands and returns asynchronous
+// protocol responses. The live session remains the only WebSocket writer.
+type WorkloadController interface {
+	Submit(protocol.WorkloadCommand) error
+	Results() <-chan any
 }
 
 // New validates the persisted identity and creates a session runner.
@@ -90,7 +102,7 @@ func New(store *state.Store, identity *state.Identity, collectors Collectors) (*
 		return nil, errors.New("agent state store is required")
 	}
 
-	runner := &Runner{store: store, collectors: collectors}
+	runner := &Runner{store: store, collectors: collectors, workloads: collectors.Workloads}
 	if err := runner.installIdentity(identity); err != nil {
 		return nil, err
 	}
@@ -111,10 +123,9 @@ func (r *Runner) installIdentity(identity *state.Identity) error {
 		return err
 	}
 
-	certificatePEM := []byte(strings.Join(identity.CertificateChain, "\n"))
-	clientCertificate, err := tls.X509KeyPair(certificatePEM, []byte(identity.ECDSAPrivateKey))
+	clientCertificate, err := agentcrypto.ClientCertificate(identity.ECDSAPrivateKey, identity.CertificateChain)
 	if err != nil {
-		return fmt.Errorf("load mTLS identity: %w", err)
+		return err
 	}
 
 	masterEndpoint, err := connectivity.Endpoint(identity.PortalURL, "/agent/v1/connect")
@@ -222,7 +233,7 @@ func (r *Runner) endpointFailure(endpoint string, err error) error {
 
 func terminalRejection(code string) bool {
 	switch code {
-	case "expired_pq_proof", "replayed_pq_proof", "internal_error":
+	case "expired_pq_proof", "replayed_pq_proof", "internal_error", "node_already_connected":
 		return false
 	default:
 		return true

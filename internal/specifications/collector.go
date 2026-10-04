@@ -58,6 +58,9 @@ func Collect(ctx context.Context) (Snapshot, error) {
 	}
 	cpuSpecifications.NUMANodes = platform.numaNodes
 	memorySpecifications.Modules = platform.memoryModules
+	if installedBytes := installedMemoryBytes(platform.memoryModules); installedBytes > memorySpecifications.TotalBytes {
+		memorySpecifications.TotalBytes = installedBytes
+	}
 
 	issues := append(systemIssues, cpuIssues...)
 	issues = append(issues, memoryIssues...)
@@ -73,6 +76,8 @@ func Collect(ctx context.Context) (Snapshot, error) {
 		NetworkInterfaces: interfaces,
 		CollectionIssues:  deduplicateIssues(issues),
 	}
+	normalizeSpecificationCollections(&nodeSpecifications)
+
 	if err := fitSpecificationsToBudget(&nodeSpecifications); err != nil {
 		return Snapshot{}, err
 	}
@@ -81,6 +86,43 @@ func Collect(ctx context.Context) (Snapshot, error) {
 		ObservationScope: scope,
 		Specifications:   nodeSpecifications,
 	}, nil
+}
+
+func installedMemoryBytes(modules []protocol.MemoryModuleSpecifications) uint64 {
+	var total uint64
+	for _, module := range modules {
+		if math.MaxUint64-total < module.SizeBytes {
+			return 0
+		}
+
+		total += module.SizeBytes
+	}
+
+	return total
+}
+
+func normalizeSpecificationCollections(specifications *protocol.NodeSpecifications) {
+	if specifications.CPU.Packages == nil {
+		specifications.CPU.Packages = []protocol.CPUPackageSpecifications{}
+	}
+	if specifications.CPU.NUMANodes == nil {
+		specifications.CPU.NUMANodes = []protocol.NUMANodeSpecifications{}
+	}
+	if specifications.CPU.LogicalProcessors == nil {
+		specifications.CPU.LogicalProcessors = []protocol.LogicalProcessorSpecifications{}
+	}
+	if specifications.Memory.Modules == nil {
+		specifications.Memory.Modules = []protocol.MemoryModuleSpecifications{}
+	}
+	if specifications.GPUs == nil {
+		specifications.GPUs = []protocol.GPUSpecifications{}
+	}
+	if specifications.StorageDevices == nil {
+		specifications.StorageDevices = []protocol.StorageDeviceSpecifications{}
+	}
+	if specifications.NetworkInterfaces == nil {
+		specifications.NetworkInterfaces = []protocol.NetworkInterfaceSpecifications{}
+	}
 }
 
 func fitSpecificationsToBudget(specifications *protocol.NodeSpecifications) error {

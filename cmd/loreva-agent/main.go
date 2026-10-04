@@ -43,7 +43,16 @@ func commandLogger(arguments []string) *slog.Logger {
 }
 
 func isSetupCommand(arguments []string) bool {
-	return len(arguments) > 0 && (arguments[0] == "configure" || arguments[0] == "enroll")
+	if len(arguments) == 0 {
+		return false
+	}
+
+	switch arguments[0] {
+	case "configure", "connect", "disconnect", "enroll", "status":
+		return true
+	default:
+		return false
+	}
 }
 
 func run(arguments []string, logger *slog.Logger) error {
@@ -58,6 +67,18 @@ func run(arguments []string, logger *slog.Logger) error {
 
 	if len(arguments) > 0 && arguments[0] == "configure" {
 		return runConfigure(arguments[1:], logger)
+	}
+
+	if len(arguments) > 0 && arguments[0] == "connect" {
+		return runConnect(arguments[1:])
+	}
+
+	if len(arguments) > 0 && arguments[0] == "disconnect" {
+		return runDisconnect(arguments[1:])
+	}
+
+	if len(arguments) > 0 && arguments[0] == "status" {
+		return runStatus(arguments[1:])
 	}
 
 	if len(arguments) > 0 && arguments[0] == "start" {

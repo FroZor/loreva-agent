@@ -10,11 +10,15 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
+	"github.com/FroZor/loreva-agent/internal/agentcrypto"
+	"github.com/FroZor/loreva-agent/internal/metrics"
 	"github.com/FroZor/loreva-agent/internal/networkinfo"
 	"github.com/FroZor/loreva-agent/internal/session"
 	"github.com/FroZor/loreva-agent/internal/specifications"
 	"github.com/FroZor/loreva-agent/internal/state"
+	"github.com/FroZor/loreva-agent/internal/workload"
 )
 
 func runAgent(arguments []string, logger *slog.Logger) error {
@@ -35,23 +39,132 @@ func runAgent(arguments []string, logger *slog.Logger) error {
 		return err
 	}
 
+	processLock, err := store.TryLockProcess()
+	if err != nil {
+		return err
+	}
+	defer closeStateLock(processLock, "release agent process lock", logger)
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	for {
+		if err := waitUntilConnectionEnabled(ctx, store); err != nil {
+			if errors.Is(err, context.Canceled) {
+				return nil
+			}
+
+			return err
+		}
+
+		connectionLock, err := waitForConnectionLock(ctx, store)
+		if err != nil {
+			if errors.Is(err, context.Canceled) {
+				return nil
+			}
+
+			return err
+		}
+
+		enabled, err := store.ConnectionEnabled()
+		if err != nil {
+			closeStateLock(connectionLock, "release connection lock", logger)
+			return err
+		}
+		if !enabled {
+			closeStateLock(connectionLock, "release connection lock", logger)
+			continue
+		}
+
+		runErr := runAgentConnection(ctx, store, connectionLock, logger)
+		if runErr == nil || errors.Is(runErr, context.Canceled) {
+			if ctx.Err() != nil {
+				return nil
+			}
+
+			continue
+		}
+		if session.IsTerminal(runErr) {
+			logger.Error("agent disconnected; configuration is required", "error", runErr)
+			if err := store.RequireConfiguration(); err != nil {
+				return errors.Join(runErr, err)
+			}
+
+			continue
+		}
+
+		return runErr
+	}
+}
+
+func runAgentConnection(
+	ctx context.Context,
+	store *state.Store,
+	connectionLock *state.Lock,
+	logger *slog.Logger,
+) error {
+	defer closeStateLock(connectionLock, "release connection lock", logger)
+
 	identity, err := store.LoadIdentity()
 	if err != nil {
 		return fmt.Errorf("load enrolled identity: %w", err)
 	}
 
+	metricCollector := metrics.NewCollector(ctx)
+	defer func() {
+		if err := metricCollector.Close(); err != nil {
+			logger.Warn("close metrics collector", "error", err)
+		}
+	}()
+
+	clientCertificate, err := agentcrypto.ClientCertificate(
+		identity.ECDSAPrivateKey,
+		identity.CertificateChain,
+	)
+	if err != nil {
+		return err
+	}
+	workloadManager, err := workload.New(ctx, workload.Config{
+		StateDir:             store.Dir(),
+		PortalURL:            identity.PortalURL,
+		PortalCAPEM:          identity.PortalCAPEM,
+		ClientCertificate:    &clientCertificate,
+		AllowDevelopmentHTTP: identity.AllowDevelopmentWS,
+	})
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err := workloadManager.Close(); err != nil {
+			logger.Warn("close workload manager", "error", err)
+		}
+	}()
+
 	runner, err := session.New(store, identity, session.Collectors{
 		Specifications: specifications.Collect,
 		Network:        networkinfo.Collect,
+		Metrics:        metricCollector.Collect,
+		Workloads:      workloadManager,
 	})
 	if err != nil {
 		return err
 	}
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
+	runCtx, cancelRun := context.WithCancel(ctx)
+	preferenceResult := make(chan error, 1)
+	go watchConnectionPreference(runCtx, store, cancelRun, preferenceResult)
 
-	err = runner.Run(ctx, session.Events{
+	err = runner.Run(runCtx, sessionEvents(identity, logger))
+	cancelRun()
+	if preferenceErr := <-preferenceResult; preferenceErr != nil {
+		return errors.Join(err, preferenceErr)
+	}
+
+	return err
+}
+
+func sessionEvents(identity *state.Identity, logger *slog.Logger) session.Events {
+	return session.Events{
 		Connected: func(endpoint string) {
 			logger.Info("agent connected", "node_id", identity.NodeID, "endpoint", endpoint)
 		},
@@ -74,21 +187,88 @@ func runAgent(arguments []string, logger *slog.Logger) error {
 			}
 
 			logger.Error(
-				"node report rejected; report disabled",
+				"node report rejected; request discarded",
 				"type", rejection.Type,
 				"code", rejection.Code,
 			)
 		},
-	})
-	if errors.Is(err, context.Canceled) {
-		return nil
 	}
-	if session.IsTerminal(err) {
-		logger.Error("agent blocked; operator action is required", "error", err)
-		<-ctx.Done()
+}
 
-		return nil
+func waitUntilConnectionEnabled(ctx context.Context, store *state.Store) error {
+	ticker := time.NewTicker(connectionStatePollInterval)
+	defer ticker.Stop()
+
+	for {
+		enabled, err := store.ConnectionEnabled()
+		if err != nil {
+			return err
+		}
+		if enabled {
+			return nil
+		}
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+		}
 	}
+}
 
-	return err
+func waitForConnectionLock(ctx context.Context, store *state.Store) (*state.Lock, error) {
+	ticker := time.NewTicker(connectionStatePollInterval)
+	defer ticker.Stop()
+
+	for {
+		lock, err := store.TryLockConnection()
+		if err == nil {
+			return lock, nil
+		}
+		if !errors.Is(err, state.ErrConnectionActive) {
+			return nil, err
+		}
+
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-ticker.C:
+		}
+	}
+}
+
+func watchConnectionPreference(
+	ctx context.Context,
+	store *state.Store,
+	cancelRun context.CancelFunc,
+	result chan<- error,
+) {
+	ticker := time.NewTicker(connectionStatePollInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			result <- nil
+			return
+		case <-ticker.C:
+			enabled, err := store.ConnectionEnabled()
+			if err != nil {
+				cancelRun()
+				result <- err
+				return
+			}
+			if !enabled {
+				cancelRun()
+				result <- nil
+				return
+			}
+		}
+	}
+}
+
+func closeStateLock(lock *state.Lock, operation string, logger *slog.Logger) {
+	if err := lock.Close(); err != nil {
+		logger.Warn(operation, "error", err)
+	}
 }

@@ -12,7 +12,7 @@ import (
 )
 
 func TestTerminalRejectionClassification(t *testing.T) {
-	for _, code := range []string{"expired_pq_proof", "replayed_pq_proof", "internal_error"} {
+	for _, code := range []string{"expired_pq_proof", "replayed_pq_proof", "internal_error", "node_already_connected"} {
 		if terminalRejection(code) {
 			t.Fatalf("recoverable rejection %q was classified as terminal", code)
 		}

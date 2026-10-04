@@ -1,0 +1,42 @@
+{
+  "_comment": "PTDL_v2 planning fixture based on https://github.com/pterodactyl/game-eggs/blob/main/minecraft/java/paper/egg-paper.json",
+  "meta": {
+    "version": "PTDL_v2",
+    "update_url": null
+  },
+  "exported_at": "2026-03-27T14:32:59+01:00",
+  "name": "Paper",
+  "author": "parker@pterodactyl.io",
+  "description": "High performance Spigot fork.",
+  "features": ["eula", "java_version", "pid_limit"],
+  "docker_images": {
+    "Java 21": "ghcr.io/ptero-eggs/yolks:java_21"
+  },
+  "file_denylist": [],
+  "startup": "java -Xms128M -XX:MaxRAMPercentage=95.0 -jar {{SERVER_JARFILE}}",
+  "config": {
+    "files": "{\"server.properties\":{\"parser\":\"properties\"}}",
+    "startup": "{\"done\":\")! For help, type \"\"}",
+    "logs": "{}",
+    "stop": "stop"
+  },
+  "scripts": {
+    "installation": {
+      "script": "#!/bin/ash\nset -eu\ncd /mnt/server\ntouch server.jar",
+      "container": "ghcr.io/ptero-eggs/installers:alpine",
+      "entrypoint": "ash"
+    }
+  },
+  "variables": [
+    {
+      "name": "Server Jar File",
+      "description": "The server jar file.",
+      "env_variable": "SERVER_JARFILE",
+      "default_value": "server.jar",
+      "user_viewable": true,
+      "user_editable": true,
+      "rules": "required|regex:/^([\\w\\d._-]+)(\\.jar)$/",
+      "field_type": "text"
+    }
+  ]
+}

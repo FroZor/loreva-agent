@@ -14,7 +14,7 @@ type platformEnrollmentLock struct {
 	overlapped windows.Overlapped
 }
 
-func tryLockEnrollment(path string) (platformEnrollmentLock, error) {
+func tryLockFile(path string, lockedErr error) (platformEnrollmentLock, error) {
 	pathPointer, err := windows.UTF16PtrFromString(path)
 	if err != nil {
 		return platformEnrollmentLock{}, fmt.Errorf("encode enrollment lock path: %w", err)
@@ -58,7 +58,7 @@ func tryLockEnrollment(path string) (platformEnrollmentLock, error) {
 		&lock.overlapped,
 	); err != nil {
 		if errors.Is(err, windows.ERROR_LOCK_VIOLATION) {
-			return closeOnError(ErrEnrollmentLocked)
+			return closeOnError(lockedErr)
 		}
 
 		return closeOnError(fmt.Errorf("lock enrollment state: %w", err))
