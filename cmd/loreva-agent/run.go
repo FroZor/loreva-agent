@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/FroZor/loreva-agent/internal/agentcrypto"
+	"github.com/FroZor/loreva-agent/internal/direct"
 	"github.com/FroZor/loreva-agent/internal/metrics"
 	"github.com/FroZor/loreva-agent/internal/networkinfo"
 	"github.com/FroZor/loreva-agent/internal/session"
@@ -21,11 +22,13 @@ import (
 	"github.com/FroZor/loreva-agent/internal/workload"
 )
 
+// runAgent runs every mode the state directory is set up for: direct access
+// when node.json exists and the portal session when identity.json exists.
 func runAgent(arguments []string, logger *slog.Logger) error {
 	flags := flag.NewFlagSet("run", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 
-	stateDir := flags.String("state-dir", "", "agent identity directory")
+	stateDir := flags.String("state-dir", "", "agent state directory")
 
 	if err := flags.Parse(arguments); err != nil {
 		return fmt.Errorf("parse run arguments: %w", err)
@@ -45,9 +48,63 @@ func runAgent(arguments []string, logger *slog.Logger) error {
 	}
 	defer closeStateLock(processLock, "release agent process lock", logger)
 
+	identity, err := store.LoadIdentity()
+	if err != nil && !errors.Is(err, state.ErrNotFound) {
+		return fmt.Errorf("load enrolled identity: %w", err)
+	}
+	node, err := store.LoadNode()
+	if err != nil && !errors.Is(err, state.ErrNotFound) {
+		return fmt.Errorf("load node identity: %w", err)
+	}
+	if identity == nil && node == nil {
+		return errors.New("agent is not set up; run `loreva-agent init` for direct access or enroll it with a portal")
+	}
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	var services []func(context.Context) error
+	if node != nil {
+		services = append(services, func(ctx context.Context) error {
+			return direct.Run(ctx, store, node, direct.Options{
+				Version:        version,
+				PortalEnrolled: identity != nil,
+				Collectors:     direct.Collectors{Specifications: specifications.Collect, Network: networkinfo.Collect},
+				Logger:         logger,
+			})
+		})
+	}
+	if identity != nil {
+		services = append(services, func(ctx context.Context) error {
+			return runPortal(ctx, store, logger)
+		})
+	}
+
+	return runServices(ctx, services)
+}
+
+// runServices runs services until the first one returns, then stops the rest.
+func runServices(ctx context.Context, services []func(context.Context) error) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	results := make(chan error, len(services))
+	for _, service := range services {
+		go func() { results <- service(ctx) }()
+	}
+
+	err := <-results
+	cancel()
+	for range len(services) - 1 {
+		err = errors.Join(err, <-results)
+	}
+
+	return err
+}
+
+// runPortal keeps the portal session up while the connection preference is
+// enabled, pausing on disconnect and when the identity is rejected.
+func runPortal(ctx context.Context, store *state.Store, logger *slog.Logger) error {
 	for {
 		if err := waitUntilConnectionEnabled(ctx, store); err != nil {
 			if errors.Is(err, context.Canceled) {
@@ -76,7 +133,7 @@ func runAgent(arguments []string, logger *slog.Logger) error {
 			continue
 		}
 
-		runErr := runAgentConnection(ctx, store, connectionLock, logger)
+		runErr := runPortalConnection(ctx, store, connectionLock, logger)
 		if runErr == nil || errors.Is(runErr, context.Canceled) {
 			if ctx.Err() != nil {
 				return nil
@@ -97,7 +154,7 @@ func runAgent(arguments []string, logger *slog.Logger) error {
 	}
 }
 
-func runAgentConnection(
+func runPortalConnection(
 	ctx context.Context,
 	store *state.Store,
 	connectionLock *state.Lock,

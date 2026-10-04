@@ -18,6 +18,8 @@ const (
 	identityName   = "identity.json"
 	pendingName    = "enrollment-pending.json"
 	renewalName    = "renewal-pending.json"
+	nodeName       = "node.json"
+	devicesName    = "devices.json"
 )
 
 // ErrNotFound indicates that the requested state document does not exist.
@@ -135,6 +137,52 @@ func (s *Store) SaveIdentity(identity *Identity) error {
 func (s *Store) ReplaceIdentity(identity *Identity) error {
 	identity.Version = currentVersion
 	return s.replaceExisting(identityName, identity)
+}
+
+// LoadNode loads the local node identity created by init.
+func (s *Store) LoadNode() (*Node, error) {
+	var node Node
+	if err := s.load(nodeName, &node); err != nil {
+		return nil, err
+	}
+
+	if node.Version != currentVersion {
+		return nil, fmt.Errorf("unsupported node state version %d", node.Version)
+	}
+
+	return &node, nil
+}
+
+// SaveNode creates the local node identity without overwriting one.
+func (s *Store) SaveNode(node *Node) error {
+	node.Version = currentVersion
+	return s.saveNew(nodeName, node)
+}
+
+// LoadDevices loads the paired device registry.
+func (s *Store) LoadDevices() (*Devices, error) {
+	var devices Devices
+	if err := s.load(devicesName, &devices); err != nil {
+		return nil, err
+	}
+
+	if devices.Version != currentVersion {
+		return nil, fmt.Errorf("unsupported devices state version %d", devices.Version)
+	}
+
+	return &devices, nil
+}
+
+// SaveDevices creates the paired device registry without overwriting one.
+func (s *Store) SaveDevices(devices *Devices) error {
+	devices.Version = currentVersion
+	return s.saveNew(devicesName, devices)
+}
+
+// ReplaceDevices atomically replaces the existing paired device registry.
+func (s *Store) ReplaceDevices(devices *Devices) error {
+	devices.Version = currentVersion
+	return s.replaceExisting(devicesName, devices)
 }
 
 // ClearPending removes a completed enrollment transaction.

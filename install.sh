@@ -12,18 +12,26 @@ fail() {
 	exit 1
 }
 
+usage="usage: ./install.sh [--portal | --config FILE]"
+mode="standalone"
 config_path=""
 
-if [ "$#" -gt 0 ]; then
-	if [ "$#" -ne 2 ] || [ "$1" != "--config" ]; then
-		fail "usage: ./install.sh [--config FILE]"
-	fi
-
-	config_path="$2"
-	if [ -L "$config_path" ] || [ ! -f "$config_path" ]; then
-		fail "bootstrap config must be a regular file, not a link"
-	fi
-fi
+case "$#:${1:-}" in
+	0:) ;;
+	1:--portal)
+		mode="portal"
+		;;
+	2:--config)
+		mode="portal"
+		config_path="$2"
+		if [ -L "$config_path" ] || [ ! -f "$config_path" ]; then
+			fail "bootstrap config must be a regular file, not a link"
+		fi
+		;;
+	*)
+		fail "$usage"
+		;;
+esac
 
 require_command() {
 	command -v "$1" >/dev/null 2>&1 || fail "required command not found: $1"
@@ -127,7 +135,8 @@ grant_docker_socket_access() {
 }
 
 install_systemd_service() {
-	config_path="$1"
+	mode="$1"
+	config_path="$2"
 	service_name="loreva-agent"
 	service_user="loreva-agent"
 	state_dir="/var/lib/loreva-agent"
@@ -138,7 +147,9 @@ install_systemd_service() {
 	fi
 
 	ensure_service_user "$service_user" "$state_dir"
-	grant_docker_socket_access "$service_user"
+	if [ "$mode" = "portal" ]; then
+		grant_docker_socket_access "$service_user"
+	fi
 	service_group="$(id -gn "$service_user")"
 	install -d -m 0750 -o "$service_user" -g "$service_group" "$state_dir"
 
@@ -152,7 +163,8 @@ install_systemd_service() {
 Description=Loreva node agent
 After=network-online.target
 Wants=network-online.target
-ConditionPathExists=${state_dir}/identity.json
+ConditionPathExists=|${state_dir}/identity.json
+ConditionPathExists=|${state_dir}/node.json
 StartLimitIntervalSec=300
 StartLimitBurst=10
 
@@ -196,11 +208,61 @@ EOF
 	systemctl daemon-reload
 	systemctl enable "$service_name" >/dev/null
 
-	enroll_and_start_service \
-		"$service_name" \
-		"$service_user" \
-		"$state_dir" \
-		"$config_path"
+	if [ "$mode" = "portal" ] && [ ! -e "${state_dir}/identity.json" ]; then
+		enroll_and_start_service \
+			"$service_name" \
+			"$service_user" \
+			"$state_dir" \
+			"$config_path"
+		return
+	fi
+
+	if [ "$mode" = "standalone" ] && [ ! -e "${state_dir}/node.json" ] && [ ! -e "${state_dir}/identity.json" ]; then
+		init_and_start_service \
+			"$service_name" \
+			"$service_user" \
+			"$state_dir"
+		return
+	fi
+
+	# Upgrade: keep the existing setup and never add a mode on its own.
+	systemctl restart "$service_name"
+	printf 'Loreva Agent installed and restarted.\n'
+	if [ -e "${state_dir}/node.json" ]; then
+		printf 'Run "sudo loreva-agent invite" to connect a device.\n'
+	fi
+}
+
+init_and_start_service() {
+	service_name="$1"
+	service_user="$2"
+	state_dir="$3"
+
+	require_command runuser
+
+	runuser -u "$service_user" -- \
+		"$install_path" init --state-dir "$state_dir"
+
+	systemctl start "$service_name"
+
+	attempts=0
+	while [ ! -S "${state_dir}/control.sock" ]; do
+		attempts=$((attempts + 1))
+		if [ "$attempts" -gt 15 ]; then
+			printf 'Loreva Agent installed, but the service did not become ready. Check: journalctl -u %s\n' "$service_name" >&2
+			return
+		fi
+		sleep 1
+	done
+
+	printf 'Loreva Agent installed and started.\n\n'
+
+	# The installer may be piped into sh, so ask on the terminal directly.
+	if (exec </dev/tty) 2>/dev/null; then
+		"$install_path" invite --state-dir "$state_dir" </dev/tty || true
+	else
+		printf 'Run "sudo loreva-agent invite" to connect a device.\n'
+	fi
 }
 
 enroll_and_start_service() {
@@ -208,12 +270,6 @@ enroll_and_start_service() {
 	service_user="$2"
 	state_dir="$3"
 	config_path="$4"
-
-	if [ -e "${state_dir}/identity.json" ]; then
-		systemctl restart "$service_name"
-		printf 'Loreva Agent installed and started.\n'
-		return
-	fi
 
 	require_command runuser
 
@@ -228,7 +284,7 @@ enroll_and_start_service() {
 			"$install_path" configure --bootstrap - --state-dir "$state_dir"
 	fi
 
-	systemctl start "$service_name"
+	systemctl restart "$service_name"
 	printf 'Loreva Agent installed, enrolled, and started.\n'
 }
 
@@ -284,7 +340,7 @@ verify_download "$asset_name" "${temporary_dir}/${asset_name}" "${temporary_dir}
 install -m 0755 -- "${temporary_dir}/${asset_name}" "$install_path"
 
 if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
-	install_systemd_service "$config_path"
+	install_systemd_service "$mode" "$config_path"
 else
 	printf 'Loreva Agent installed at %s. No supported service manager was detected.\n' "$install_path"
 fi

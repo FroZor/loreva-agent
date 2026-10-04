@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"time"
 
@@ -14,7 +15,7 @@ import (
 
 const connectionStatePollInterval = 250 * time.Millisecond
 
-func runDisconnect(arguments []string) error {
+func runDisconnect(arguments []string, _ *slog.Logger) error {
 	store, err := connectionCommandStore("disconnect", arguments)
 	if err != nil {
 		return err
@@ -38,7 +39,7 @@ func runDisconnect(arguments []string) error {
 	return err
 }
 
-func runConnect(arguments []string) error {
+func runConnect(arguments []string, _ *slog.Logger) error {
 	store, err := connectionCommandStore("connect", arguments)
 	if err != nil {
 		return err
@@ -59,7 +60,7 @@ func runConnect(arguments []string) error {
 	return err
 }
 
-func runStatus(arguments []string) error {
+func runStatus(arguments []string, _ *slog.Logger) error {
 	store, err := connectionCommandStore("status", arguments)
 	if err != nil {
 		return err

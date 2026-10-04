@@ -21,6 +21,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -939,7 +940,12 @@ func signJWS(key *mldsa65.PrivateKey, header, claims any) (string, error) {
 func closeTestConnection(t *testing.T, conn *websocket.Conn) {
 	t.Helper()
 
-	if err := conn.CloseNow(); err != nil && !errors.Is(err, net.ErrClosed) {
-		t.Errorf("close test WebSocket connection: %v", err)
+	// The peer may already have torn down the TCP connection, in which case
+	// sending the TLS close_notify alert fails with EPIPE or ECONNRESET.
+	err := conn.CloseNow()
+	if err == nil || errors.Is(err, net.ErrClosed) || errors.Is(err, syscall.EPIPE) || errors.Is(err, syscall.ECONNRESET) {
+		return
 	}
+
+	t.Errorf("close test WebSocket connection: %v", err)
 }
