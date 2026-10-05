@@ -2,17 +2,14 @@ package client
 
 import (
 	"context"
-	"crypto/mlkem"
 	"encoding/base64"
 	"errors"
 	"fmt"
-	"net/http"
-	"net/netip"
 
-	"github.com/FroZor/loreva-agent/internal/agentapi"
 	"github.com/FroZor/loreva-agent/internal/agentcrypto"
+	"github.com/FroZor/loreva-agent/internal/certpin"
 	"github.com/FroZor/loreva-agent/internal/pairing"
-	"github.com/FroZor/loreva-agent/internal/tunnel"
+	"github.com/FroZor/loreva-agent/internal/protocol"
 )
 
 // ErrPairingRejected means the operator answered no on the node.
@@ -29,8 +26,8 @@ type PairOptions struct {
 	ShowSAS func(sas string)
 }
 
-// Pair uses a one-time invite to register this device with the node and
-// returns its permanent credentials.
+// Pair uses a one-time connection key to register this device with the node
+// and returns its permanent credentials.
 func Pair(ctx context.Context, invite *pairing.Invite, options PairOptions) (*Credentials, error) {
 	if err := pairing.ValidateDeviceName(options.DeviceName); err != nil {
 		return nil, err
@@ -39,45 +36,36 @@ func Pair(ctx context.Context, invite *pairing.Invite, options PairOptions) (*Cr
 		return nil, errors.New("a SAS display callback is required")
 	}
 
-	devicePrivateKey, err := tunnel.GenerateKey()
+	identity, err := certpin.Generate()
 	if err != nil {
 		return nil, err
 	}
-	devicePublicKey, err := devicePrivateKey.PublicKey()
+	devicePin, err := identity.Pin()
 	if err != nil {
 		return nil, err
-	}
-	decapsulationKey, err := mlkem.GenerateKey768()
-	if err != nil {
-		return nil, fmt.Errorf("generate ML-KEM-768 key: %w", err)
 	}
 
-	session, err := ConnectInvite(ctx, invite)
+	session, err := ConnectInvite(ctx, invite, identity)
 	if err != nil {
 		return nil, err
 	}
 	defer session.Close()
 
-	encapsulationKey := decapsulationKey.EncapsulationKey().Bytes()
-	var started agentapi.PairingStarted
-	err = session.doJSON(ctx, http.MethodPost, agentapi.PairingPath, agentapi.PairingRequest{
-		DeviceName:            options.DeviceName,
-		WireGuardPublicKey:    devicePublicKey.String(),
-		MLKEMEncapsulationKey: base64.StdEncoding.EncodeToString(encapsulationKey),
-	}, &started)
+	err = session.WriteJSON(ctx, protocol.PairingRequest{
+		Type:        protocol.PairingRequestType,
+		DeviceName:  options.DeviceName,
+		InviteToken: pairing.EncodeToken(invite.Token),
+	})
 	if err != nil {
+		return nil, fmt.Errorf("send pairing request: %w", err)
+	}
+
+	var started protocol.PairingStarted
+	if err := readReply(ctx, session, protocol.PairingStartedType, &started); err != nil {
 		return nil, err
 	}
 
-	transcript, err := pairingTranscript(invite, started, devicePublicKey, options.DeviceName, encapsulationKey)
-	if err != nil {
-		return nil, err
-	}
-	sharedSecret, err := decapsulationKey.Decapsulate(transcript.Ciphertext)
-	if err != nil {
-		return nil, fmt.Errorf("decapsulate ML-KEM-768 ciphertext: %w", err)
-	}
-	presharedKey, err := transcript.PresharedKey(sharedSecret, invite.PresharedKey)
+	transcript, err := pairingTranscript(session, invite, started, devicePin, options.DeviceName)
 	if err != nil {
 		return nil, err
 	}
@@ -97,35 +85,43 @@ func Pair(ctx context.Context, invite *pairing.Invite, options PairOptions) (*Cr
 	}
 
 	return &Credentials{
-		Version:       credentialsVersion,
-		NodeID:        invite.NodeID,
-		NodePublicKey: invite.NodePublicKey.String(),
-		NodeAddress:   invite.NodeAddress.String(),
-		Endpoints:     endpoints,
-		DeviceID:      deviceID,
-		DeviceName:    options.DeviceName,
-		PrivateKey:    devicePrivateKey.String(),
-		PresharedKey:  presharedKey.String(),
-		Address:       transcript.DeviceAddress.String(),
+		Version:     credentialsVersion,
+		NodeID:      invite.NodeID,
+		NodePin:     invite.NodePin,
+		Endpoints:   endpoints,
+		DeviceID:    deviceID,
+		DeviceName:  options.DeviceName,
+		PrivateKey:  identity.PrivateKey,
+		Certificate: identity.Certificate,
 	}, nil
 }
 
-// ConnectInvite opens a session as the temporary invite peer. The node lets
-// this peer call only the pairing endpoints.
-func ConnectInvite(ctx context.Context, invite *pairing.Invite) (*Session, error) {
-	return open(ctx, endpointConfig{
-		privateKey:    invite.PrivateKey,
-		presharedKey:  invite.PresharedKey,
-		address:       invite.Address,
-		nodePublicKey: invite.NodePublicKey,
-		nodeAddress:   invite.NodeAddress,
-		endpoints:     invite.Endpoints,
+// ConnectInvite opens a session that presents the device's new key, which
+// the node accepts only while an invite is active and only for pairing.
+func ConnectInvite(ctx context.Context, invite *pairing.Invite, identity certpin.Identity) (*Session, error) {
+	certificate, err := identity.TLSCertificate()
+	if err != nil {
+		return nil, err
+	}
+
+	session, err := open(ctx, endpointConfig{
+		nodeID:      invite.NodeID,
+		nodePin:     invite.NodePin,
+		certificate: certificate,
+		endpoints:   invite.Endpoints,
 	})
+	if err != nil {
+		return nil, err
+	}
+	if session.Hello.Peer != protocol.SessionPeerInvite {
+		session.Close()
+		return nil, errors.New("node did not accept the connection key for pairing")
+	}
+
+	return session, nil
 }
 
-func pairingTranscript(invite *pairing.Invite, started agentapi.PairingStarted, devicePublicKey tunnel.Key,
-	deviceName string, encapsulationKey []byte,
-) (*pairing.Transcript, error) {
+func pairingTranscript(session *Session, invite *pairing.Invite, started protocol.PairingStarted, devicePin, deviceName string) (*pairing.Transcript, error) {
 	if !agentcrypto.ValidUUID(started.PairingID) {
 		return nil, errors.New("node returned an invalid pairing ID")
 	}
@@ -134,51 +130,70 @@ func pairingTranscript(invite *pairing.Invite, started agentapi.PairingStarted, 
 	if err != nil || len(nonce) != pairing.NonceSize {
 		return nil, errors.New("node returned an invalid pairing nonce")
 	}
-	ciphertext, err := base64.StdEncoding.Strict().DecodeString(started.MLKEMCiphertext)
-	if err != nil || len(ciphertext) != mlkem.CiphertextSize768 {
-		return nil, errors.New("node returned an invalid ML-KEM ciphertext")
-	}
-	deviceAddress, err := netip.ParseAddr(started.DeviceAddress)
-	if err != nil || !deviceAddress.Is6() || deviceAddress == invite.NodeAddress || deviceAddress == invite.Address {
-		return nil, errors.New("node returned an invalid device address")
+	exporter, err := session.exporter()
+	if err != nil {
+		return nil, fmt.Errorf("export TLS keying material: %w", err)
 	}
 
 	return &pairing.Transcript{
-		InviteID:         invite.InviteID,
-		NodeID:           invite.NodeID,
-		NodePublicKey:    invite.NodePublicKey,
-		DevicePublicKey:  devicePublicKey,
-		DeviceName:       deviceName,
-		DeviceAddress:    deviceAddress,
-		EncapsulationKey: encapsulationKey,
-		Ciphertext:       ciphertext,
-		NodeNonce:        nonce,
+		InviteID:   invite.InviteID,
+		NodeID:     invite.NodeID,
+		NodePin:    invite.NodePin,
+		DevicePin:  devicePin,
+		DeviceName: deviceName,
+		NodeNonce:  nonce,
+		Exporter:   exporter,
 	}, nil
 }
 
-// waitForApproval long-polls the pairing status until the operator decides.
 func waitForApproval(ctx context.Context, session *Session, pairingID string) (string, error) {
-	for {
-		var status agentapi.PairingStatus
-		if err := session.doJSON(ctx, http.MethodGet, agentapi.PairingPath+"/"+pairingID, nil, &status); err != nil {
-			return "", err
-		}
-
-		switch status.Status {
-		case agentapi.PairingPending:
-			continue
-		case agentapi.PairingApproved:
-			if status.DeviceID == "" {
-				return "", errors.New("node approved pairing without a device ID")
-			}
-
-			return status.DeviceID, nil
-		case agentapi.PairingRejected:
-			return "", ErrPairingRejected
-		case agentapi.PairingExpired:
-			return "", ErrPairingExpired
-		default:
-			return "", fmt.Errorf("unknown pairing status %q", status.Status)
-		}
+	var result protocol.PairingResult
+	if err := readReply(ctx, session, protocol.PairingResultType, &result); err != nil {
+		return "", err
 	}
+	if result.PairingID != pairingID {
+		return "", errors.New("node sent the result of another pairing")
+	}
+
+	switch result.Status {
+	case protocol.PairingApproved:
+		if result.DeviceID == "" {
+			return "", errors.New("node approved pairing without a device ID")
+		}
+
+		return result.DeviceID, nil
+	case protocol.PairingRejected:
+		return "", ErrPairingRejected
+	case protocol.PairingExpired:
+		return "", ErrPairingExpired
+	default:
+		return "", fmt.Errorf("unknown pairing status %q", result.Status)
+	}
+}
+
+// readReply reads the next frame and decodes it as wantType, turning an
+// error frame into a *RemoteError.
+func readReply(ctx context.Context, session *Session, wantType string, target any) error {
+	data, err := session.Read(ctx)
+	if err != nil {
+		return err
+	}
+
+	messageType, err := protocol.MessageType(data)
+	if err != nil {
+		return errors.New("node sent a frame that is not valid JSON")
+	}
+	if messageType == protocol.ErrorType {
+		var refusal protocol.Error
+		if err := protocol.DecodeStrict(data, &refusal); err != nil {
+			return fmt.Errorf("decode error frame: %w", err)
+		}
+
+		return &RemoteError{Code: refusal.Code, Message: refusal.Message}
+	}
+	if messageType != wantType {
+		return fmt.Errorf("node sent %q, want %q", messageType, wantType)
+	}
+
+	return protocol.DecodeStrict(data, target)
 }

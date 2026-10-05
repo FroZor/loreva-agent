@@ -2,6 +2,7 @@ package protocol
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"os"
 	"reflect"
@@ -82,13 +83,14 @@ func TestWSSContractContainsEveryMessageType(t *testing.T) {
 		seen[name] = struct{}{}
 		definition := document.Definitions[name]
 		var typeProperty struct {
-			Const string `json:"const"`
+			Const string   `json:"const"`
+			Enum  []string `json:"enum"`
 		}
 		if err := json.Unmarshal(definition.Properties["type"], &typeProperty); err != nil {
 			t.Fatalf("decode type discriminator for %q: %v", name, err)
 		}
-		if typeProperty.Const != messageType {
-			t.Errorf("contract message %q type = %q, want %q", name, typeProperty.Const, messageType)
+		if typeProperty.Const != messageType && !slices.Contains(typeProperty.Enum, messageType) {
+			t.Errorf("contract message %q type = %q %v, want %q", name, typeProperty.Const, typeProperty.Enum, messageType)
 		}
 	}
 
@@ -134,6 +136,10 @@ func TestWSSContractValidatesCanonicalMessages(t *testing.T) {
 func TestWSSContractRejectsInvalidFrames(t *testing.T) {
 	schema := compileContractSchema(t)
 	invalid := []string{
+		`{"type":"session.hello","protocol":"loreva.session.v1","peer":"device","node_id":"65a1876f-a715-45fc-9ac0-e4bc31067059","agent_version":"v1","hostname":"n","os":"linux","architecture":"amd64","portal_enrolled":false,"time":"2030-01-02T03:04:05Z"}`,
+		`{"type":"pairing.result","pairing_id":"2ab9d734-7434-4cdf-bca4-6ce7a46cdd65","status":"approved"}`,
+		`{"type":"artifact.upload.result","request_id":"2ab9d734-7434-4cdf-bca4-6ce7a46cdd65","state":"stored","code":"invalid_artifact"}`,
+		`{"type":"workload.plan.request","schema_version":1,"request_id":"2ab9d734-7434-4cdf-bca4-6ce7a46cdd65","workload_id":"6e0c1d91-5145-440f-bf97-d84db4f83644","payload":{"timeout_seconds":30}}`,
 		`{"type":"connect.accepted","unexpected":true}`,
 		`{"type":"unknown"}`,
 		`{"type":"node.network.accepted"}`,
@@ -332,11 +338,38 @@ func contractMessageTypes() map[string]string {
 		"workloadPlanResult":         WorkloadPlanResultType,
 		"workloadOperationEvent":     WorkloadOperationEventType,
 		"workloadOperationResult":    WorkloadOperationResultType,
+		"sessionHello":               SessionHelloType,
+		"error":                      ErrorType,
+		"pairingRequest":             PairingRequestType,
+		"pairingStarted":             PairingStartedType,
+		"pairingResult":              PairingResultType,
+		"devicesList":                DevicesListType,
+		"devicesListResult":          DevicesListResultType,
+		"deviceRemove":               DeviceRemoveType,
+		"deviceRemoveResult":         DeviceRemoveResultType,
+		"deviceWorkloadCommand":      WorkloadPlanRequestType,
+		"artifactUploadRequest":      ArtifactUploadRequestType,
+		"artifactUploadChunk":        ArtifactUploadChunkType,
+		"artifactUploadResult":       ArtifactUploadResultType,
 	}
 }
 
 func contractDTOs() map[string]reflect.Type {
 	return map[string]reflect.Type{
+		"sessionHello":                   reflect.TypeFor[SessionHello](),
+		"error":                          reflect.TypeFor[Error](),
+		"pairingRequest":                 reflect.TypeFor[PairingRequest](),
+		"pairingStarted":                 reflect.TypeFor[PairingStarted](),
+		"pairingResult":                  reflect.TypeFor[PairingResult](),
+		"devicesList":                    reflect.TypeFor[DevicesList](),
+		"devicesListResult":              reflect.TypeFor[DevicesListResult](),
+		"device":                         reflect.TypeFor[Device](),
+		"deviceRemove":                   reflect.TypeFor[DeviceRemove](),
+		"deviceRemoveResult":             reflect.TypeFor[DeviceRemoveResult](),
+		"deviceWorkloadCommand":          reflect.TypeFor[DeviceWorkloadCommand](),
+		"artifactUploadRequest":          reflect.TypeFor[ArtifactUploadRequest](),
+		"artifactUploadChunk":            reflect.TypeFor[ArtifactUploadChunk](),
+		"artifactUploadResult":           reflect.TypeFor[ArtifactUploadResult](),
 		"jwk":                            reflect.TypeFor[agentcrypto.JWK](),
 		"connectChallengeClaims":         reflect.TypeFor[Challenge](),
 		"agentInfo":                      reflect.TypeFor[AgentInfo](),
@@ -440,6 +473,7 @@ func canonicalContractMessages() []any {
 	requestID := "2ab9d734-7434-4cdf-bca4-6ce7a46cdd65"
 	nodeID := "65a1876f-a715-45fc-9ac0-e4bc31067059"
 	portalID := "d1b181c1-52ec-4d55-b2c9-b1428305b294"
+	pin := base64.StdEncoding.EncodeToString(make([]byte, 32))
 	jws := "e30.e30.A"
 	certificate := "-----BEGIN CERTIFICATE-----\nAA==\n-----END CERTIFICATE-----\n"
 	csr := "-----BEGIN CERTIFICATE REQUEST-----\nAA==\n-----END CERTIFICATE REQUEST-----\n"
@@ -520,6 +554,39 @@ func canonicalContractMessages() []any {
 			RequestID: requestID, PortalID: portalID, NodeID: nodeID, WorkloadID: requestID, OccurredAt: now,
 			Payload: WorkloadOperationResultPayload{State: "succeeded"},
 		},
+		SessionHello{
+			Type: SessionHelloType, Protocol: DirectSessionSubprotocol, Peer: SessionPeerDevice, DeviceID: requestID,
+			NodeID: nodeID, AgentVersion: "v1.0.0", Hostname: "node", OS: "linux", Architecture: "amd64", Time: now,
+		},
+		SessionHello{
+			Type: SessionHelloType, Protocol: DirectSessionSubprotocol, Peer: SessionPeerInvite,
+			NodeID: nodeID, AgentVersion: "v1.0.0", Hostname: "node", OS: "linux", Architecture: "amd64", Time: now,
+		},
+		Error{Type: ErrorType, RequestID: requestID, Code: "not_found", Message: "device not found"},
+		PairingRequest{
+			Type: PairingRequestType, DeviceName: "laptop",
+			InviteToken: base64.RawURLEncoding.EncodeToString(make([]byte, 32)),
+		},
+		PairingStarted{Type: PairingStartedType, PairingID: requestID, NodeNonce: pin},
+		PairingResult{Type: PairingResultType, PairingID: requestID, Status: PairingApproved, DeviceID: requestID},
+		PairingResult{Type: PairingResultType, PairingID: requestID, Status: PairingExpired},
+		DevicesList{Type: DevicesListType, RequestID: requestID},
+		DevicesListResult{Type: DevicesListResultType, RequestID: requestID, Devices: []Device{{
+			ID: requestID, Name: "laptop", CertificatePin: pin, PairedAt: now, Current: true,
+		}}},
+		DeviceRemove{Type: DeviceRemoveType, RequestID: requestID, DeviceID: requestID},
+		DeviceRemoveResult{Type: DeviceRemoveResultType, RequestID: requestID, DeviceID: requestID},
+		DeviceWorkloadCommand{
+			Type: WorkloadStopRequestType, SchemaVersion: WorkloadSchemaVersion, RequestID: requestID,
+			WorkloadID: requestID, Payload: json.RawMessage(`{"timeout_seconds":30}`),
+		},
+		ArtifactUploadRequest{
+			Type: ArtifactUploadRequestType, RequestID: requestID, ArtifactID: requestID,
+			SHA256: "sha256:" + strings.Repeat("a", 64), SizeBytes: 841,
+		},
+		ArtifactUploadChunk{Type: ArtifactUploadChunkType, RequestID: requestID, Offset: 0, Data: "AAAA"},
+		ArtifactUploadResult{Type: ArtifactUploadResultType, RequestID: requestID, State: ArtifactStored},
+		ArtifactUploadResult{Type: ArtifactUploadResultType, RequestID: requestID, State: ArtifactRejected, Code: "invalid_artifact"},
 		NodeSpecificationsReport{
 			Type: NodeSpecificationsReportType, SchemaVersion: NodeSpecificationsSchemaVersion,
 			RequestID: requestID, ObservedAt: now, ObservationScope: ObservationScopeHost,

@@ -3,41 +3,57 @@ package workload
 import (
 	"context"
 	"crypto/sha256"
-	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/FroZor/loreva-agent/internal/connectivity"
 	"github.com/FroZor/loreva-agent/internal/protocol"
 )
 
-const workloadQueueCapacity = 32
+const (
+	workloadQueueCapacity = 32
+	// controllerQueueShare is how many queued commands one controller may
+	// hold, so one controller cannot keep the queue full for the others.
+	controllerQueueShare = workloadQueueCapacity / 2
+	resultQueueCapacity  = workloadQueueCapacity * 2
+	// maxArtifactCacheBytes is the artifact cache size beyond which uploads
+	// from devices are refused.
+	maxArtifactCacheBytes = 1 << 30
+)
 
 // ErrBusy indicates that the bounded workload command queue is full.
 var ErrBusy = errors.New("workload command queue is full")
 
-// Config supplies local state and authenticated portal transport to a Manager.
+// Config supplies local state to a Manager.
 type Config struct {
-	StateDir             string
-	PortalURL            string
-	PortalCAPEM          string
-	ClientCertificate    *tls.Certificate
-	AllowDevelopmentHTTP bool
+	StateDir string
 }
 
-// Manager serializes workload mutations without blocking the WSS heartbeat.
+// queuedCommand is an authenticated command and where its artifacts come from.
+type queuedCommand struct {
+	command protocol.WorkloadCommand
+	source  ArtifactSource
+}
+
+// Manager serializes workload mutations from every controller (the portal
+// and paired devices) without blocking any session heartbeat. Each command
+// carries its controller in portal_id, and responses go back to that
+// controller only.
 type Manager struct {
 	ctx        context.Context
 	cancel     context.CancelFunc
-	commands   chan protocol.WorkloadCommand
-	results    chan any
+	commands   chan queuedCommand
+	queuedMu   sync.Mutex
+	queued     map[string]int
+	resultsMu  sync.Mutex
+	results    map[string]chan any
 	plans      planStore
 	builder    planBuilder
 	runtime    *dockerRuntime
@@ -56,36 +72,18 @@ func New(ctx context.Context, config Config) (*Manager, error) {
 		return nil, fmt.Errorf("resolve workload state directory: %w", err)
 	}
 
-	artifactEndpoint, err := connectivity.HTTPEndpoint(
-		config.PortalURL,
-		artifactEndpointPrefix,
-		config.AllowDevelopmentHTTP,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("resolve portal artifact endpoint: %w", err)
-	}
-	httpClient, err := connectivity.NewHTTPClient(connectivity.Config{
-		PortalCAPEM: config.PortalCAPEM, ClientCertificate: config.ClientCertificate,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("create portal artifact client: %w", err)
-	}
-
 	managerCtx, cancel := context.WithCancel(ctx)
 	root := filepath.Join(stateDir, "workloads")
 	manager := &Manager{
 		ctx:      managerCtx,
 		cancel:   cancel,
-		commands: make(chan protocol.WorkloadCommand, workloadQueueCapacity),
-		results:  make(chan any, workloadQueueCapacity*2),
+		commands: make(chan queuedCommand, workloadQueueCapacity),
+		queued:   make(map[string]int),
+		results:  make(map[string]chan any),
 		plans:    planStore{root: root},
 		builder: planBuilder{
 			stateRoot: stateDir,
-			artifacts: artifactStore{
-				root:       filepath.Join(root, "artifacts"),
-				baseURL:    strings.TrimSuffix(artifactEndpoint, "/") + "/",
-				httpClient: httpClient,
-			},
+			artifacts: artifactStore{root: filepath.Join(root, "artifacts"), uploadLimit: maxArtifactCacheBytes},
 		},
 	}
 	manager.runtime, manager.runtimeErr = openDockerRuntime(managerCtx, root)
@@ -96,18 +94,61 @@ func New(ctx context.Context, config Config) (*Manager, error) {
 	return manager, nil
 }
 
-// Submit queues an already authenticated command without blocking.
-func (manager *Manager) Submit(command protocol.WorkloadCommand) error {
+// Submit queues an already authenticated command without blocking. source
+// fetches artifacts that are not cached; it may be nil when the controller
+// uploads artifacts before planning.
+func (manager *Manager) Submit(command protocol.WorkloadCommand, source ArtifactSource) error {
+	manager.queuedMu.Lock()
+	defer manager.queuedMu.Unlock()
+
+	if manager.queued[command.PortalID] >= controllerQueueShare {
+		return ErrBusy
+	}
+
 	select {
-	case manager.commands <- command:
+	case manager.commands <- queuedCommand{command: command, source: source}:
+		manager.queued[command.PortalID]++
 		return nil
 	default:
 		return ErrBusy
 	}
 }
 
-// Results returns workload responses that the session writer serializes.
-func (manager *Manager) Results() <-chan any { return manager.results }
+func (manager *Manager) dequeued(controller string) {
+	manager.queuedMu.Lock()
+	defer manager.queuedMu.Unlock()
+
+	manager.queued[controller]--
+	if manager.queued[controller] <= 0 {
+		delete(manager.queued, controller)
+	}
+}
+
+// Results returns the responses to commands whose portal_id is controller.
+// One session reads them at a time. A response that finds the queue full is
+// dropped rather than stalling other controllers: operation results are
+// persisted, so repeating the request_id returns them again.
+func (manager *Manager) Results(controller string) <-chan any {
+	return manager.resultQueue(controller)
+}
+
+// StoreArtifact saves an uploaded artifact in the cache that plans read.
+func (manager *Manager) StoreArtifact(reference protocol.ArtifactReference, data io.Reader) error {
+	return manager.builder.artifacts.store(reference, data)
+}
+
+func (manager *Manager) resultQueue(controller string) chan any {
+	manager.resultsMu.Lock()
+	defer manager.resultsMu.Unlock()
+
+	queue, found := manager.results[controller]
+	if !found {
+		queue = make(chan any, resultQueueCapacity)
+		manager.results[controller] = queue
+	}
+
+	return queue
+}
 
 // Close stops pending work and releases Docker resources.
 func (manager *Manager) Close() error {
@@ -124,21 +165,22 @@ func (manager *Manager) run() {
 		select {
 		case <-manager.ctx.Done():
 			return
-		case command := <-manager.commands:
-			manager.handle(command)
+		case queued := <-manager.commands:
+			manager.dequeued(queued.command.PortalID)
+			manager.handle(queued.command, queued.source)
 		}
 	}
 }
 
-func (manager *Manager) handle(command protocol.WorkloadCommand) {
+func (manager *Manager) handle(command protocol.WorkloadCommand, source ArtifactSource) {
 	if command.Type == protocol.WorkloadPlanRequestType {
-		manager.handlePlan(command)
+		manager.handlePlan(command, source)
 		return
 	}
 
 	commandDigest, err := commandDigest(command)
 	if err != nil {
-		manager.emit(operationResult(command, "rejected", "invalid_operation", err))
+		manager.emit(command.PortalID, operationResult(command, "rejected", "invalid_operation", err))
 		return
 	}
 	if manager.replayOrReject(command, commandDigest) {
@@ -163,13 +205,13 @@ func (manager *Manager) handle(command protocol.WorkloadCommand) {
 	sequence := 0
 	progress := func(step string) {
 		sequence++
-		manager.emit(operationEvent(command, sequence, step))
+		manager.emit(command.PortalID, operationEvent(command, sequence, step))
 	}
 	progress(operation)
 
 	switch operation {
 	case "execute":
-		err = manager.runtime.execute(manager.ctx, plan, progress)
+		err = manager.runtime.execute(manager.ctx, manager.plans, plan, progress)
 	case "stop", "restart", "delete":
 		err = manager.runtime.lifecycle(
 			manager.ctx,
@@ -212,18 +254,21 @@ func operationEvent(
 	}
 }
 
-func (manager *Manager) handlePlan(command protocol.WorkloadCommand) {
-	plan, err := manager.builder.build(manager.ctx, command)
+func (manager *Manager) handlePlan(command protocol.WorkloadCommand, source ArtifactSource) {
+	builder := manager.builder
+	builder.artifacts.source = source
+
+	plan, err := builder.build(manager.ctx, command)
 	if err != nil {
-		manager.emit(planResult(command, "rejected", nil, "invalid_plan", err))
+		manager.emit(command.PortalID, planResult(command, "rejected", nil, "invalid_plan", err))
 		return
 	}
 	if err := manager.plans.savePlan(plan); err != nil {
-		manager.emit(planResult(command, "failed", nil, "state_persistence_failed", err))
+		manager.emit(command.PortalID, planResult(command, "failed", nil, "state_persistence_failed", err))
 		return
 	}
 
-	manager.emit(planResult(command, "ready", plan, "", nil))
+	manager.emit(command.PortalID, planResult(command, "ready", plan, "", nil))
 }
 
 func (manager *Manager) validateOperation(
@@ -280,14 +325,14 @@ func (manager *Manager) replayOrReject(command protocol.WorkloadCommand, command
 	result, err := manager.plans.loadResult(command.RequestID)
 	if err == nil {
 		if result.CommandDigest == commandDigest {
-			manager.emit(result.Result)
+			manager.emit(command.PortalID, result.Result)
 		} else {
-			manager.emit(operationResult(command, "rejected", "request_conflict", errors.New("request_id was already used")))
+			manager.emit(command.PortalID, operationResult(command, "rejected", "request_conflict", errors.New("request_id was already used")))
 		}
 		return true
 	}
 	if !errors.Is(err, os.ErrNotExist) {
-		manager.emit(operationResult(command, "unknown", "state_read_failed", err))
+		manager.emit(command.PortalID, operationResult(command, "unknown", "state_read_failed", err))
 		return true
 	}
 
@@ -296,13 +341,13 @@ func (manager *Manager) replayOrReject(command protocol.WorkloadCommand, command
 		return false
 	}
 	if err != nil {
-		manager.emit(operationResult(command, "unknown", "state_read_failed", err))
+		manager.emit(command.PortalID, operationResult(command, "unknown", "state_read_failed", err))
 		return true
 	}
 	if started.CommandDigest != commandDigest {
-		manager.emit(operationResult(command, "rejected", "request_conflict", errors.New("request_id was already used")))
+		manager.emit(command.PortalID, operationResult(command, "rejected", "request_conflict", errors.New("request_id was already used")))
 	} else {
-		manager.emit(operationResult(
+		manager.emit(command.PortalID, operationResult(
 			command,
 			"unknown",
 			"operation_outcome_unknown",
@@ -325,13 +370,13 @@ func (manager *Manager) finish(
 		result = operationResult(command, "unknown", "result_persistence_failed", saveErr)
 	}
 
-	manager.emit(result)
+	manager.emit(command.PortalID, result)
 }
 
-func (manager *Manager) emit(message any) {
+func (manager *Manager) emit(controller string, message any) {
 	select {
-	case manager.results <- message:
-	case <-manager.ctx.Done():
+	case manager.resultQueue(controller) <- message:
+	default:
 	}
 }
 

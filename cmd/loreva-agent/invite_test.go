@@ -27,7 +27,7 @@ func TestFollowInvite(t *testing.T) {
 
 			decisions := make(chan control.Message, 1)
 			go func() {
-				_ = agent.Send(control.Message{Type: control.TypeInviteCreated, Invite: "loreva1:test"})
+				_ = agent.Send(control.Message{Type: control.TypeInviteCreated, Invite: "loreva://connect/test"})
 				_ = agent.Send(control.Message{Type: control.TypePairingRequested, PairingID: "p", DeviceName: "laptop", SAS: "ABCD-EFGH"})
 
 				decision, err := agent.Receive()
@@ -54,7 +54,7 @@ func TestFollowInvite(t *testing.T) {
 			if test.wantApprove != (err == nil) {
 				t.Fatalf("followInvite() error = %v", err)
 			}
-			if !strings.Contains(output.String(), "loreva1:test") || !strings.Contains(output.String(), "ABCD-EFGH") {
+			if !strings.Contains(output.String(), "loreva://connect/test") || !strings.Contains(output.String(), "ABCD-EFGH") {
 				t.Fatalf("output = %q", output.String())
 			}
 		})

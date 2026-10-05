@@ -147,9 +147,7 @@ install_systemd_service() {
 	fi
 
 	ensure_service_user "$service_user" "$state_dir"
-	if [ "$mode" = "portal" ]; then
-		grant_docker_socket_access "$service_user"
-	fi
+	grant_docker_socket_access "$service_user"
 	service_group="$(id -gn "$service_user")"
 	install -d -m 0750 -o "$service_user" -g "$service_group" "$state_dir"
 

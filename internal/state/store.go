@@ -8,22 +8,31 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/FroZor/loreva-agent/internal/strictjson"
 )
 
 const (
 	currentVersion = 1
-	maxStateSize   = 1024 * 1024
-	identityName   = "identity.json"
-	pendingName    = "enrollment-pending.json"
-	renewalName    = "renewal-pending.json"
-	nodeName       = "node.json"
-	devicesName    = "devices.json"
+	// directVersion is the version of node.json and devices.json. Version 1
+	// belonged to direct access over WireGuard.
+	directVersion = 2
+	maxStateSize  = 1024 * 1024
+	identityName  = "identity.json"
+	pendingName   = "enrollment-pending.json"
+	renewalName   = "renewal-pending.json"
+	nodeName      = "node.json"
+	devicesName   = "devices.json"
 )
 
 // ErrNotFound indicates that the requested state document does not exist.
 var ErrNotFound = errors.New("agent state not found")
+
+// ErrLegacyDirect means node.json or devices.json was written for direct
+// access over WireGuard. LoadNode then returns what carries over: the node
+// ID, port, endpoints, and creation time, without a TLS identity.
+var ErrLegacyDirect = errors.New("direct access state from an agent that used WireGuard")
 
 // Store persists security-sensitive agent state in one protected directory.
 type Store struct {
@@ -139,34 +148,88 @@ func (s *Store) ReplaceIdentity(identity *Identity) error {
 	return s.replaceExisting(identityName, identity)
 }
 
-// LoadNode loads the local node identity created by init.
+// LoadNode loads the local node identity created by init. For node.json of
+// the WireGuard era it returns the reusable fields with ErrLegacyDirect.
 func (s *Store) LoadNode() (*Node, error) {
 	var node Node
 	if err := s.load(nodeName, &node); err != nil {
-		return nil, err
+		if errors.Is(err, ErrNotFound) {
+			return nil, err
+		}
+
+		return s.loadLegacyNode(err)
 	}
 
-	if node.Version != currentVersion {
+	if node.Version != directVersion {
 		return nil, fmt.Errorf("unsupported node state version %d", node.Version)
 	}
 
 	return &node, nil
 }
 
+// legacyNode is node.json version 1, when direct access used WireGuard.
+type legacyNode struct {
+	Version             int       `json:"version"`
+	NodeID              string    `json:"node_id"`
+	WireGuardPrivateKey string    `json:"wireguard_private_key"`
+	ListenPort          int       `json:"listen_port"`
+	TunnelPrefix        string    `json:"tunnel_prefix"`
+	Endpoints           []string  `json:"endpoints,omitempty"`
+	CreatedAt           time.Time `json:"created_at"`
+}
+
+func (s *Store) loadLegacyNode(currentErr error) (*Node, error) {
+	var legacy legacyNode
+	if err := s.load(nodeName, &legacy); err != nil || legacy.Version != currentVersion {
+		return nil, currentErr
+	}
+
+	return &Node{
+		NodeID:     legacy.NodeID,
+		ListenPort: legacy.ListenPort,
+		Endpoints:  legacy.Endpoints,
+		CreatedAt:  legacy.CreatedAt,
+	}, ErrLegacyDirect
+}
+
 // SaveNode creates the local node identity without overwriting one.
 func (s *Store) SaveNode(node *Node) error {
-	node.Version = currentVersion
+	node.Version = directVersion
 	return s.saveNew(nodeName, node)
 }
 
-// LoadDevices loads the paired device registry.
+// ReplaceNode atomically replaces the node identity. It is used only to
+// upgrade node.json from the WireGuard era.
+func (s *Store) ReplaceNode(node *Node) error {
+	node.Version = directVersion
+	return s.replaceExisting(nodeName, node)
+}
+
+// LoadDevices loads the paired device registry. Devices paired over
+// WireGuard cannot connect any more; for that registry it returns
+// ErrLegacyDirect.
 func (s *Store) LoadDevices() (*Devices, error) {
 	var devices Devices
 	if err := s.load(devicesName, &devices); err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return nil, err
+		}
+
+		var legacy struct {
+			Version int               `json:"version"`
+			Items   []json.RawMessage `json:"items"`
+		}
+		if legacyErr := s.load(devicesName, &legacy); legacyErr == nil && legacy.Version == currentVersion {
+			return nil, ErrLegacyDirect
+		}
+
 		return nil, err
 	}
 
-	if devices.Version != currentVersion {
+	if devices.Version == currentVersion {
+		return nil, ErrLegacyDirect
+	}
+	if devices.Version != directVersion {
 		return nil, fmt.Errorf("unsupported devices state version %d", devices.Version)
 	}
 
@@ -175,13 +238,13 @@ func (s *Store) LoadDevices() (*Devices, error) {
 
 // SaveDevices creates the paired device registry without overwriting one.
 func (s *Store) SaveDevices(devices *Devices) error {
-	devices.Version = currentVersion
+	devices.Version = directVersion
 	return s.saveNew(devicesName, devices)
 }
 
 // ReplaceDevices atomically replaces the existing paired device registry.
 func (s *Store) ReplaceDevices(devices *Devices) error {
-	devices.Version = currentVersion
+	devices.Version = directVersion
 	return s.replaceExisting(devicesName, devices)
 }
 

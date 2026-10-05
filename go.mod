@@ -14,9 +14,8 @@ require (
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.3
 	github.com/shirou/gopsutil/v4 v4.26.7
 	go.yaml.in/yaml/v4 v4.0.0-rc.6
+	golang.org/x/net v0.56.0
 	golang.org/x/term v0.45.0
-	golang.zx2c4.com/wireguard v0.0.0-20260522210424-ecfc5a8d5446
-	gopkg.in/yaml.v3 v3.0.1
 )
 
 require (
@@ -32,7 +31,6 @@ require (
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/go-ole/go-ole v1.2.6 // indirect
 	github.com/go-viper/mapstructure/v2 v2.5.0 // indirect
-	github.com/google/btree v1.1.2 // indirect
 	github.com/lufia/plan9stats v0.0.0-20211012122336-39d0f177ccd0 // indirect
 	github.com/mattn/go-shellwords v1.0.14 // indirect
 	github.com/moby/docker-image-spec v1.3.1 // indirect
@@ -49,13 +47,8 @@ require (
 	go.opentelemetry.io/otel v1.44.0 // indirect
 	go.opentelemetry.io/otel/metric v1.44.0 // indirect
 	go.opentelemetry.io/otel/trace v1.44.0 // indirect
-	golang.org/x/crypto v0.54.0 // indirect
-	golang.org/x/net v0.56.0 // indirect
 	golang.org/x/sync v0.22.0 // indirect
 	golang.org/x/text v0.41.0 // indirect
-	golang.org/x/time v0.11.0 // indirect
-	golang.zx2c4.com/wintun v0.0.0-20230126152724-0fa3db229ce2 // indirect
-	gvisor.dev/gvisor v0.0.0-20250503011706-39ed1f5ac29c // indirect
 )
 
 // Security override for GO-2026-5024 / CVE-2026-39824.

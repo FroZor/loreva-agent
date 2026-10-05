@@ -1,8 +1,10 @@
-// Package pairing defines the invite format and the key agreement that turns
-// an invite into a long-lived device peer. Both the agent and clients use it.
+// Package pairing defines the connection key format and the transcript that
+// both sides of a pairing agree on. Both the agent and clients use it.
 package pairing
 
 import (
+	"crypto/rand"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -12,49 +14,77 @@ import (
 	"time"
 
 	"github.com/FroZor/loreva-agent/internal/agentcrypto"
+	"github.com/FroZor/loreva-agent/internal/certpin"
 	"github.com/FroZor/loreva-agent/internal/strictjson"
-	"github.com/FroZor/loreva-agent/internal/tunnel"
 )
 
 const (
-	// InvitePrefix starts every encoded invite and carries the format version.
-	InvitePrefix   = "loreva1:"
-	inviteVersion  = 1
+	// InvitePrefix starts every encoded invite. It is a URI, so the operating
+	// system can open Loreva App from it; the format version is the "v" field.
+	InvitePrefix   = "loreva://connect/"
+	inviteVersion  = 2
 	maxInviteSize  = 4096
 	maxEndpoints   = 16
 	minEndpointLen = len("[::1]:1")
+	// TokenSize is the length of the one-time pairing token.
+	TokenSize = 32
 )
 
-// Invite is the one-time secret printed on the node. Whoever presents it
-// first can start pairing, so it must travel only over a trusted channel.
+// Invite is the one-time secret printed on the node. Whoever presents its
+// token first can start pairing, so it must travel only over a trusted
+// channel; the code comparison catches a token used by someone else.
 type Invite struct {
 	InviteID string
 	NodeID   string
-	// NodePublicKey authenticates the node in the WireGuard handshake.
-	NodePublicKey tunnel.Key
-	NodeAddress   netip.Addr
-	Endpoints     []netip.AddrPort
-	// PrivateKey, PresharedKey, and Address belong to the temporary invite peer.
-	PrivateKey   tunnel.Key
-	PresharedKey tunnel.Key
-	Address      netip.Addr
-	ExpiresAt    time.Time
+	// NodePin is the pin of the node's TLS key. It authenticates the node.
+	NodePin   string
+	Endpoints []netip.AddrPort
+	// Token is the one-time pairing token.
+	Token     []byte
+	ExpiresAt time.Time
 }
 
 type inviteDocument struct {
-	Version       int       `json:"v"`
-	InviteID      string    `json:"invite_id"`
-	NodeID        string    `json:"node_id"`
-	NodePublicKey string    `json:"node_public_key"`
-	NodeAddress   string    `json:"node_address"`
-	Endpoints     []string  `json:"endpoints"`
-	PrivateKey    string    `json:"invite_private_key"`
-	PresharedKey  string    `json:"invite_preshared_key"`
-	Address       string    `json:"invite_address"`
-	ExpiresAt     time.Time `json:"expires_at"`
+	Version   int       `json:"v"`
+	InviteID  string    `json:"invite_id"`
+	NodeID    string    `json:"node_id"`
+	NodePin   string    `json:"node_pin"`
+	Endpoints []string  `json:"endpoints"`
+	Token     string    `json:"token"`
+	ExpiresAt time.Time `json:"expires_at"`
 }
 
-// Encode returns the printable loreva1: form of the invite.
+// NewToken returns a fresh pairing token.
+func NewToken() ([]byte, error) {
+	token := make([]byte, TokenSize)
+	if _, err := rand.Read(token); err != nil {
+		return nil, fmt.Errorf("generate pairing token: %w", err)
+	}
+
+	return token, nil
+}
+
+// EncodeToken returns the wire form of a pairing token.
+func EncodeToken(token []byte) string {
+	return base64.RawURLEncoding.EncodeToString(token)
+}
+
+// DecodeToken parses the wire form of a pairing token.
+func DecodeToken(value string) ([]byte, error) {
+	token, err := base64.RawURLEncoding.Strict().DecodeString(value)
+	if err != nil || len(token) != TokenSize {
+		return nil, errors.New("pairing token must be 32 bytes of unpadded Base64URL")
+	}
+
+	return token, nil
+}
+
+// TokenEqual compares tokens in constant time.
+func TokenEqual(a, b []byte) bool {
+	return subtle.ConstantTimeCompare(a, b) == 1
+}
+
+// Encode returns the printable loreva://connect/ form of the invite.
 func (invite *Invite) Encode() (string, error) {
 	if err := invite.validate(); err != nil {
 		return "", err
@@ -66,16 +96,13 @@ func (invite *Invite) Encode() (string, error) {
 	}
 
 	data, err := json.Marshal(inviteDocument{
-		Version:       inviteVersion,
-		InviteID:      invite.InviteID,
-		NodeID:        invite.NodeID,
-		NodePublicKey: invite.NodePublicKey.String(),
-		NodeAddress:   invite.NodeAddress.String(),
-		Endpoints:     endpoints,
-		PrivateKey:    invite.PrivateKey.String(),
-		PresharedKey:  invite.PresharedKey.String(),
-		Address:       invite.Address.String(),
-		ExpiresAt:     invite.ExpiresAt.UTC(),
+		Version:   inviteVersion,
+		InviteID:  invite.InviteID,
+		NodeID:    invite.NodeID,
+		NodePin:   invite.NodePin,
+		Endpoints: endpoints,
+		Token:     EncodeToken(invite.Token),
+		ExpiresAt: invite.ExpiresAt.UTC(),
 	})
 	if err != nil {
 		return "", fmt.Errorf("encode invite: %w", err)
@@ -84,8 +111,8 @@ func (invite *Invite) Encode() (string, error) {
 	return InvitePrefix + base64.RawURLEncoding.EncodeToString(data), nil
 }
 
-// ParseInvite decodes and validates a loreva1: invite. It does not check
-// expiry; the node is the authority on that.
+// ParseInvite decodes and validates a loreva://connect/ invite. It does not
+// check expiry; the node is the authority on that.
 func ParseInvite(encoded string) (*Invite, error) {
 	encoded = strings.TrimSpace(encoded)
 	if len(encoded) > maxInviteSize {
@@ -122,31 +149,21 @@ func (document inviteDocument) invite() (*Invite, error) {
 	if document.Version != inviteVersion {
 		return nil, fmt.Errorf("unsupported invite version %d", document.Version)
 	}
+	if len(document.Endpoints) > maxEndpoints {
+		return nil, errors.New("invite has too many endpoints")
+	}
+
+	token, err := DecodeToken(document.Token)
+	if err != nil {
+		return nil, fmt.Errorf("invite token: %w", err)
+	}
 
 	invite := &Invite{
 		InviteID:  document.InviteID,
 		NodeID:    document.NodeID,
+		NodePin:   document.NodePin,
+		Token:     token,
 		ExpiresAt: document.ExpiresAt,
-	}
-
-	var err error
-	if invite.NodePublicKey, err = tunnel.ParseKey(document.NodePublicKey); err != nil {
-		return nil, fmt.Errorf("invite node_public_key: %w", err)
-	}
-	if invite.PrivateKey, err = tunnel.ParseKey(document.PrivateKey); err != nil {
-		return nil, fmt.Errorf("invite invite_private_key: %w", err)
-	}
-	if invite.PresharedKey, err = tunnel.ParseKey(document.PresharedKey); err != nil {
-		return nil, fmt.Errorf("invite invite_preshared_key: %w", err)
-	}
-	if invite.NodeAddress, err = netip.ParseAddr(document.NodeAddress); err != nil {
-		return nil, fmt.Errorf("invite node_address: %w", err)
-	}
-	if invite.Address, err = netip.ParseAddr(document.Address); err != nil {
-		return nil, fmt.Errorf("invite invite_address: %w", err)
-	}
-	if len(document.Endpoints) > maxEndpoints {
-		return nil, errors.New("invite has too many endpoints")
 	}
 
 	for _, value := range document.Endpoints {
@@ -165,11 +182,11 @@ func (invite *Invite) validate() error {
 	if !agentcrypto.ValidUUID(invite.InviteID) || !agentcrypto.ValidUUID(invite.NodeID) {
 		return errors.New("invite identifiers must be UUIDs")
 	}
-	if invite.NodePublicKey.IsZero() || invite.PrivateKey.IsZero() || invite.PresharedKey.IsZero() {
-		return errors.New("invite keys must not be empty")
+	if err := certpin.Validate(invite.NodePin); err != nil {
+		return fmt.Errorf("invite node_pin: %w", err)
 	}
-	if !invite.NodeAddress.Is6() || !invite.Address.Is6() || invite.NodeAddress == invite.Address {
-		return errors.New("invite tunnel addresses must be distinct IPv6 addresses")
+	if len(invite.Token) != TokenSize {
+		return errors.New("invite token must be 32 bytes")
 	}
 	if len(invite.Endpoints) == 0 || len(invite.Endpoints) > maxEndpoints {
 		return fmt.Errorf("invite must list between 1 and %d endpoints", maxEndpoints)

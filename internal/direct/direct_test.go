@@ -1,28 +1,118 @@
 package direct_test
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"crypto/tls"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"net/http"
+	"fmt"
+	"io"
+	"sync"
 	"testing"
 	"time"
 
-	"github.com/FroZor/loreva-agent/internal/agentapi"
+	"github.com/FroZor/loreva-agent/internal/certpin"
 	"github.com/FroZor/loreva-agent/internal/client"
 	"github.com/FroZor/loreva-agent/internal/control"
 	"github.com/FroZor/loreva-agent/internal/direct"
+	"github.com/FroZor/loreva-agent/internal/metrics"
 	"github.com/FroZor/loreva-agent/internal/networkinfo"
 	"github.com/FroZor/loreva-agent/internal/pairing"
+	"github.com/FroZor/loreva-agent/internal/protocol"
 	"github.com/FroZor/loreva-agent/internal/specifications"
 	"github.com/FroZor/loreva-agent/internal/state"
+	"github.com/FroZor/loreva-agent/internal/workload"
 )
 
 const testTimeout = 30 * time.Second
 
 type testNode struct {
-	node     *state.Node
-	stateDir string
+	node      *state.Node
+	stateDir  string
+	workloads *fakeWorkloads
+}
+
+// fakeWorkloads records what device sessions hand to the workload runtime.
+type fakeWorkloads struct {
+	submitted chan protocol.WorkloadCommand
+	stored    chan []byte
+
+	mu      sync.Mutex
+	results map[string]chan any
+}
+
+func newFakeWorkloads() *fakeWorkloads {
+	return &fakeWorkloads{
+		submitted: make(chan protocol.WorkloadCommand, 4),
+		stored:    make(chan []byte, 4),
+		results:   make(map[string]chan any),
+	}
+}
+
+func (f *fakeWorkloads) Submit(command protocol.WorkloadCommand, source workload.ArtifactSource) error {
+	if source != nil {
+		return errors.New("device commands must not have an artifact source")
+	}
+
+	f.submitted <- command
+
+	return nil
+}
+
+func (f *fakeWorkloads) Results(controller string) <-chan any {
+	return f.queue(controller)
+}
+
+func (f *fakeWorkloads) queue(controller string) chan any {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	if f.results[controller] == nil {
+		f.results[controller] = make(chan any, 4)
+	}
+
+	return f.results[controller]
+}
+
+func (f *fakeWorkloads) StoreArtifact(reference protocol.ArtifactReference, data io.Reader) error {
+	content, err := io.ReadAll(data)
+	if err != nil {
+		return err
+	}
+
+	sum := sha256.Sum256(content)
+	if int64(len(content)) != reference.SizeBytes || "sha256:"+hex.EncodeToString(sum[:]) != reference.SHA256 {
+		return errors.New("artifact does not match")
+	}
+
+	f.stored <- content
+
+	return nil
+}
+
+func testCollectors() direct.Collectors {
+	return direct.Collectors{
+		Specifications: func(context.Context) (specifications.Snapshot, error) {
+			return specifications.Snapshot{ObservationScope: "host"}, nil
+		},
+		Network: func(context.Context) (networkinfo.Snapshot, error) {
+			return networkinfo.Snapshot{ObservationScope: "host"}, nil
+		},
+		Metrics: func(context.Context) <-chan metrics.Sample {
+			samples := make(chan metrics.Sample, 1)
+			samples <- metrics.Sample{Snapshot: metrics.Snapshot{
+				ObservedAt:       time.Now().UTC(),
+				Interval:         time.Second,
+				ObservationScope: "host",
+			}}
+
+			return samples
+		},
+	}
 }
 
 func startNode(t *testing.T) *testNode {
@@ -37,19 +127,14 @@ func startNode(t *testing.T) *testNode {
 		t.Fatalf("Init() error = %v", err)
 	}
 
+	workloads := newFakeWorkloads()
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
 		done <- direct.Run(ctx, store, node, direct.Options{
-			Version: "test",
-			Collectors: direct.Collectors{
-				Specifications: func(context.Context) (specifications.Snapshot, error) {
-					return specifications.Snapshot{ObservationScope: "host"}, nil
-				},
-				Network: func(context.Context) (networkinfo.Snapshot, error) {
-					return networkinfo.Snapshot{ObservationScope: "host"}, nil
-				},
-			},
+			Version:    "test",
+			Collectors: testCollectors(),
+			Workloads:  workloads,
 		})
 	}()
 	t.Cleanup(func() {
@@ -59,7 +144,7 @@ func startNode(t *testing.T) *testNode {
 		}
 	})
 
-	return &testNode{node: node, stateDir: store.Dir()}
+	return &testNode{node: node, stateDir: store.Dir(), workloads: workloads}
 }
 
 // dialControl waits for the control socket of a starting node.
@@ -135,28 +220,76 @@ func pairAsync(ctx context.Context, invite *pairing.Invite, sas chan<- string) <
 	return result
 }
 
-func getJSON(ctx context.Context, t *testing.T, session *client.Session, path string, target any) {
+func pairDevice(ctx context.Context, t *testing.T, node *testNode) *client.Credentials {
 	t.Helper()
 
-	data, err := session.Do(ctx, http.MethodGet, path, nil)
-	if err != nil {
-		t.Fatalf("GET %s error = %v", path, err)
+	conn := node.dialControl(t)
+	result := <-pairAsync(ctx, createInvite(t, conn, true), make(chan string, 1))
+	if result.err != nil {
+		t.Fatalf("Pair() error = %v", result.err)
 	}
-	if err := json.Unmarshal(data, target); err != nil {
-		t.Fatalf("decode %s: %v", path, err)
+
+	return result.credentials
+}
+
+// expect reads frames until one of wantType arrives, acknowledging any
+// metrics report on the way as the app would.
+func expect(ctx context.Context, t *testing.T, session *client.Session, wantType string, target any) {
+	t.Helper()
+
+	for {
+		data, err := session.Read(ctx)
+		if err != nil {
+			t.Fatalf("read %s: %v", wantType, err)
+		}
+
+		messageType, err := protocol.MessageType(data)
+		if err != nil {
+			t.Fatalf("frame is not JSON: %s", data)
+		}
+		if messageType == wantType {
+			if err := protocol.DecodeStrict(data, target); err != nil {
+				t.Fatalf("decode %s: %v", wantType, err)
+			}
+
+			return
+		}
+		acknowledge(ctx, t, session, messageType, data, wantType)
 	}
 }
 
-func wantAPIError(t *testing.T, err error, status int, code string) {
+// acknowledge accepts a node report or metrics report, as the app does.
+func acknowledge(ctx context.Context, t *testing.T, session *client.Session, messageType string, data []byte, wantType string) {
 	t.Helper()
 
-	var apiErr *client.APIError
-	if !errors.As(err, &apiErr) || apiErr.Status != status || apiErr.Code != code {
-		t.Fatalf("error = %v, want %d %s", err, status, code)
+	var report struct {
+		RequestID string `json:"request_id"`
+	}
+	if err := json.Unmarshal(data, &report); err != nil {
+		t.Fatalf("decode %s: %v", messageType, err)
+	}
+
+	switch messageType {
+	case protocol.NodeSpecificationsReportType:
+		send(ctx, t, session, protocol.NodeSpecificationsAccepted{Type: protocol.NodeSpecificationsAcceptedType, RequestID: report.RequestID})
+	case protocol.NodeNetworkReportType:
+		send(ctx, t, session, protocol.NodeNetworkAccepted{Type: protocol.NodeNetworkAcceptedType, RequestID: report.RequestID})
+	case protocol.MetricsReportType:
+		send(ctx, t, session, protocol.MetricsAccepted{Type: protocol.MetricsAcceptedType, RequestID: report.RequestID})
+	default:
+		t.Fatalf("got %s while waiting for %s: %s", messageType, wantType, data)
 	}
 }
 
-func TestPairAndCallAPI(t *testing.T) {
+func send(ctx context.Context, t *testing.T, session *client.Session, frame any) {
+	t.Helper()
+
+	if err := session.WriteJSON(ctx, frame); err != nil {
+		t.Fatalf("send %T: %v", frame, err)
+	}
+}
+
+func TestPairAndUseSession(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 	defer cancel()
 
@@ -194,37 +327,151 @@ func TestPairAndCallAPI(t *testing.T) {
 	}
 	defer session.Close()
 
-	var info agentapi.Node
-	getJSON(ctx, t, session, agentapi.NodePath, &info)
-	if info.NodeID != node.node.NodeID || info.ListenPort != node.node.ListenPort || info.AgentVersion != "test" {
-		t.Fatalf("node info = %+v", info)
+	hello := session.Hello
+	if hello.NodeID != node.node.NodeID || hello.AgentVersion != "test" || hello.DeviceID != result.credentials.DeviceID {
+		t.Fatalf("hello = %+v", hello)
 	}
 
-	var specs agentapi.Specifications
-	getJSON(ctx, t, session, agentapi.SpecificationsPath, &specs)
+	// The device receives the same node reports as the portal and
+	// acknowledges them the same way; metrics follow the reports.
+	var specs protocol.NodeSpecificationsReport
+	expect(ctx, t, session, protocol.NodeSpecificationsReportType, &specs)
 	if specs.ObservationScope != "host" {
 		t.Fatalf("specifications = %+v", specs)
 	}
+	send(ctx, t, session, protocol.NodeSpecificationsAccepted{Type: protocol.NodeSpecificationsAcceptedType, RequestID: specs.RequestID})
 
-	var devices agentapi.DeviceList
-	getJSON(ctx, t, session, agentapi.DevicesPath, &devices)
+	var network protocol.NodeNetworkReport
+	expect(ctx, t, session, protocol.NodeNetworkReportType, &network)
+	send(ctx, t, session, protocol.NodeNetworkAccepted{Type: protocol.NodeNetworkAcceptedType, RequestID: network.RequestID})
+
+	var report protocol.MetricsReport
+	expect(ctx, t, session, protocol.MetricsReportType, &report)
+	if report.Metric.Type != protocol.MetricTypeNode {
+		t.Fatalf("first metrics report = %+v", report.Metric)
+	}
+	send(ctx, t, session, protocol.MetricsAccepted{Type: protocol.MetricsAcceptedType, RequestID: report.RequestID})
+
+	send(ctx, t, session, protocol.DevicesList{Type: protocol.DevicesListType, RequestID: "2ab9d734-7434-4cdf-bca4-6ce7a46cdd65"})
+	var devices protocol.DevicesListResult
+	expect(ctx, t, session, protocol.DevicesListResultType, &devices)
 	if len(devices.Devices) != 1 || !devices.Devices[0].Current || devices.Devices[0].Name != "test laptop" {
 		t.Fatalf("devices = %+v", devices)
 	}
 
-	// The invite is single use, even while its temporary peer still exists.
-	_, err = client.Pair(ctx, invite, client.PairOptions{DeviceName: "second", ShowSAS: func(string) {}})
-	wantAPIError(t, err, http.StatusConflict, "invite_used")
-
-	// Revoking the current device cuts its API access.
-	if _, err := session.Do(ctx, http.MethodDelete, agentapi.DevicesPath+"/"+result.credentials.DeviceID, nil); err != nil {
-		t.Fatalf("DELETE device error = %v", err)
+	// The invite is single use: with no active invite left, the node refuses
+	// every unknown key already in the TLS handshake.
+	if _, err := client.Pair(ctx, invite, client.PairOptions{DeviceName: "second", ShowSAS: func(string) {}}); err == nil {
+		t.Fatal("second Pair() with a used invite succeeded")
 	}
-	_, err = session.Do(ctx, http.MethodGet, agentapi.NodePath, nil)
-	wantAPIError(t, err, http.StatusForbidden, "forbidden")
+
+	// Revoking the current device ends its session.
+	send(ctx, t, session, protocol.DeviceRemove{
+		Type:      protocol.DeviceRemoveType,
+		RequestID: "0d1b7f56-39b6-4b94-a3aa-c445a6a6ab59",
+		DeviceID:  result.credentials.DeviceID,
+	})
+	var removed protocol.DeviceRemoveResult
+	expect(ctx, t, session, protocol.DeviceRemoveResultType, &removed)
+	for {
+		if _, err := session.Read(ctx); err != nil {
+			break
+		}
+	}
+	if _, err := client.Connect(ctx, result.credentials); err == nil {
+		t.Fatal("Connect() succeeded for a revoked device")
+	}
 }
 
-func TestInvitePeerCannotCallDeviceAPI(t *testing.T) {
+func TestDeviceWorkloadsAndArtifacts(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
+
+	node := startNode(t)
+	session, err := client.Connect(ctx, pairDevice(ctx, t, node))
+	if err != nil {
+		t.Fatalf("Connect() error = %v", err)
+	}
+	defer session.Close()
+
+	content := bytes.Repeat([]byte("loreva"), protocol.MaxArtifactChunkBytes/3)
+	sum := sha256.Sum256(content)
+	uploadID := "6e0c1d91-5145-440f-bf97-d84db4f83644"
+	send(ctx, t, session, protocol.ArtifactUploadRequest{
+		Type:       protocol.ArtifactUploadRequestType,
+		RequestID:  uploadID,
+		ArtifactID: "df9ffacf-fd65-4643-967b-422b2d4c826c",
+		SHA256:     "sha256:" + hex.EncodeToString(sum[:]),
+		SizeBytes:  int64(len(content)),
+	})
+	for offset := 0; offset < len(content); offset += protocol.MaxArtifactChunkBytes {
+		end := min(offset+protocol.MaxArtifactChunkBytes, len(content))
+		send(ctx, t, session, protocol.ArtifactUploadChunk{
+			Type:      protocol.ArtifactUploadChunkType,
+			RequestID: uploadID,
+			Offset:    int64(offset),
+			Data:      base64.StdEncoding.EncodeToString(content[offset:end]),
+		})
+	}
+
+	var uploaded protocol.ArtifactUploadResult
+	expect(ctx, t, session, protocol.ArtifactUploadResultType, &uploaded)
+	if uploaded.State != protocol.ArtifactStored {
+		t.Fatalf("upload result = %+v", uploaded)
+	}
+	if stored := <-node.workloads.stored; !bytes.Equal(stored, content) {
+		t.Fatal("stored artifact differs from the upload")
+	}
+
+	payload := json.RawMessage(`{"format":"oci","oci":{"image":"busybox@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}`)
+	send(ctx, t, session, protocol.DeviceWorkloadCommand{
+		Type:          protocol.WorkloadPlanRequestType,
+		SchemaVersion: protocol.WorkloadSchemaVersion,
+		RequestID:     "2ab9d734-7434-4cdf-bca4-6ce7a46cdd65",
+		WorkloadID:    "d1b181c1-52ec-4d55-b2c9-b1428305b294",
+		Payload:       payload,
+	})
+
+	command := <-node.workloads.submitted
+	if command.PortalID != node.node.NodeID || command.NodeID != node.node.NodeID {
+		t.Fatalf("device command controller = %q, node = %q", command.PortalID, command.NodeID)
+	}
+
+	// Responses for the node's controller scope reach the device session.
+	node.workloads.queue(node.node.NodeID) <- protocol.WorkloadPlanResult{
+		Type:          protocol.WorkloadPlanResultType,
+		SchemaVersion: protocol.WorkloadSchemaVersion,
+		RequestID:     command.RequestID,
+		PortalID:      command.PortalID,
+		NodeID:        command.NodeID,
+		WorkloadID:    command.WorkloadID,
+		OccurredAt:    time.Now().UTC(),
+		Payload: protocol.WorkloadPlanResultPayload{
+			State: "ready", Steps: []protocol.WorkloadPlanStep{}, Findings: []protocol.WorkloadFinding{},
+		},
+	}
+
+	var plan protocol.WorkloadPlanResult
+	expect(ctx, t, session, protocol.WorkloadPlanResultType, &plan)
+	if plan.RequestID != command.RequestID || plan.Payload.State != "ready" {
+		t.Fatalf("plan result = %+v", plan)
+	}
+
+	send(ctx, t, session, protocol.DeviceWorkloadCommand{
+		Type:          protocol.WorkloadPlanRequestType,
+		SchemaVersion: protocol.WorkloadSchemaVersion,
+		RequestID:     "not-a-uuid",
+		WorkloadID:    "d1b181c1-52ec-4d55-b2c9-b1428305b294",
+		Payload:       payload,
+	})
+	var refusal protocol.Error
+	expect(ctx, t, session, protocol.ErrorType, &refusal)
+	if refusal.Code != "invalid_command" {
+		t.Fatalf("refusal = %+v", refusal)
+	}
+}
+
+func TestInvitePeerCanOnlyPair(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 	defer cancel()
 
@@ -232,19 +479,32 @@ func TestInvitePeerCannotCallDeviceAPI(t *testing.T) {
 	conn := node.dialControl(t)
 	invite := createInvite(t, conn, false)
 
-	session, err := client.ConnectInvite(ctx, invite)
+	identity, err := certpin.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	session, err := client.ConnectInvite(ctx, invite, identity)
 	if err != nil {
 		t.Fatalf("ConnectInvite() error = %v", err)
 	}
 	defer session.Close()
 
-	for _, path := range []string{agentapi.NodePath, agentapi.DevicesPath, agentapi.NetworkPath} {
-		_, err := session.Do(ctx, http.MethodGet, path, nil)
-		wantAPIError(t, err, http.StatusForbidden, "forbidden")
+	if session.Hello.Peer != protocol.SessionPeerInvite || session.Hello.DeviceID != "" {
+		t.Fatalf("invite hello = %+v", session.Hello)
 	}
 
-	_, err = session.Do(ctx, http.MethodPost, agentapi.PairingPath, map[string]any{"device_name": "x", "extra": true})
-	wantAPIError(t, err, http.StatusBadRequest, "invalid_json")
+	for _, frame := range []any{
+		protocol.DevicesList{Type: protocol.DevicesListType, RequestID: "2ab9d734-7434-4cdf-bca4-6ce7a46cdd65"},
+		map[string]any{"type": protocol.PairingRequestType, "device_name": "x", "extra": true},
+	} {
+		send(ctx, t, session, frame)
+
+		var refusal protocol.Error
+		expect(ctx, t, session, protocol.ErrorType, &refusal)
+		if refusal.Code != "invalid_message" {
+			t.Fatalf("refusal = %+v", refusal)
+		}
+	}
 }
 
 func TestRejectedPairing(t *testing.T) {
@@ -290,11 +550,27 @@ func TestNoConfirmPairingAndDeviceRemoval(t *testing.T) {
 	receive(t, conn, control.TypePairingRequested)
 	receive(t, conn, control.TypePairingCompleted)
 
+	session, err := client.Connect(ctx, result.credentials)
+	if err != nil {
+		t.Fatalf("Connect() error = %v", err)
+	}
+	defer session.Close()
+
 	admin := node.dialControl(t)
 	if err := admin.Send(control.Message{Type: control.TypeDeviceRemove, DeviceID: result.credentials.DeviceID}); err != nil {
 		t.Fatal(err)
 	}
 	receive(t, admin, control.TypeDeviceRemoved)
+
+	// The operator's revocation also ends the device's open session.
+	for {
+		if _, err := session.Read(ctx); err != nil {
+			break
+		}
+	}
+	if ctx.Err() != nil {
+		t.Fatal("device session outlived its revocation")
+	}
 
 	if err := admin.Send(control.Message{Type: control.TypeDevicesList}); err != nil {
 		t.Fatal(err)
@@ -339,10 +615,7 @@ func TestShutdownEndsPendingPairing(t *testing.T) {
 	runCtx, stop := context.WithCancel(ctx)
 	done := make(chan error, 1)
 	go func() {
-		done <- direct.Run(runCtx, store, node, direct.Options{Collectors: direct.Collectors{
-			Specifications: func(context.Context) (specifications.Snapshot, error) { return specifications.Snapshot{}, nil },
-			Network:        func(context.Context) (networkinfo.Snapshot, error) { return networkinfo.Snapshot{}, nil },
-		}})
+		done <- direct.Run(runCtx, store, node, direct.Options{Collectors: testCollectors()})
 	}()
 
 	conn := (&testNode{node: node, stateDir: store.Dir()}).dialControl(t)
@@ -362,4 +635,57 @@ func TestShutdownEndsPendingPairing(t *testing.T) {
 	// The device only sees its own timeout once the node is gone.
 	cancel()
 	<-paired
+}
+
+func TestTLSListenerRefusesUnknownKeysAndWrongNode(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
+
+	node := startNode(t)
+	credentials := pairDevice(ctx, t, node)
+
+	// A device whose key the node does not know is refused in the TLS
+	// handshake while no invite is active.
+	stranger, err := certpin.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	unknown := *credentials
+	unknown.PrivateKey, unknown.Certificate = stranger.PrivateKey, stranger.Certificate
+	if _, err := client.Connect(ctx, &unknown); err == nil {
+		t.Fatal("Connect() with an unknown key succeeded")
+	}
+
+	// The device refuses a node whose key does not match the pin.
+	wrongNode := *credentials
+	wrongNode.NodePin = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8="
+	if _, err := client.Connect(ctx, &wrongNode); err == nil {
+		t.Fatal("Connect() to a node with another key succeeded")
+	}
+
+	session, err := client.Connect(ctx, credentials)
+	if err != nil {
+		t.Fatalf("Connect() with the paired key error = %v", err)
+	}
+	session.Close()
+}
+
+func TestRawTLSWithoutCertificateIsRefused(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
+
+	node := startNode(t)
+	node.dialControl(t)
+
+	dialer := tls.Dialer{Config: &tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS12}}
+	conn, err := dialer.DialContext(ctx, "tcp", fmt.Sprintf("127.0.0.1:%d", node.node.ListenPort))
+	if err == nil {
+		// TLS 1.3 reports a refused client certificate on the first read.
+		_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+		_, err = conn.Read(make([]byte, 1))
+		_ = conn.Close()
+	}
+	if err == nil {
+		t.Fatal("a TLS client without a certificate was served")
+	}
 }

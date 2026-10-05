@@ -5,6 +5,7 @@ import (
 	"compress/gzip"
 	"context"
 	"crypto/sha256"
+	"crypto/tls"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -15,25 +16,104 @@ import (
 	"strings"
 
 	"github.com/FroZor/loreva-agent/internal/agentcrypto"
+	"github.com/FroZor/loreva-agent/internal/connectivity"
 	"github.com/FroZor/loreva-agent/internal/protocol"
 )
 
 const (
-	maxArtifactBytes       = 32 << 20
+	// MaxArtifactBytes bounds one compressed artifact.
+	MaxArtifactBytes       = 32 << 20
 	maxExtractedBytes      = 128 << 20
 	maxExtractedFiles      = 4096
 	artifactEndpointPrefix = "/agent/v1/artifacts/"
 )
 
-var errExtractionExists = errors.New("artifact extraction destination already exists")
+var (
+	errExtractionExists = errors.New("artifact extraction destination already exists")
+	// ErrArtifactCacheFull refuses an upload that would exceed the cache limit.
+	ErrArtifactCacheFull = errors.New("the artifact cache is full; remove unused workloads or artifacts on the node")
+)
 
-type artifactStore struct {
-	root       string
+// ArtifactSource fetches an artifact that is not in the local cache yet.
+// The portal session downloads from the portal; a direct device uploads
+// artifacts before planning, so its commands have no source.
+type ArtifactSource interface {
+	Download(ctx context.Context, reference protocol.ArtifactReference, destination io.Writer) error
+}
+
+// PortalConfig is the authenticated portal transport for artifact downloads.
+type PortalConfig struct {
+	PortalURL            string
+	PortalCAPEM          string
+	ClientCertificate    *tls.Certificate
+	AllowDevelopmentHTTP bool
+}
+
+// PortalArtifacts downloads artifacts from the enrolled portal over mTLS.
+func PortalArtifacts(config PortalConfig) (ArtifactSource, error) {
+	endpoint, err := connectivity.HTTPEndpoint(config.PortalURL, artifactEndpointPrefix, config.AllowDevelopmentHTTP)
+	if err != nil {
+		return nil, fmt.Errorf("resolve portal artifact endpoint: %w", err)
+	}
+	httpClient, err := connectivity.NewHTTPClient(connectivity.Config{
+		PortalCAPEM: config.PortalCAPEM, ClientCertificate: config.ClientCertificate,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("create portal artifact client: %w", err)
+	}
+
+	return portalArtifacts{baseURL: strings.TrimSuffix(endpoint, "/") + "/", httpClient: httpClient}, nil
+}
+
+type portalArtifacts struct {
 	baseURL    string
 	httpClient *http.Client
 }
 
+type artifactStore struct {
+	root   string
+	source ArtifactSource
+	// uploadLimit bounds the cache size that uploads may grow it to; zero
+	// means no limit.
+	uploadLimit int64
+}
+
+// acquire returns the cached artifact, downloading it from the source when
+// it is missing.
 func (store artifactStore) acquire(ctx context.Context, reference protocol.ArtifactReference) (string, error) {
+	return store.commit(reference, func(destination io.Writer) error {
+		if store.source == nil {
+			return errors.New("artifact " + reference.ArtifactID + " was not uploaded before planning")
+		}
+
+		return store.source.Download(ctx, reference, destination)
+	})
+}
+
+// store saves an uploaded artifact after checking its size and digest. It
+// always reads the whole upload, also when the artifact is already cached,
+// so the uploader gets the same verification either way.
+func (store artifactStore) store(reference protocol.ArtifactReference, data io.Reader) error {
+	if err := store.checkUploadSpace(reference); err != nil {
+		return err
+	}
+
+	filled := false
+	_, err := store.commit(reference, func(destination io.Writer) error {
+		filled = true
+
+		return copyVerified(data, destination, reference)
+	})
+	if err != nil || filled {
+		return err
+	}
+
+	return copyVerified(data, io.Discard, reference)
+}
+
+// commit returns the cached artifact or writes it with fill into a private
+// temporary file and moves it into place.
+func (store artifactStore) commit(reference protocol.ArtifactReference, fill func(io.Writer) error) (string, error) {
 	digest, err := validateArtifactReference(reference)
 	if err != nil {
 		return "", err
@@ -66,7 +146,7 @@ func (store artifactStore) acquire(ctx context.Context, reference protocol.Artif
 	if err := temporary.Chmod(0o600); err != nil {
 		return "", fmt.Errorf("secure artifact temporary file: %w", err)
 	}
-	if err := store.download(ctx, reference, temporary); err != nil {
+	if err := fill(temporary); err != nil {
 		return "", err
 	}
 	if err := temporary.Sync(); err != nil {
@@ -90,19 +170,19 @@ func (store artifactStore) acquire(ctx context.Context, reference protocol.Artif
 	return destination, nil
 }
 
-func (store artifactStore) download(
+func (portal portalArtifacts) Download(
 	ctx context.Context,
 	reference protocol.ArtifactReference,
 	destination io.Writer,
 ) (resultErr error) {
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, store.baseURL+reference.ArtifactID, nil)
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, portal.baseURL+reference.ArtifactID, nil)
 	if err != nil {
 		return fmt.Errorf("create artifact request: %w", err)
 	}
 	request.Header.Set("Accept", "application/octet-stream")
 	request.Header.Set("Accept-Encoding", "identity")
 
-	response, err := store.httpClient.Do(request)
+	response, err := portal.httpClient.Do(request)
 	if err != nil {
 		return fmt.Errorf("download portal artifact: %w", err)
 	}
@@ -119,20 +199,26 @@ func (store artifactStore) download(
 		return errors.New("portal artifact Content-Length does not match the signed size")
 	}
 
+	return copyVerified(response.Body, destination, reference)
+}
+
+// copyVerified copies exactly reference.SizeBytes bytes whose SHA-256 is
+// reference.SHA256.
+func copyVerified(source io.Reader, destination io.Writer, reference protocol.ArtifactReference) error {
 	hash := sha256.New()
-	limited := &io.LimitedReader{R: response.Body, N: reference.SizeBytes + 1}
+	limited := &io.LimitedReader{R: source, N: reference.SizeBytes + 1}
 	written, err := io.Copy(io.MultiWriter(destination, hash), limited)
 	if err != nil {
-		return fmt.Errorf("read portal artifact: %w", err)
+		return fmt.Errorf("read artifact: %w", err)
 	}
 	if written != reference.SizeBytes || limited.N <= 0 {
-		return errors.New("portal artifact body does not match the signed size")
+		return errors.New("artifact body does not match the declared size")
 	}
 
 	actual := hex.EncodeToString(hash.Sum(nil))
 	expected := strings.TrimPrefix(reference.SHA256, "sha256:")
 	if actual != expected {
-		return errors.New("portal artifact SHA-256 does not match the signed digest")
+		return errors.New("artifact SHA-256 does not match the declared digest")
 	}
 
 	return nil
@@ -142,8 +228,8 @@ func validateArtifactReference(reference protocol.ArtifactReference) (string, er
 	if !agentcrypto.ValidUUID(reference.ArtifactID) {
 		return "", errors.New("artifact_id must be a canonical UUID")
 	}
-	if reference.SizeBytes <= 0 || reference.SizeBytes > maxArtifactBytes {
-		return "", fmt.Errorf("artifact size must be between 1 byte and %d bytes", maxArtifactBytes)
+	if reference.SizeBytes <= 0 || reference.SizeBytes > MaxArtifactBytes {
+		return "", fmt.Errorf("artifact size must be between 1 byte and %d bytes", MaxArtifactBytes)
 	}
 	if !strings.HasPrefix(reference.SHA256, "sha256:") || len(reference.SHA256) != len("sha256:")+sha256.Size*2 {
 		return "", errors.New("artifact sha256 must use sha256:<lowercase-hex>")
@@ -331,6 +417,44 @@ func extractRegularFile(reader io.Reader, target string, size int64, sourceMode 
 	written, err := io.CopyN(file, reader, size)
 	if err != nil || written != size {
 		return errors.New("compose archive entry ended before its declared size")
+	}
+
+	return nil
+}
+
+// checkUploadSpace refuses an upload that would grow the cache beyond its
+// limit. Already cached artifacts are always accepted.
+func (store artifactStore) checkUploadSpace(reference protocol.ArtifactReference) error {
+	if store.uploadLimit == 0 {
+		return nil
+	}
+
+	digest, err := validateArtifactReference(reference)
+	if err != nil {
+		return err
+	}
+	if verifyArtifactFile(filepath.Join(store.root, digest), reference) == nil {
+		return nil
+	}
+
+	entries, err := os.ReadDir(store.root)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("read artifact cache: %w", err)
+	}
+
+	used := reference.SizeBytes
+	for _, entry := range entries {
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+		used += info.Size()
+	}
+	if used > store.uploadLimit {
+		return ErrArtifactCacheFull
 	}
 
 	return nil

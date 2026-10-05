@@ -32,15 +32,10 @@ type readResult struct {
 }
 
 type liveState struct {
+	*exchange
 	renewal           *activeRenewal
 	renewReplyTimer   *time.Timer
 	sourceExpiryTimer *time.Timer
-	reports           *nodeReporter
-	reportReplyTimer  *time.Timer
-	reportRetryTimer  *time.Timer
-	metrics           *metricReporter
-	metricsReplyTimer *time.Timer
-	metricsRetryTimer *time.Timer
 }
 
 func (r *Runner) maintain(
@@ -70,41 +65,25 @@ func (r *Runner) maintain(
 	renewReplyTimer := newStoppedTimer()
 	defer renewReplyTimer.Stop()
 
-	reportReplyTimer := newStoppedTimer()
-	defer reportReplyTimer.Stop()
-
-	reportRetryTimer := newStoppedTimer()
-	defer reportRetryTimer.Stop()
-
-	metricsReplyTimer := newStoppedTimer()
-	defer metricsReplyTimer.Stop()
-
-	metricsRetryTimer := newStoppedTimer()
-	defer metricsRetryTimer.Stop()
-
 	sourceExpiryTimer, sourceExpiry := r.newSourceExpiryTimer(endpoint)
 	if sourceExpiryTimer != nil {
 		defer sourceExpiryTimer.Stop()
 	}
 
-	metricReporter, err := newMetricReporter(readCtx, r.collectors.Metrics, &r.metrics)
+	data, err := newExchange(readCtx, r.collectors, &r.reports, &r.metrics)
 	if err != nil {
 		return &permanentError{Err: err}
 	}
+	defer data.stop()
 
 	live := liveState{
+		exchange:          data,
 		renewReplyTimer:   renewReplyTimer,
 		sourceExpiryTimer: sourceExpiryTimer,
-		reports:           newNodeReporter(readCtx, r.collectors, &r.reports),
-		reportReplyTimer:  reportReplyTimer,
-		reportRetryTimer:  reportRetryTimer,
-		metrics:           metricReporter,
-		metricsReplyTimer: metricsReplyTimer,
-		metricsRetryTimer: metricsRetryTimer,
 	}
 	var workloadResults <-chan any
 	if r.workloads != nil {
-		workloadResults = r.workloads.Results()
+		workloadResults = r.workloads.Results(r.identity.PortalID)
 	}
 
 	for {
@@ -128,46 +107,25 @@ func (r *Runner) maintain(
 				return fmt.Errorf("write workload response: %w", err)
 			}
 		case report := <-live.reports.results:
-			if err := live.reports.writeResult(readCtx, conn, report); err != nil {
+			if err := live.reportCollected(readCtx, conn, report); err != nil {
 				return err
 			}
-
-			reportReplyTimer.Reset(nodeReportReplyTimeout)
-		case <-reportReplyTimer.C:
-			r.scheduleNodeReportRetry(&live, events, "ack_timeout")
-		case <-reportRetryTimer.C:
-			active := live.reports.state.active
-			if active == nil {
-				return errors.New("node report retry fired without an active report")
-			}
-			if err := live.reports.writeActive(readCtx, conn, active.kind); err != nil {
+		case <-live.reportReplyTimer.C:
+			live.scheduleNodeReportRetry(events, "ack_timeout")
+		case <-live.reportRetryTimer.C:
+			if err := live.retryReport(readCtx, conn); err != nil {
 				return err
 			}
-
-			reportReplyTimer.Reset(nodeReportReplyTimeout)
-		case collection := <-live.metrics.results:
-			if err := live.metrics.enqueue(collection); err != nil {
-				continue
-			}
-			if !live.reports.state.complete {
-				continue
-			}
-
-			sent, err := live.metrics.writeNext(readCtx, conn)
-			if err != nil {
+		case sample := <-live.metrics.results:
+			if err := live.metricCollected(readCtx, conn, sample); err != nil {
 				return err
 			}
-			if sent {
-				metricsReplyTimer.Reset(metricsReplyTimeout)
-			}
-		case <-metricsReplyTimer.C:
-			r.scheduleMetricsRetry(&live, events, "ack_timeout")
-		case <-metricsRetryTimer.C:
-			if err := live.metrics.writeActive(readCtx, conn); err != nil {
+		case <-live.metricsReplyTimer.C:
+			live.scheduleMetricsRetry(events, "ack_timeout")
+		case <-live.metricsRetryTimer.C:
+			if err := live.retryMetrics(readCtx, conn); err != nil {
 				return err
 			}
-
-			metricsReplyTimer.Reset(metricsReplyTimeout)
 		case <-renewTimer.C:
 			if live.renewal != nil {
 				return &permanentError{Err: errors.New("renewal timer fired while a request is pending")}
@@ -206,7 +164,7 @@ func startFrameReader(ctx context.Context, conn *websocket.Conn) <-chan readResu
 				return
 			}
 			if messageType != websocket.MessageText {
-				sendReadResult(ctx, results, readResult{err: errors.New("portal sent a non-text protocol message")})
+				sendReadResult(ctx, results, readResult{err: errors.New("peer sent a non-text protocol message")})
 				return
 			}
 			if !sendReadResult(ctx, results, readResult{data: data}) {
@@ -241,109 +199,17 @@ func (r *Runner) handleWorkingMessage(
 		return r.endpointFailure(endpoint, errors.New("working message is not valid JSON"))
 	}
 
+	handled, err := live.handleAcknowledgement(ctx, conn, messageType, data, events)
+	if rejection, ok := errors.AsType[*identityRejection](err); ok {
+		return r.endpointFailure(endpoint, rejection.err)
+	}
+	if handled {
+		return err
+	}
+
 	switch messageType {
 	case protocol.PortalCommandType:
 		return r.handlePortalCommand(ctx, conn, sessionNonce, endpoint, data)
-	case protocol.NodeSpecificationsAcceptedType,
-		protocol.NodeSpecificationsRejectedType,
-		protocol.NodeNetworkAcceptedType,
-		protocol.NodeNetworkRejectedType:
-		reportType := live.reports.activeType()
-		if err := live.reports.handleResponse(ctx, data); err != nil {
-			if errors.Is(err, errDuplicateNodeReportAcknowledgement) {
-				return nil
-			}
-
-			rejection, ok := errors.AsType[*nodeReportRejection](err)
-			if !ok {
-				return err
-			}
-
-			stopTimer(live.reportReplyTimer)
-			stopTimer(live.reportRetryTimer)
-
-			if identityNodeReportRejection(rejection.code) {
-				return r.endpointFailure(endpoint, rejection)
-			}
-			if !terminalNodeReportRejection(rejection.code) {
-				r.scheduleNodeReportRetry(live, events, rejection.code)
-				return nil
-			}
-
-			live.reports.skip(ctx)
-			notifyNodeReportRejection(events, NodeReportRejection{
-				Type: reportType,
-				Code: rejection.code,
-			})
-			if live.reports.state.complete {
-				sent, err := live.metrics.writeReady(ctx, conn)
-				if err != nil {
-					return err
-				}
-				if sent {
-					live.metricsReplyTimer.Reset(metricsReplyTimeout)
-				}
-			}
-
-			return nil
-		}
-
-		stopTimer(live.reportReplyTimer)
-		stopTimer(live.reportRetryTimer)
-
-		if live.reports.state.complete {
-			sent, err := live.metrics.writeReady(ctx, conn)
-			if err != nil {
-				return err
-			}
-			if sent {
-				live.metricsReplyTimer.Reset(metricsReplyTimeout)
-			}
-		}
-
-		return nil
-	case protocol.MetricsAcceptedType, protocol.MetricsRejectedType:
-		if err := live.metrics.handleResponse(data); err != nil {
-			if errors.Is(err, errDuplicateMetricsAcknowledgement) {
-				return nil
-			}
-
-			rejection, ok := errors.AsType[*metricRejection](err)
-			if !ok {
-				return err
-			}
-
-			stopTimer(live.metricsReplyTimer)
-			stopTimer(live.metricsRetryTimer)
-
-			if identityNodeReportRejection(rejection.code) {
-				return r.endpointFailure(endpoint, rejection)
-			}
-			if !terminalNodeReportRejection(rejection.code) {
-				r.scheduleMetricsRetry(live, events, rejection.code)
-				return nil
-			}
-
-			metricType := live.metrics.activeType()
-			live.metrics.discardActive()
-			notifyNodeReportRejection(events, NodeReportRejection{
-				Type: metricType,
-				Code: rejection.code,
-			})
-		} else {
-			stopTimer(live.metricsReplyTimer)
-			stopTimer(live.metricsRetryTimer)
-		}
-
-		sent, err := live.metrics.writeNext(ctx, conn)
-		if err != nil {
-			return err
-		}
-		if sent {
-			live.metricsReplyTimer.Reset(metricsReplyTimeout)
-		}
-
-		return nil
 	case protocol.SourcesUpdateType:
 		return r.handleSourcesUpdate(conn, endpoint, data, live.sourceExpiryTimer)
 	case protocol.DrainType:
@@ -388,16 +254,17 @@ func (r *Runner) handlePortalCommand(
 		return r.endpointFailure(endpoint, err)
 	}
 	if r.workloads == nil {
-		return r.writeWorkloadUnavailable(ctx, conn, command, "workload_runtime_unavailable")
+		return writeWorkloadRejected(ctx, conn, command, "workload_runtime_unavailable")
 	}
-	if err := r.workloads.Submit(command); err != nil {
-		return r.writeWorkloadUnavailable(ctx, conn, command, "workload_queue_full")
+	if err := r.workloads.Submit(command, r.artifacts); err != nil {
+		return writeWorkloadRejected(ctx, conn, command, "workload_queue_full")
 	}
 
 	return nil
 }
 
-func (r *Runner) writeWorkloadUnavailable(
+// writeWorkloadRejected answers a command the agent could not queue.
+func writeWorkloadRejected(
 	ctx context.Context,
 	conn *websocket.Conn,
 	command protocol.WorkloadCommand,
@@ -419,38 +286,6 @@ func (r *Runner) writeWorkloadUnavailable(
 	cancel()
 
 	return err
-}
-
-func (r *Runner) scheduleNodeReportRetry(live *liveState, events Events, code string) {
-	delay := live.reports.retryDelay()
-	stopTimer(live.reportRetryTimer)
-	live.reportRetryTimer.Reset(delay)
-
-	notifyNodeReportRejection(events, NodeReportRejection{
-		Type:      live.reports.activeType(),
-		Code:      code,
-		RetryIn:   delay,
-		Retryable: true,
-	})
-}
-
-func (r *Runner) scheduleMetricsRetry(live *liveState, events Events, code string) {
-	delay := live.metrics.retryDelay()
-	stopTimer(live.metricsRetryTimer)
-	live.metricsRetryTimer.Reset(delay)
-
-	notifyNodeReportRejection(events, NodeReportRejection{
-		Type:      live.metrics.activeType(),
-		Code:      code,
-		RetryIn:   delay,
-		Retryable: true,
-	})
-}
-
-func notifyNodeReportRejection(events Events, rejection NodeReportRejection) {
-	if events.ReportRejected != nil {
-		events.ReportRejected(rejection)
-	}
 }
 
 func (r *Runner) handleSourcesUpdate(conn *websocket.Conn, endpoint string, data []byte, expiryTimer *time.Timer) error {

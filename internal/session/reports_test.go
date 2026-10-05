@@ -329,11 +329,11 @@ func newTestReportLiveState(t *testing.T, kind nodeReportKind) *liveState {
 		payload:   []byte(`{"type":"node.specifications.report"}`),
 	}}
 
-	return &liveState{
+	return &liveState{exchange: &exchange{
 		reports:          &nodeReporter{collectors: Collectors{}, results: make(chan collectedNodeReport, 1), state: state},
 		reportReplyTimer: replyTimer,
 		reportRetryTimer: retryTimer,
-	}
+	}}
 }
 
 func waitForNodeReport(t *testing.T, results <-chan collectedNodeReport) collectedNodeReport {

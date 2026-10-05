@@ -75,11 +75,10 @@ type Message struct {
 
 // Device is a paired device as the control socket reports it.
 type Device struct {
-	ID                 string    `json:"id"`
-	Name               string    `json:"name"`
-	WireGuardPublicKey string    `json:"wireguard_public_key"`
-	TunnelAddress      string    `json:"tunnel_address"`
-	PairedAt           time.Time `json:"paired_at"`
+	ID             string    `json:"id"`
+	Name           string    `json:"name"`
+	CertificatePin string    `json:"certificate_pin"`
+	PairedAt       time.Time `json:"paired_at"`
 }
 
 // SocketPath returns the control socket path for a state directory.

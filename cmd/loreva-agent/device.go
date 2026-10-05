@@ -2,16 +2,16 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"log/slog"
-	"net/http"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 
 	"golang.org/x/term"
@@ -20,13 +20,21 @@ import (
 	"github.com/FroZor/loreva-agent/internal/pairing"
 )
 
-// runDevice is the reference device client, used for testing and scripting:
+const (
+	maxInviteLine = 8 * 1024
+	// maxFrameLine bounds one frame on standard input; the node accepts
+	// frames up to 64 KiB.
+	maxFrameLine = 64 * 1024
+)
+
+// runDevice is the reference device client, for testing and scripting. Loreva
+// App implements the same protocol itself:
 //
-//	loreva-agent device pair --credentials FILE [--name NAME] < invite
-//	loreva-agent device call --credentials FILE [METHOD] PATH
+//	loreva-agent device pair --credentials FILE [--name NAME] < key
+//	loreva-agent device connect --credentials FILE
 func runDevice(arguments []string, _ *slog.Logger) error {
 	if len(arguments) == 0 {
-		return errors.New("usage: loreva-agent device pair|call --credentials FILE ...")
+		return errors.New("usage: loreva-agent device pair|connect ...")
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -35,8 +43,8 @@ func runDevice(arguments []string, _ *slog.Logger) error {
 	switch arguments[0] {
 	case "pair":
 		return runDevicePair(ctx, arguments[1:])
-	case "call":
-		return runDeviceCall(ctx, arguments[1:])
+	case "connect":
+		return runDeviceConnect(ctx, arguments[1:])
 	default:
 		return fmt.Errorf("unknown device command %q", arguments[0])
 	}
@@ -53,7 +61,7 @@ func runDevicePair(ctx context.Context, arguments []string) error {
 		return fmt.Errorf("parse device pair arguments: %w", err)
 	}
 	if flags.NArg() != 0 {
-		return errors.New("the invite is read from standard input, not from arguments")
+		return errors.New("the connection key is read from standard input, not from arguments")
 	}
 	if *credentialsPath == "" {
 		return errors.New("--credentials is required")
@@ -68,16 +76,16 @@ func runDevicePair(ctx context.Context, arguments []string) error {
 		deviceName = hostname
 	}
 
-	encoded, err := readInvite()
-	if err != nil {
-		return err
-	}
-	invite, err := pairing.ParseInvite(encoded)
+	return pairToFile(ctx, deviceName, *credentialsPath)
+}
+
+func pairToFile(ctx context.Context, deviceName, path string) error {
+	invite, err := readInvite()
 	if err != nil {
 		return err
 	}
 
-	file, err := client.CreateCredentials(*credentialsPath)
+	file, err := client.CreateCredentials(path)
 	if err != nil {
 		return err
 	}
@@ -101,67 +109,123 @@ func runDevicePair(ctx context.Context, arguments []string) error {
 	return err
 }
 
-// readInvite reads the invite without echo from a terminal, or as one line
-// from piped input, so it never appears in process arguments.
-func readInvite() (string, error) {
+// readInvite reads the connection key without echo from a terminal, or as
+// one line from piped input, so it never appears in process arguments.
+func readInvite() (*pairing.Invite, error) {
 	if term.IsTerminal(int(os.Stdin.Fd())) {
 		fmt.Fprint(os.Stderr, "Connection key: ")
 		secret, err := term.ReadPassword(int(os.Stdin.Fd()))
 		fmt.Fprintln(os.Stderr)
 		if err != nil {
-			return "", fmt.Errorf("read connection key: %w", err)
+			return nil, fmt.Errorf("read connection key: %w", err)
 		}
 
-		return string(secret), nil
+		return pairing.ParseInvite(string(secret))
 	}
 
-	line, err := bufio.NewReader(io.LimitReader(os.Stdin, 8192)).ReadString('\n')
+	line, err := bufio.NewReader(io.LimitReader(os.Stdin, maxInviteLine)).ReadString('\n')
 	if err != nil && !errors.Is(err, io.EOF) {
-		return "", fmt.Errorf("read connection key: %w", err)
+		return nil, fmt.Errorf("read connection key: %w", err)
 	}
 
-	return line, nil
+	return pairing.ParseInvite(line)
 }
 
-func runDeviceCall(ctx context.Context, arguments []string) error {
-	flags := flag.NewFlagSet("device call", flag.ContinueOnError)
+// runDeviceConnect bridges standard input and output to a device session:
+// every line on standard input is one frame to the node, and every frame
+// from the node is one line on standard output, starting with session.hello.
+func runDeviceConnect(ctx context.Context, arguments []string) error {
+	flags := flag.NewFlagSet("device connect", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 
 	credentialsPath := flags.String("credentials", "", "credentials file created by device pair")
 
 	if err := flags.Parse(arguments); err != nil {
-		return fmt.Errorf("parse device call arguments: %w", err)
+		return fmt.Errorf("parse device connect arguments: %w", err)
+	}
+	if flags.NArg() != 0 || *credentialsPath == "" {
+		return errors.New("usage: loreva-agent device connect --credentials FILE")
 	}
 
-	method, path := http.MethodGet, ""
-	switch flags.NArg() {
-	case 1:
-		path = flags.Arg(0)
-	case 2:
-		method, path = strings.ToUpper(flags.Arg(0)), flags.Arg(1)
-	default:
-		return errors.New("usage: loreva-agent device call --credentials FILE [METHOD] PATH")
-	}
-	if !strings.HasPrefix(path, "/v1/") {
-		return errors.New("path must start with /v1/")
-	}
+	input := bufio.NewScanner(os.Stdin)
+	input.Buffer(make([]byte, 0, 4096), maxFrameLine)
 
 	credentials, err := client.LoadCredentials(*credentialsPath)
 	if err != nil {
 		return err
 	}
+
 	session, err := client.Connect(ctx, credentials)
 	if err != nil {
 		return err
 	}
 	defer session.Close()
 
-	body, err := session.Do(ctx, method, path, nil)
+	return bridge(ctx, session, input, os.Stdout)
+}
+
+// bridge copies frames in both directions until either side closes.
+func bridge(ctx context.Context, session *client.Session, input *bufio.Scanner, output io.Writer) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	hello, err := json.Marshal(session.Hello)
 	if err != nil {
 		return err
 	}
+	if _, err := output.Write(append(hello, '\n')); err != nil {
+		return err
+	}
 
-	_, err = os.Stdout.Write(body)
+	inputDone := make(chan error, 1)
+	go func() {
+		for input.Scan() {
+			if err := session.Write(ctx, input.Bytes()); err != nil {
+				inputDone <- err
+				return
+			}
+		}
 
-	return err
+		inputDone <- input.Err()
+	}()
+
+	frames := make(chan []byte)
+	readDone := make(chan error, 1)
+	go func() {
+		for {
+			frame, err := session.Read(ctx)
+			if err != nil {
+				readDone <- err
+				return
+			}
+
+			select {
+			case frames <- frame:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case err := <-inputDone:
+			// The app closed standard input: it is done with the session.
+			return err
+		case err := <-readDone:
+			return fmt.Errorf("node session ended: %w", err)
+		case frame := <-frames:
+			var line bytes.Buffer
+			if err := json.Compact(&line, frame); err != nil {
+				return fmt.Errorf("node sent a frame that is not valid JSON: %w", err)
+			}
+			line.WriteByte('\n')
+
+			if _, err := output.Write(line.Bytes()); err != nil {
+				return err
+			}
+		}
+	}
 }

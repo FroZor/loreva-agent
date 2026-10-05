@@ -12,7 +12,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/FroZor/loreva-agent/internal/agentcrypto"
 	"github.com/FroZor/loreva-agent/internal/direct"
 	"github.com/FroZor/loreva-agent/internal/metrics"
 	"github.com/FroZor/loreva-agent/internal/networkinfo"
@@ -20,6 +19,11 @@ import (
 	"github.com/FroZor/loreva-agent/internal/specifications"
 	"github.com/FroZor/loreva-agent/internal/state"
 	"github.com/FroZor/loreva-agent/internal/workload"
+)
+
+const (
+	metricsInterval       = time.Second
+	metricsCollectTimeout = 900 * time.Millisecond
 )
 
 // runAgent runs every mode the state directory is set up for: direct access
@@ -52,9 +56,12 @@ func runAgent(arguments []string, logger *slog.Logger) error {
 	if err != nil && !errors.Is(err, state.ErrNotFound) {
 		return fmt.Errorf("load enrolled identity: %w", err)
 	}
-	node, err := store.LoadNode()
+	node, upgraded, err := direct.LoadNode(store)
 	if err != nil && !errors.Is(err, state.ErrNotFound) {
 		return fmt.Errorf("load node identity: %w", err)
+	}
+	if upgraded {
+		logger.Warn("node identity upgraded from WireGuard to TLS; create a new connection key with `loreva-agent invite`", "tcp_port", node.ListenPort)
 	}
 	if identity == nil && node == nil {
 		return errors.New("agent is not set up; run `loreva-agent init` for direct access or enroll it with a portal")
@@ -63,20 +70,54 @@ func runAgent(arguments []string, logger *slog.Logger) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	// The portal and paired devices share one metrics stream and one workload
+	// manager, so they see the same samples and the same containers.
+	metricCollector := metrics.NewCollector(ctx)
+	defer func() {
+		if err := metricCollector.Close(); err != nil {
+			logger.Warn("close metrics collector", "error", err)
+		}
+	}()
+
+	metricStream := metrics.NewStream(metricCollector.Collect, metricsInterval, metricsCollectTimeout)
+	go metricStream.Run(ctx)
+
+	workloadManager, err := workload.New(ctx, workload.Config{StateDir: store.Dir()})
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err := workloadManager.Close(); err != nil {
+			logger.Warn("close workload manager", "error", err)
+		}
+	}()
+
+	collectors := session.Collectors{
+		Specifications: specifications.Collect,
+		Network:        networkinfo.Collect,
+		Metrics:        metricStream.Subscribe,
+		Workloads:      workloadManager,
+	}
+
 	var services []func(context.Context) error
 	if node != nil {
 		services = append(services, func(ctx context.Context) error {
 			return direct.Run(ctx, store, node, direct.Options{
 				Version:        version,
 				PortalEnrolled: identity != nil,
-				Collectors:     direct.Collectors{Specifications: specifications.Collect, Network: networkinfo.Collect},
-				Logger:         logger,
+				Collectors: direct.Collectors{
+					Specifications: collectors.Specifications,
+					Network:        collectors.Network,
+					Metrics:        collectors.Metrics,
+				},
+				Workloads: workloadManager,
+				Logger:    logger,
 			})
 		})
 	}
 	if identity != nil {
 		services = append(services, func(ctx context.Context) error {
-			return runPortal(ctx, store, logger)
+			return runPortal(ctx, store, collectors, logger)
 		})
 	}
 
@@ -104,7 +145,7 @@ func runServices(ctx context.Context, services []func(context.Context) error) er
 
 // runPortal keeps the portal session up while the connection preference is
 // enabled, pausing on disconnect and when the identity is rejected.
-func runPortal(ctx context.Context, store *state.Store, logger *slog.Logger) error {
+func runPortal(ctx context.Context, store *state.Store, collectors session.Collectors, logger *slog.Logger) error {
 	for {
 		if err := waitUntilConnectionEnabled(ctx, store); err != nil {
 			if errors.Is(err, context.Canceled) {
@@ -133,7 +174,7 @@ func runPortal(ctx context.Context, store *state.Store, logger *slog.Logger) err
 			continue
 		}
 
-		runErr := runPortalConnection(ctx, store, connectionLock, logger)
+		runErr := runPortalConnection(ctx, store, collectors, connectionLock, logger)
 		if runErr == nil || errors.Is(runErr, context.Canceled) {
 			if ctx.Err() != nil {
 				return nil
@@ -157,6 +198,7 @@ func runPortal(ctx context.Context, store *state.Store, logger *slog.Logger) err
 func runPortalConnection(
 	ctx context.Context,
 	store *state.Store,
+	collectors session.Collectors,
 	connectionLock *state.Lock,
 	logger *slog.Logger,
 ) error {
@@ -167,42 +209,7 @@ func runPortalConnection(
 		return fmt.Errorf("load enrolled identity: %w", err)
 	}
 
-	metricCollector := metrics.NewCollector(ctx)
-	defer func() {
-		if err := metricCollector.Close(); err != nil {
-			logger.Warn("close metrics collector", "error", err)
-		}
-	}()
-
-	clientCertificate, err := agentcrypto.ClientCertificate(
-		identity.ECDSAPrivateKey,
-		identity.CertificateChain,
-	)
-	if err != nil {
-		return err
-	}
-	workloadManager, err := workload.New(ctx, workload.Config{
-		StateDir:             store.Dir(),
-		PortalURL:            identity.PortalURL,
-		PortalCAPEM:          identity.PortalCAPEM,
-		ClientCertificate:    &clientCertificate,
-		AllowDevelopmentHTTP: identity.AllowDevelopmentWS,
-	})
-	if err != nil {
-		return err
-	}
-	defer func() {
-		if err := workloadManager.Close(); err != nil {
-			logger.Warn("close workload manager", "error", err)
-		}
-	}()
-
-	runner, err := session.New(store, identity, session.Collectors{
-		Specifications: specifications.Collect,
-		Network:        networkinfo.Collect,
-		Metrics:        metricCollector.Collect,
-		Workloads:      workloadManager,
-	})
+	runner, err := session.New(store, identity, collectors)
 	if err != nil {
 		return err
 	}

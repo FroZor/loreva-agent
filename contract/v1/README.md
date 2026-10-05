@@ -1,11 +1,14 @@
-# Loreva agent WSS protocol v1
+# Loreva agent protocol v1
 
-`protocol.schema.json` is the normative, repository-local contract for every JSON text frame exchanged on:
+`protocol.schema.json` is the normative, repository-local contract for every JSON text frame the agent exchanges with a portal and with paired devices. There is one protocol; only the connectivity differs, that is, who opens the connection and how the peers authenticate:
 
-| Endpoint | WebSocket subprotocol | Authentication |
-| --- | --- | --- |
-| `/agent/v1/enroll` | `loreva.enrollment.v1` | Enrollment bearer token during Upgrade |
-| `/agent/v1/connect` | `loreva.connect.v1` | TLS 1.3 mTLS followed by ML-DSA proof |
+| Endpoint | Opened by | WebSocket subprotocol | Authentication |
+| --- | --- | --- | --- |
+| `/agent/v1/enroll` on the portal | agent | `loreva.enrollment.v1` | Enrollment bearer token during Upgrade |
+| `/agent/v1/connect` on the portal | agent | `loreva.connect.v1` | TLS 1.3 mTLS followed by ML-DSA proof |
+| `wss://<node IP>:<port>/v1/session` on the node's direct access TCP port | device (Loreva App) | `loreva.session.v1` | TLS 1.3, X25519MLKEM768 only; mutual key pinning: the node key from the connection key, the device key from pairing |
+
+The device session runs over TLS 1.3 on one TCP port that `loreva-agent init` picks (a free random port between 20000 and 32000) or that `init --port` sets. Both sides offer only the hybrid key exchange X25519MLKEM768 and check after the handshake that it was used, so there is no classical fallback. Certificates are self-signed and authenticated by pin: the standard Base64 SHA-256 of the certificate's SubjectPublicKeyInfo. Keys are ECDSA P-256 (Ed25519 is also accepted from devices). The node requires a client certificate on every connection and finishes the handshake only for the key of a paired device or, while a pairing invite is active, for a new key; every other client gets a TLS alert before any HTTP. Session tickets are disabled, so a revoked key cannot resume.
 
 The schema is not published by an HTTP endpoint. `$schema` is only the JSON Schema dialect identifier; `$id` is a non-resolvable URN. All `$ref` values stay inside the file.
 
@@ -160,6 +163,85 @@ Execution is a second, independently signed command. `approvals` must contain ev
 ```
 
 The agent sends `workload.operation.event` while the operation runs and exactly one terminal `workload.operation.result`. Stop and restart use `{"timeout_seconds":30}`. Delete currently accepts only `{"data_policy":"preserve"}`; deleting persistent data needs a future, separately approved destructive contract.
+
+## Device sessions
+
+A device (Loreva App) reaches the node directly: the node cannot open a connection to an app on a user's computer, so the device always opens the session. The node's first frame is `session.hello`; its `peer` field is `invite` for a key that is being paired and `device` for a paired device.
+
+### Connection key
+
+The operator prints a single-use key with `sudo loreva-agent invite`:
+
+```text
+loreva://connect/<unpadded Base64URL of a JSON object>
+```
+
+The key is a URI, so the operating system can open Loreva App from it. The JSON object holds:
+
+| Field | Meaning |
+| --- | --- |
+| `v` | Format version, `2` |
+| `invite_id` | UUID of this invite |
+| `node_id` | UUID of the node |
+| `node_pin` | Pin of the node's TLS key; the device accepts only this key |
+| `endpoints` | 1 to 16 `IP:port` addresses of the node's TCP port, tried in order |
+| `token` | One-time pairing token, 32 bytes, unpadded Base64URL |
+| `expires_at` | Expiry, RFC 3339 UTC; the node enforces it |
+
+Whoever presents the token first can start pairing, so the key travels only over a channel the operator trusts; the code comparison below catches a token used by someone else. The token exists only in the memory of the agent and of the `invite` command.
+
+### Pairing
+
+```text
+device generates a P-256 key and a self-signed certificate
+device opens wss://<endpoint>/v1/session presenting that certificate, pinning node_pin
+node   session.hello                 peer = invite
+device pairing.request               device name, invite token
+node   pairing.started               pairing ID, node nonce
+       both sides show the same 8-character code; the operator approves on the node
+node   pairing.result                approved (with device_id) | rejected | expired
+```
+
+The device proves it holds the new key in the TLS handshake, and commits to the key and its name before it learns the node's nonce. Both sides compute the code from the transcript:
+
+```text
+field(x) = uint32_be(len(x)) || x
+th   = SHA-256(field("loreva.pairing.transcript.v2") || field(invite_id) || field(node_id) ||
+               field(node_pin) || field(device_pin) || field(device_name) ||
+               field(node_nonce, 32 bytes) || field(exporter, 32 bytes))
+code = Base32(SHA-256("loreva.pairing.sas.v2" || th))[0:8], shown as XXXX-XXXX
+```
+
+`exporter` is the TLS exporter (RFC 8446 §7.5) of the pairing connection with the label `EXPORTER-loreva-pairing-v2`, no context, 32 bytes. It binds the code to that connection. A `pairing.request` with an unknown token is refused; one that fails validation otherwise is answered with `error` and does not use up the invite. Once the invite is used, the node again refuses unknown keys in the TLS handshake. A key that is not paired can send nothing but `pairing.request`. After approval the node stores the device key pin; the device keeps its key, its certificate, `node_pin`, and the endpoints.
+
+### Working session
+
+```text
+device opens wss://<endpoint>/v1/session with its paired certificate
+node   session.hello                 peer = device, device_id
+node   node.specifications.report    device answers node.specifications.accepted | rejected
+node   node.network.report           device answers node.network.accepted | rejected
+node   metrics.report ...            device answers metrics.accepted | rejected, one at a time
+```
+
+Node reports and metrics are the same frames as on the portal session and follow the same rules: one report is outstanding at a time, a report is retried with the same `request_id` until it is acknowledged, and metrics start after both node reports. A device that stops acknowledging stops receiving metrics.
+
+A device sends requests at any time:
+
+| Request | Answer |
+| --- | --- |
+| `workload.plan.request`, `workload.execute.request`, `workload.stop.request`, `workload.restart.request`, `workload.delete.request` | `workload.plan.result`, or `workload.operation.event` frames and one `workload.operation.result` |
+| `artifact.upload.request` followed by `artifact.upload.chunk` frames | `artifact.upload.result` |
+| `devices.list` | `devices.list.result` |
+| `device.remove` | `device.remove.result`; the removed device's sessions end |
+
+A request the node cannot accept is answered with `error`, which carries the request's `request_id` when it had a valid one.
+
+A device workload request is the payload of a portal workload command without the portal envelope: `type`, `schema_version`, `request_id`, `workload_id`, and `payload`. It is not signed, because the TLS client certificate already authenticates the device. All devices of a node share one controller scope, the node ID, which the agent puts in `portal_id` of the command and of every result. Workloads created by devices are therefore separate from workloads created by a portal: a plan made by one controller cannot be executed, stopped, or deleted by the other.
+
+The portal serves artifacts to the agent; a device uploads them before planning instead. `artifact.upload.request` announces the artifact (`artifact_id`, `sha256`, `size_bytes`, at most 32 MiB), then `artifact.upload.chunk` frames carry it in order: `offset` is the number of bytes sent so far and `data` is at most 32 KiB, standard Base64. After the last byte the node checks the size and the digest and answers `artifact.upload.result`. A session uploads one artifact at a time. A plan then references the artifact by the same `artifact_id`, `sha256`, and `size_bytes`.
+
+Every paired device may use every operation. Revoking a device ends its open sessions, and the node refuses its key in the TLS handshake from then on.
 
 ## Rules outside JSON Schema
 

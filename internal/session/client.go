@@ -6,6 +6,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"io"
 	"time"
 
 	"github.com/FroZor/loreva-agent/internal/agentcrypto"
@@ -15,6 +16,7 @@ import (
 	"github.com/FroZor/loreva-agent/internal/protocol"
 	"github.com/FroZor/loreva-agent/internal/specifications"
 	"github.com/FroZor/loreva-agent/internal/state"
+	"github.com/FroZor/loreva-agent/internal/workload"
 )
 
 type permanentError struct{ Err error }
@@ -79,21 +81,24 @@ type Runner struct {
 	reports           nodeReportState
 	metrics           metricState
 	workloads         WorkloadController
+	artifacts         workload.ArtifactSource
 }
 
 // Collectors provide bounded system snapshots after a connection is accepted.
 type Collectors struct {
 	Specifications func(context.Context) (specifications.Snapshot, error)
 	Network        func(context.Context) (networkinfo.Snapshot, error)
-	Metrics        func(context.Context) (metrics.Snapshot, error)
+	Metrics        func(context.Context) <-chan metrics.Sample
 	Workloads      WorkloadController
 }
 
 // WorkloadController accepts authenticated commands and returns asynchronous
-// protocol responses. The live session remains the only WebSocket writer.
+// protocol responses per controller (the portal_id of the command). The
+// session remains the only writer of its WebSocket.
 type WorkloadController interface {
-	Submit(protocol.WorkloadCommand) error
-	Results() <-chan any
+	Submit(protocol.WorkloadCommand, workload.ArtifactSource) error
+	Results(controller string) <-chan any
+	StoreArtifact(protocol.ArtifactReference, io.Reader) error
 }
 
 // New validates the persisted identity and creates a session runner.
@@ -133,10 +138,21 @@ func (r *Runner) installIdentity(identity *state.Identity) error {
 		return fmt.Errorf("validate stored portal URL: %w", err)
 	}
 
+	artifacts, err := workload.PortalArtifacts(workload.PortalConfig{
+		PortalURL:            identity.PortalURL,
+		PortalCAPEM:          identity.PortalCAPEM,
+		ClientCertificate:    &clientCertificate,
+		AllowDevelopmentHTTP: identity.AllowDevelopmentWS,
+	})
+	if err != nil {
+		return err
+	}
+
 	r.identity = identity
 	r.material = material
 	r.clientCertificate = clientCertificate
 	r.masterEndpoint = masterEndpoint
+	r.artifacts = artifacts
 
 	return nil
 }

@@ -1,4 +1,5 @@
-// Package workload plans and executes portal-requested container workloads.
+// Package workload plans and executes container workloads requested by the
+// portal or by paired devices.
 package workload
 
 import (
@@ -105,4 +106,35 @@ func constantTimeEqual(left, right string) bool {
 	}
 
 	return subtle.ConstantTimeCompare([]byte(left), []byte(right)) == 1
+}
+
+// DeviceCommand turns a paired device's request into a command. Devices are
+// authenticated by their TLS client certificates, so the request is not
+// signed. Every device of a node shares one controller scope, the node ID,
+// which keeps device-created workloads apart from portal-created ones.
+func DeviceCommand(request protocol.DeviceWorkloadCommand, nodeID string, now time.Time) (protocol.WorkloadCommand, error) {
+	if request.SchemaVersion != protocol.WorkloadSchemaVersion {
+		return protocol.WorkloadCommand{}, errors.New("unsupported workload command schema_version")
+	}
+	if !supportedCommandType(request.Type) {
+		return protocol.WorkloadCommand{}, fmt.Errorf("unsupported workload command type %q", request.Type)
+	}
+	if !agentcrypto.ValidUUID(request.RequestID) || !agentcrypto.ValidUUID(request.WorkloadID) {
+		return protocol.WorkloadCommand{}, errors.New("workload command contains an invalid UUID")
+	}
+	if len(request.Payload) == 0 || string(request.Payload) == "null" {
+		return protocol.WorkloadCommand{}, errors.New("workload command payload is required")
+	}
+
+	return protocol.WorkloadCommand{
+		Type:          request.Type,
+		SchemaVersion: request.SchemaVersion,
+		RequestID:     request.RequestID,
+		PortalID:      nodeID,
+		NodeID:        nodeID,
+		WorkloadID:    request.WorkloadID,
+		IssuedAt:      now.UTC(),
+		ExpiresAt:     now.UTC().Add(commandMaxLifetime),
+		Payload:       request.Payload,
+	}, nil
 }
