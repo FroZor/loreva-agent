@@ -1,7 +1,7 @@
-// Package client is the device side of direct access: it pairs with a node
-// from an invite and opens the node protocol session through userspace
-// WireGuard. The loreva-agent device commands (the Loreva App sidecar) and
-// the end-to-end tests use it.
+// Package client is the reference device side of direct access: it pairs with
+// a node from a connection key and opens the node protocol session over TLS
+// with mutual key pinning. The loreva-agent device commands and the
+// end-to-end tests use it; Loreva App implements the same protocol.
 package client
 
 import (
@@ -15,24 +15,24 @@ import (
 )
 
 const (
-	credentialsVersion = 1
+	credentialsVersion = 2
 	maxCredentialsSize = 64 * 1024
 )
 
 // Credentials are everything a device needs to reach one node after
-// pairing. They contain the device's private key and PSK, so they are
-// stored with mode 0600.
+// pairing. They contain the device's private key, so they are stored with
+// mode 0600.
 type Credentials struct {
-	Version       int      `json:"version"`
-	NodeID        string   `json:"node_id"`
-	NodePublicKey string   `json:"node_public_key"`
-	NodeAddress   string   `json:"node_address"`
-	Endpoints     []string `json:"endpoints"`
-	DeviceID      string   `json:"device_id"`
-	DeviceName    string   `json:"device_name"`
-	PrivateKey    string   `json:"private_key"`
-	PresharedKey  string   `json:"preshared_key"`
-	Address       string   `json:"address"`
+	Version    int      `json:"version"`
+	NodeID     string   `json:"node_id"`
+	NodePin    string   `json:"node_pin"`
+	Endpoints  []string `json:"endpoints"`
+	DeviceID   string   `json:"device_id"`
+	DeviceName string   `json:"device_name"`
+	// PrivateKey and Certificate are the device's TLS identity, standard
+	// Base64 PKCS#8 and DER.
+	PrivateKey  string `json:"private_key"`
+	Certificate string `json:"certificate"`
 }
 
 // CredentialsFile is a new credentials file, created before pairing so a

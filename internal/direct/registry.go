@@ -3,12 +3,11 @@ package direct
 import (
 	"errors"
 	"fmt"
-	"net/netip"
 	"slices"
 	"sync"
 
+	"github.com/FroZor/loreva-agent/internal/certpin"
 	"github.com/FroZor/loreva-agent/internal/state"
-	"github.com/FroZor/loreva-agent/internal/tunnel"
 )
 
 const maxDevices = 256
@@ -25,22 +24,35 @@ type registry struct {
 	saved   bool
 }
 
-func loadRegistry(store *state.Store) (*registry, error) {
-	devices, err := store.LoadDevices()
+// loadRegistry loads devices.json. Devices paired over WireGuard cannot
+// connect any more, so their registry starts empty and is replaced on the
+// next pairing; legacy reports that case.
+func loadRegistry(store *state.Store) (devices *registry, legacy bool, err error) {
+	document, err := store.LoadDevices()
 	if errors.Is(err, state.ErrNotFound) {
-		return &registry{store: store}, nil
+		return &registry{store: store}, false, nil
+	}
+	if errors.Is(err, state.ErrLegacyDirect) {
+		// Replace the old registry at once, so WireGuard keys and PSKs of
+		// devices that can no longer connect do not stay on disk.
+		devices := &registry{store: store, saved: true}
+		if err := devices.persist(nil); err != nil {
+			return nil, false, err
+		}
+
+		return devices, true, nil
 	}
 	if err != nil {
-		return nil, fmt.Errorf("load paired devices: %w", err)
+		return nil, false, fmt.Errorf("load paired devices: %w", err)
 	}
 
-	for _, device := range devices.Items {
-		if _, err := devicePeer(device); err != nil {
-			return nil, fmt.Errorf("paired device %s: %w", device.ID, err)
+	for _, device := range document.Items {
+		if err := certpin.Validate(device.CertificatePin); err != nil {
+			return nil, false, fmt.Errorf("paired device %s: %w", device.ID, err)
 		}
 	}
 
-	return &registry{store: store, devices: devices.Items, saved: true}, nil
+	return &registry{store: store, devices: document.Items, saved: true}, false, nil
 }
 
 func (r *registry) list() []state.Device {
@@ -50,27 +62,17 @@ func (r *registry) list() []state.Device {
 	return slices.Clone(r.devices)
 }
 
-func (r *registry) byAddress(address netip.Addr) (state.Device, bool) {
+func (r *registry) byPin(pin string) (state.Device, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
 	for _, device := range r.devices {
-		if device.TunnelAddress == address.String() {
+		if device.CertificatePin == pin {
 			return device, true
 		}
 	}
 
 	return state.Device{}, false
-}
-
-// hasPublicKey reports whether a paired device already uses publicKey.
-func (r *registry) hasPublicKey(publicKey tunnel.Key) bool {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-
-	return slices.ContainsFunc(r.devices, func(device state.Device) bool {
-		return device.WireGuardPublicKey == publicKey.String()
-	})
 }
 
 func (r *registry) add(device state.Device) error {
@@ -79,6 +81,9 @@ func (r *registry) add(device state.Device) error {
 
 	if len(r.devices) >= maxDevices {
 		return fmt.Errorf("at most %d devices can be paired", maxDevices)
+	}
+	if slices.ContainsFunc(r.devices, func(existing state.Device) bool { return existing.CertificatePin == device.CertificatePin }) {
+		return errors.New("this device key is already paired")
 	}
 
 	return r.persist(append(slices.Clone(r.devices), device))
@@ -120,23 +125,6 @@ func (r *registry) persist(devices []state.Device) error {
 	r.saved = true
 
 	return nil
-}
-
-func devicePeer(device state.Device) (tunnel.Peer, error) {
-	publicKey, err := tunnel.ParseKey(device.WireGuardPublicKey)
-	if err != nil {
-		return tunnel.Peer{}, fmt.Errorf("public key: %w", err)
-	}
-	presharedKey, err := tunnel.ParseKey(device.PresharedKey)
-	if err != nil {
-		return tunnel.Peer{}, fmt.Errorf("preshared key: %w", err)
-	}
-	address, err := netip.ParseAddr(device.TunnelAddress)
-	if err != nil {
-		return tunnel.Peer{}, fmt.Errorf("tunnel address: %w", err)
-	}
-
-	return tunnel.Peer{PublicKey: publicKey, PresharedKey: presharedKey, Address: address}, nil
 }
 
 func (r *registry) has(id string) bool {

@@ -143,11 +143,10 @@ func (c *controlServer) dispatch(conn *control.Conn, session **inviteSession, me
 		devices := []control.Device{}
 		for _, device := range c.sessions.registry.list() {
 			devices = append(devices, control.Device{
-				ID:                 device.ID,
-				Name:               device.Name,
-				WireGuardPublicKey: device.WireGuardPublicKey,
-				TunnelAddress:      device.TunnelAddress,
-				PairedAt:           device.PairedAt,
+				ID:             device.ID,
+				Name:           device.Name,
+				CertificatePin: device.CertificatePin,
+				PairedAt:       device.PairedAt,
 			})
 		}
 

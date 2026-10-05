@@ -56,9 +56,12 @@ func runAgent(arguments []string, logger *slog.Logger) error {
 	if err != nil && !errors.Is(err, state.ErrNotFound) {
 		return fmt.Errorf("load enrolled identity: %w", err)
 	}
-	node, err := store.LoadNode()
+	node, upgraded, err := direct.LoadNode(store)
 	if err != nil && !errors.Is(err, state.ErrNotFound) {
 		return fmt.Errorf("load node identity: %w", err)
+	}
+	if upgraded {
+		logger.Warn("node identity upgraded from WireGuard to TLS; create a new connection key with `loreva-agent invite`", "tcp_port", node.ListenPort)
 	}
 	if identity == nil && node == nil {
 		return errors.New("agent is not set up; run `loreva-agent init` for direct access or enroll it with a portal")

@@ -4,15 +4,18 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/FroZor/loreva-agent/internal/certpin"
 	"github.com/FroZor/loreva-agent/internal/client"
 	"github.com/FroZor/loreva-agent/internal/control"
 	"github.com/FroZor/loreva-agent/internal/direct"
@@ -356,10 +359,10 @@ func TestPairAndUseSession(t *testing.T) {
 		t.Fatalf("devices = %+v", devices)
 	}
 
-	// The invite is single use, even while its temporary peer still exists.
-	_, err = client.Pair(ctx, invite, client.PairOptions{DeviceName: "second", ShowSAS: func(string) {}})
-	if remote, ok := errors.AsType[*client.RemoteError](err); !ok || remote.Code != "invite_used" {
-		t.Fatalf("second Pair() error = %v, want invite_used", err)
+	// The invite is single use: with no active invite left, the node refuses
+	// every unknown key already in the TLS handshake.
+	if _, err := client.Pair(ctx, invite, client.PairOptions{DeviceName: "second", ShowSAS: func(string) {}}); err == nil {
+		t.Fatal("second Pair() with a used invite succeeded")
 	}
 
 	// Revoking the current device ends its session.
@@ -476,7 +479,11 @@ func TestInvitePeerCanOnlyPair(t *testing.T) {
 	conn := node.dialControl(t)
 	invite := createInvite(t, conn, false)
 
-	session, err := client.ConnectInvite(ctx, invite)
+	identity, err := certpin.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	session, err := client.ConnectInvite(ctx, invite, identity)
 	if err != nil {
 		t.Fatalf("ConnectInvite() error = %v", err)
 	}
@@ -628,4 +635,57 @@ func TestShutdownEndsPendingPairing(t *testing.T) {
 	// The device only sees its own timeout once the node is gone.
 	cancel()
 	<-paired
+}
+
+func TestTLSListenerRefusesUnknownKeysAndWrongNode(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
+
+	node := startNode(t)
+	credentials := pairDevice(ctx, t, node)
+
+	// A device whose key the node does not know is refused in the TLS
+	// handshake while no invite is active.
+	stranger, err := certpin.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	unknown := *credentials
+	unknown.PrivateKey, unknown.Certificate = stranger.PrivateKey, stranger.Certificate
+	if _, err := client.Connect(ctx, &unknown); err == nil {
+		t.Fatal("Connect() with an unknown key succeeded")
+	}
+
+	// The device refuses a node whose key does not match the pin.
+	wrongNode := *credentials
+	wrongNode.NodePin = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8="
+	if _, err := client.Connect(ctx, &wrongNode); err == nil {
+		t.Fatal("Connect() to a node with another key succeeded")
+	}
+
+	session, err := client.Connect(ctx, credentials)
+	if err != nil {
+		t.Fatalf("Connect() with the paired key error = %v", err)
+	}
+	session.Close()
+}
+
+func TestRawTLSWithoutCertificateIsRefused(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
+
+	node := startNode(t)
+	node.dialControl(t)
+
+	dialer := tls.Dialer{Config: &tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS12}}
+	conn, err := dialer.DialContext(ctx, "tcp", fmt.Sprintf("127.0.0.1:%d", node.node.ListenPort))
+	if err == nil {
+		// TLS 1.3 reports a refused client certificate on the first read.
+		_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+		_, err = conn.Read(make([]byte, 1))
+		_ = conn.Close()
+	}
+	if err == nil {
+		t.Fatal("a TLS client without a certificate was served")
+	}
 }

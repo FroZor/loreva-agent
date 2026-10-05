@@ -5,11 +5,10 @@ import (
 	"time"
 )
 
-// Direct session endpoint. A device reaches it only through the node's
-// userspace WireGuard listener, so plain WebSocket is enough: WireGuard
-// authenticates both sides and encrypts every packet.
+// Direct session endpoint. It is served over TLS 1.3 with the hybrid
+// X25519MLKEM768 key exchange on the node's direct access port; both sides
+// pin each other's key.
 const (
-	DirectSessionPort        = 80
 	DirectSessionPath        = "/v1/session"
 	DirectSessionSubprotocol = "loreva.session.v1"
 )
@@ -79,27 +78,23 @@ type Error struct {
 	Message   string `json:"message,omitempty"`
 }
 
-// PairingRequest starts pairing from the temporary invite peer. The device
-// commits to its keys and name before it learns the node's nonce.
+// PairingRequest starts pairing. The device sends it on a TLS connection
+// that already presents its new client certificate, so the device commits
+// to its key and name before it learns the node's nonce.
 type PairingRequest struct {
 	Type       string `json:"type"`
 	DeviceName string `json:"device_name"`
-	// WireGuardPublicKey is the device's new key for this node, standard Base64.
-	WireGuardPublicKey string `json:"wireguard_public_key"`
-	// MLKEMEncapsulationKey is a fresh ML-KEM-768 key, standard Base64.
-	MLKEMEncapsulationKey string `json:"mlkem_encapsulation_key"`
+	// InviteToken is the one-time token from the connection key, unpadded
+	// Base64URL.
+	InviteToken string `json:"invite_token"`
 }
 
-// PairingStarted returns what the device needs to compute the code and the PSK.
+// PairingStarted returns what the device needs to compute the code.
 type PairingStarted struct {
 	Type      string `json:"type"`
 	PairingID string `json:"pairing_id"`
 	// NodeNonce is 32 random bytes, standard Base64.
 	NodeNonce string `json:"node_nonce"`
-	// MLKEMCiphertext is the ML-KEM-768 ciphertext, standard Base64.
-	MLKEMCiphertext string `json:"mlkem_ciphertext"`
-	// DeviceAddress is the device's permanent IPv6 address inside the tunnel.
-	DeviceAddress string `json:"device_address"`
 }
 
 // PairingResult reports the operator's decision on the node.
@@ -123,14 +118,13 @@ type DevicesListResult struct {
 	Devices   []Device `json:"devices"`
 }
 
-// Device is a paired device as other devices see it. The PSK is never exposed.
+// Device is a paired device as other devices see it.
 type Device struct {
-	ID                 string    `json:"id"`
-	Name               string    `json:"name"`
-	WireGuardPublicKey string    `json:"wireguard_public_key"`
-	TunnelAddress      string    `json:"tunnel_address"`
-	PairedAt           time.Time `json:"paired_at"`
-	Current            bool      `json:"current"`
+	ID             string    `json:"id"`
+	Name           string    `json:"name"`
+	CertificatePin string    `json:"certificate_pin"`
+	PairedAt       time.Time `json:"paired_at"`
+	Current        bool      `json:"current"`
 }
 
 // DeviceRemove revokes a paired device, possibly the caller itself.

@@ -5,7 +5,6 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
-	"net/netip"
 	"os"
 	"runtime"
 	"sync"
@@ -14,27 +13,31 @@ import (
 	"github.com/coder/websocket"
 
 	"github.com/FroZor/loreva-agent/internal/agentcrypto"
+	"github.com/FroZor/loreva-agent/internal/certpin"
+	"github.com/FroZor/loreva-agent/internal/pairing"
 	"github.com/FroZor/loreva-agent/internal/protocol"
 	"github.com/FroZor/loreva-agent/internal/session"
 	"github.com/FroZor/loreva-agent/internal/state"
-	"github.com/FroZor/loreva-agent/internal/tunnel"
 	"github.com/FroZor/loreva-agent/internal/wsframe"
 )
 
 const (
 	maxFrameBytes = 64 * 1024
-	// pairingRequestTimeout bounds how long an invite peer may stay
-	// connected without asking to pair.
-	pairingRequestTimeout = 2 * time.Minute
+	// pairingRequestTimeout bounds how long an unpaired key may stay
+	// connected without asking to pair, so strangers cannot hold the few
+	// pairing slots.
+	pairingRequestTimeout = 10 * time.Second
 	pairingPending        = "pending"
 	maxSessionsPerDevice  = 4
 	maxSessions           = 64
-	sessionResultBuffer   = 64
-	// peerRemovalDelay lets the response to a revoke request reach a device
-	// that revoked itself before its peer disappears.
-	peerRemovalDelay = time.Second
+	// maxPairingSessions bounds connections that hold no paired key yet.
+	maxPairingSessions  = 4
+	sessionResultBuffer = 64
+	// selfRevokeDelay lets the answer to a revoke request reach a device
+	// that revoked itself before its session closes.
+	selfRevokeDelay = time.Second
 	// sessionCloseTimeout bounds how long a revocation waits for the
-	// device's sessions to close before removing its peer.
+	// device's sessions to close.
 	sessionCloseTimeout = 3 * time.Second
 )
 
@@ -55,23 +58,21 @@ func newSessionError(code, message string) *sessionError {
 
 func (e *sessionError) Error() string { return e.message }
 
-// sessions accepts direct sessions inside the tunnel. The caller is
-// identified by its tunnel source address: WireGuard accepts a packet only
-// from the peer that owns that address, so the address authenticates the
-// device. An invite peer may only pair; a paired device gets the node
-// protocol.
+// sessions accepts direct sessions over TLS. The caller is identified by the
+// pin of the client certificate it presented in the handshake, which proves
+// it holds the key. A paired key gets the node protocol; any other key
+// reaches this point only while an invite is active, and may only pair.
 type sessions struct {
 	node     *localNode
 	options  Options
 	pairings *pairings
 	registry *registry
-	tunnel   *tunnel.Tunnel
 	logger   *slog.Logger
 
 	mu      sync.Mutex
 	active  map[string]map[*deviceConn]struct{}
 	count   int
-	invites map[netip.Addr]struct{}
+	pairing map[string]struct{}
 }
 
 // deviceConn is one open device session. done closes when it has ended.
@@ -81,16 +82,15 @@ type deviceConn struct {
 	done    chan struct{}
 }
 
-func newSessions(node *localNode, options Options, pending *pairings, devices *registry, tun *tunnel.Tunnel) *sessions {
+func newSessions(node *localNode, options Options, pending *pairings, devices *registry) *sessions {
 	return &sessions{
 		node:     node,
 		options:  options,
 		pairings: pending,
 		registry: devices,
-		tunnel:   tun,
 		logger:   options.Logger,
 		active:   make(map[string]map[*deviceConn]struct{}),
-		invites:  make(map[netip.Addr]struct{}),
+		pairing:  make(map[string]struct{}),
 	}
 }
 
@@ -105,15 +105,14 @@ func (s *sessions) handler() http.Handler {
 }
 
 func (s *sessions) accept(w http.ResponseWriter, r *http.Request) {
-	address, err := netip.ParseAddrPort(r.RemoteAddr)
-	if err != nil {
+	if r.TLS == nil || len(r.TLS.PeerCertificates) == 0 {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
 
-	invite := s.pairings.isInvite(address.Addr())
-	device, paired := s.registry.byAddress(address.Addr())
-	if !invite && !paired {
+	pin := certpin.Of(r.TLS.PeerCertificates[0])
+	device, paired := s.registry.byPin(pin)
+	if !paired && !s.pairings.active() {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
@@ -132,14 +131,18 @@ func (s *sessions) accept(w http.ResponseWriter, r *http.Request) {
 	}
 	conn.SetReadLimit(maxFrameBytes)
 
-	if invite {
-		if !s.trackInvite(address.Addr()) {
-			_ = conn.Close(websocket.StatusTryAgainLater, "the invite is already in use")
+	if !paired {
+		exporter, err := r.TLS.ExportKeyingMaterial(pairing.ExporterLabel, nil, pairing.ExporterSize)
+		if err != nil {
 			return
 		}
-		defer s.untrackInvite(address.Addr())
+		if !s.trackPairing(pin) {
+			_ = conn.Close(websocket.StatusTryAgainLater, "too many pairing sessions")
+			return
+		}
+		defer s.untrackPairing(pin)
 
-		s.servePairing(r.Context(), conn, address.Addr())
+		s.servePairing(r.Context(), conn, pin, exporter)
 		return
 	}
 
@@ -167,13 +170,13 @@ func (s *sessions) hello(peer, deviceID string) protocol.SessionHello {
 	}
 }
 
-// servePairing runs the pairing exchange for the temporary invite peer.
-func (s *sessions) servePairing(ctx context.Context, conn *websocket.Conn, from netip.Addr) {
+// servePairing runs the pairing exchange for a device key that is not paired.
+func (s *sessions) servePairing(ctx context.Context, conn *websocket.Conn, pin string, exporter []byte) {
 	if err := writeFrame(ctx, conn, s.hello(protocol.SessionPeerInvite, "")); err != nil {
 		return
 	}
 
-	started, err := s.readPairingRequest(ctx, conn, from)
+	started, err := s.readPairingRequest(ctx, conn, pin, exporter)
 	if err != nil {
 		s.logger.Debug("pairing session ended", "error", err)
 		return
@@ -183,8 +186,9 @@ func (s *sessions) servePairing(ctx context.Context, conn *websocket.Conn, from 
 	// notices when the device goes away.
 	waitCtx := conn.CloseRead(ctx)
 	for {
-		status, deviceID, err := s.pairings.status(waitCtx, from, started.PairingID)
+		status, deviceID, err := s.pairings.status(waitCtx, started.PairingID)
 		if err != nil {
+			s.pairings.abandon(started.PairingID)
 			return
 		}
 		if status == pairingPending {
@@ -209,7 +213,7 @@ func (s *sessions) servePairing(ctx context.Context, conn *websocket.Conn, from 
 
 // readPairingRequest reads requests until one starts pairing. Requests that
 // fail validation are answered and do not use up the invite.
-func (s *sessions) readPairingRequest(ctx context.Context, conn *websocket.Conn, from netip.Addr) (protocol.PairingStarted, error) {
+func (s *sessions) readPairingRequest(ctx context.Context, conn *websocket.Conn, pin string, exporter []byte) (protocol.PairingStarted, error) {
 	readCtx, cancel := context.WithTimeout(ctx, pairingRequestTimeout)
 	defer cancel()
 
@@ -227,7 +231,7 @@ func (s *sessions) readPairingRequest(ctx context.Context, conn *websocket.Conn,
 			continue
 		}
 
-		started, err := s.pairings.start(from, request)
+		started, err := s.pairings.start(request, pin, exporter)
 		if err == nil {
 			return started, writeFrame(ctx, conn, started)
 		}
@@ -286,24 +290,24 @@ func (s *sessions) track(deviceID string, conn *deviceConn) bool {
 	return true
 }
 
-// trackInvite allows one session at a time per invite peer.
-func (s *sessions) trackInvite(address netip.Addr) bool {
+// trackPairing allows one pairing session per device key and a few in total.
+func (s *sessions) trackPairing(pin string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if _, busy := s.invites[address]; busy {
+	if _, busy := s.pairing[pin]; busy || len(s.pairing) >= maxPairingSessions {
 		return false
 	}
-	s.invites[address] = struct{}{}
+	s.pairing[pin] = struct{}{}
 
 	return true
 }
 
-func (s *sessions) untrackInvite(address netip.Addr) {
+func (s *sessions) untrackPairing(pin string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	delete(s.invites, address)
+	delete(s.pairing, pin)
 }
 
 func (s *sessions) untrack(deviceID string, conn *deviceConn) {
@@ -344,9 +348,9 @@ func (s *sessions) fanOut(ctx context.Context, results <-chan any) {
 	}
 }
 
-// revoke deletes a device, ends its open sessions, and removes its peer.
-// A device that revokes itself keeps its session for peerRemovalDelay so
-// it can read the answer; every other revoked session ends at once.
+// revoke deletes a device and ends its open sessions. The TLS listener stops
+// accepting its key at once. A device that revokes itself keeps its session
+// for selfRevokeDelay so it can read the answer; other sessions end now.
 func (s *sessions) revoke(deviceID, callerID string) error {
 	removed, err := s.registry.remove(deviceID)
 	if errors.Is(err, errDeviceNotFound) {
@@ -356,27 +360,18 @@ func (s *sessions) revoke(deviceID, callerID string) error {
 		return err
 	}
 
-	peer, err := devicePeer(removed)
-	if err != nil {
-		return err
+	if removed.ID == callerID {
+		time.AfterFunc(selfRevokeDelay, func() { s.closeDevice(removed.ID) })
+	} else {
+		go s.closeDevice(removed.ID)
 	}
-
-	if removed.ID != callerID {
-		s.closeDevice(removed.ID)
-	}
-	time.AfterFunc(peerRemovalDelay, func() {
-		s.closeDevice(removed.ID)
-		if err := s.tunnel.RemovePeer(peer.PublicKey); err != nil {
-			s.logger.Warn("remove revoked device peer", "device_id", removed.ID, "error", err)
-		}
-	})
 	s.logger.Info("device revoked", "device_id", removed.ID, "device_name", removed.Name)
 
 	return nil
 }
 
 // closeDevice ends the device's sessions and waits, briefly, until they
-// have sent their close frames, which need the device's peer.
+// have closed.
 func (s *sessions) closeDevice(deviceID string) {
 	s.mu.Lock()
 	conns := make([]*deviceConn, 0, len(s.active[deviceID]))
@@ -405,12 +400,11 @@ func (d directory) List(currentID string) []protocol.Device {
 	devices := []protocol.Device{}
 	for _, device := range d.sessions.registry.list() {
 		devices = append(devices, protocol.Device{
-			ID:                 device.ID,
-			Name:               device.Name,
-			WireGuardPublicKey: device.WireGuardPublicKey,
-			TunnelAddress:      device.TunnelAddress,
-			PairedAt:           device.PairedAt,
-			Current:            device.ID == currentID,
+			ID:             device.ID,
+			Name:           device.Name,
+			CertificatePin: device.CertificatePin,
+			PairedAt:       device.PairedAt,
+			Current:        device.ID == currentID,
 		})
 	}
 

@@ -82,9 +82,9 @@ func printDevices(output io.Writer, devices []control.Device) error {
 	}
 
 	table := tabwriter.NewWriter(output, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(table, "ID\tNAME\tTUNNEL ADDRESS\tPAIRED")
+	fmt.Fprintln(table, "ID\tNAME\tKEY PIN\tPAIRED")
 	for _, device := range devices {
-		fmt.Fprintf(table, "%s\t%s\t%s\t%s\n", device.ID, device.Name, device.TunnelAddress, device.PairedAt.Local().Format(time.DateTime))
+		fmt.Fprintf(table, "%s\t%s\t%s\t%s\n", device.ID, device.Name, device.CertificatePin, device.PairedAt.Local().Format(time.DateTime))
 	}
 
 	return table.Flush()

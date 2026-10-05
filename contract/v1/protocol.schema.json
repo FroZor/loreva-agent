@@ -1462,24 +1462,21 @@
     "pairingRequest": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["type", "device_name", "wireguard_public_key", "mlkem_encapsulation_key"],
+      "required": ["type", "device_name", "invite_token"],
       "properties": {
         "type": { "const": "pairing.request" },
         "device_name": { "type": "string", "minLength": 1, "maxLength": 64 },
-        "wireguard_public_key": { "$ref": "#/$defs/wireguardKey" },
-        "mlkem_encapsulation_key": { "type": "string", "minLength": 1580, "maxLength": 1580, "pattern": "^[A-Za-z0-9+/]+=*$" }
+        "invite_token": { "type": "string", "minLength": 43, "maxLength": 43, "pattern": "^[A-Za-z0-9_-]+$" }
       }
     },
     "pairingStarted": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["type", "pairing_id", "node_nonce", "mlkem_ciphertext", "device_address"],
+      "required": ["type", "pairing_id", "node_nonce"],
       "properties": {
         "type": { "const": "pairing.started" },
         "pairing_id": { "$ref": "#/$defs/uuid" },
-        "node_nonce": { "$ref": "#/$defs/wireguardKey" },
-        "mlkem_ciphertext": { "type": "string", "minLength": 1452, "maxLength": 1452, "pattern": "^[A-Za-z0-9+/]+=*$" },
-        "device_address": { "type": "string", "format": "ipv6" }
+        "node_nonce": { "$ref": "#/$defs/bytes32Base64" }
       }
     },
     "pairingResult": {
@@ -1518,12 +1515,11 @@
     "device": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["id", "name", "wireguard_public_key", "tunnel_address", "paired_at", "current"],
+      "required": ["id", "name", "certificate_pin", "paired_at", "current"],
       "properties": {
         "id": { "$ref": "#/$defs/uuid" },
         "name": { "type": "string", "minLength": 1, "maxLength": 64 },
-        "wireguard_public_key": { "$ref": "#/$defs/wireguardKey" },
-        "tunnel_address": { "type": "string", "format": "ipv6" },
+        "certificate_pin": { "$ref": "#/$defs/bytes32Base64" },
         "paired_at": { "$ref": "#/$defs/timestamp" },
         "current": { "type": "boolean" }
       }
@@ -1631,7 +1627,7 @@
       "then": { "required": ["code"] },
       "else": { "not": { "anyOf": [{ "required": ["code"] }, { "required": ["message"] }] } }
     },
-    "wireguardKey": {
+    "bytes32Base64": {
       "type": "string",
       "minLength": 44,
       "maxLength": 44,

@@ -1,7 +1,7 @@
 // Package direct runs the standalone side of the agent: the local node
-// identity, the userspace WireGuard listener, device pairing, the HTTP API
-// for paired devices, and the local control socket. It works without any
-// portal or cloud service.
+// identity, the TLS listener for devices, device pairing, device sessions,
+// and the local control socket. It works without any portal or cloud
+// service.
 package direct
 
 import (
@@ -14,9 +14,9 @@ import (
 	"time"
 
 	"github.com/FroZor/loreva-agent/internal/agentcrypto"
+	"github.com/FroZor/loreva-agent/internal/certpin"
 	"github.com/FroZor/loreva-agent/internal/pairing"
 	"github.com/FroZor/loreva-agent/internal/state"
-	"github.com/FroZor/loreva-agent/internal/tunnel"
 )
 
 const (
@@ -28,7 +28,7 @@ const (
 
 // InitOptions configures a new local node identity.
 type InitOptions struct {
-	// ListenPort is the WireGuard UDP port. Zero picks a free random port
+	// ListenPort is the TCP port for devices. Zero picks a free random port
 	// between 20000 and 32000.
 	ListenPort int
 	// Endpoints are public addresses advertised in invites before the
@@ -40,7 +40,7 @@ type InitOptions struct {
 // node identity.
 func Init(store *state.Store, options InitOptions) (*state.Node, error) {
 	_, err := store.LoadNode()
-	if err == nil {
+	if err == nil || errors.Is(err, state.ErrLegacyDirect) {
 		return nil, errors.New("this node is already initialized")
 	}
 	if !errors.Is(err, state.ErrNotFound) {
@@ -66,22 +66,18 @@ func Init(store *state.Store, options InitOptions) (*state.Node, error) {
 	if err != nil {
 		return nil, err
 	}
-	privateKey, err := tunnel.GenerateKey()
-	if err != nil {
-		return nil, err
-	}
-	prefix, err := tunnel.NewPrefix()
+	identity, err := certpin.Generate()
 	if err != nil {
 		return nil, err
 	}
 
 	node := &state.Node{
-		NodeID:              nodeID,
-		WireGuardPrivateKey: privateKey.String(),
-		ListenPort:          port,
-		TunnelPrefix:        prefix.String(),
-		Endpoints:           endpoints,
-		CreatedAt:           time.Now().UTC(),
+		NodeID:         nodeID,
+		TLSPrivateKey:  identity.PrivateKey,
+		TLSCertificate: identity.Certificate,
+		ListenPort:     port,
+		Endpoints:      endpoints,
+		CreatedAt:      time.Now().UTC(),
 	}
 	if err := store.SaveNode(node); err != nil {
 		return nil, fmt.Errorf("save node identity: %w", err)
@@ -90,7 +86,35 @@ func Init(store *state.Store, options InitOptions) (*state.Node, error) {
 	return node, nil
 }
 
-// pickListenPort returns a random UDP port in the configured range that is
+// LoadNode loads the node identity. node.json of the WireGuard era is
+// upgraded in place: the node keeps its ID and endpoints and gets a TLS
+// identity. Its port is kept when it is free for TCP.
+func LoadNode(store *state.Store) (*state.Node, bool, error) {
+	node, err := store.LoadNode()
+	if err == nil || !errors.Is(err, state.ErrLegacyDirect) {
+		return node, false, err
+	}
+
+	identity, err := certpin.Generate()
+	if err != nil {
+		return nil, false, err
+	}
+	if node.ListenPort < 1 || node.ListenPort > 65535 || !tcpPortFree(node.ListenPort) {
+		if node.ListenPort, err = pickListenPort(); err != nil {
+			return nil, false, err
+		}
+	}
+
+	node.TLSPrivateKey = identity.PrivateKey
+	node.TLSCertificate = identity.Certificate
+	if err := store.ReplaceNode(node); err != nil {
+		return nil, false, fmt.Errorf("upgrade node identity: %w", err)
+	}
+
+	return node, true, nil
+}
+
+// pickListenPort returns a random TCP port in the configured range that is
 // free right now, so init never takes a port another service already uses.
 func pickListenPort() (int, error) {
 	span := big.NewInt(maxRandomPort - minRandomPort + 1)
@@ -102,16 +126,16 @@ func pickListenPort() (int, error) {
 		}
 
 		port := minRandomPort + int(offset.Int64())
-		if udpPortFree(port) {
+		if tcpPortFree(port) {
 			return port, nil
 		}
 	}
 
-	return 0, errors.New("could not find a free UDP port between 20000 and 32000; use --port")
+	return 0, errors.New("could not find a free TCP port between 20000 and 32000; use --port")
 }
 
-func udpPortFree(port int) bool {
-	listener, err := net.ListenUDP("udp", &net.UDPAddr{Port: port})
+func tcpPortFree(port int) bool {
+	listener, err := net.ListenTCP("tcp", &net.TCPAddr{Port: port})
 	if err != nil {
 		return false
 	}

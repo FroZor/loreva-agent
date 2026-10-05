@@ -2,26 +2,39 @@ package direct
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
-	"net/netip"
 	"sync"
 	"time"
 
+	"golang.org/x/net/netutil"
+
+	"github.com/FroZor/loreva-agent/internal/certpin"
 	"github.com/FroZor/loreva-agent/internal/control"
 	"github.com/FroZor/loreva-agent/internal/metrics"
 	"github.com/FroZor/loreva-agent/internal/networkinfo"
-	"github.com/FroZor/loreva-agent/internal/protocol"
 	"github.com/FroZor/loreva-agent/internal/session"
 	"github.com/FroZor/loreva-agent/internal/specifications"
 	"github.com/FroZor/loreva-agent/internal/state"
-	"github.com/FroZor/loreva-agent/internal/tunnel"
 )
 
-const shutdownTimeout = 5 * time.Second
+const (
+	shutdownTimeout = 5 * time.Second
+	// maxConnections bounds open TCP connections, including ones that are
+	// still in the TLS handshake.
+	maxConnections = 128
+	// maxConnectionsPerAddress keeps one source address from taking every
+	// slot. Devices behind one NAT share it, so it is not tiny.
+	maxConnectionsPerAddress = 16
+	// handshakeTimeout bounds the TLS handshake and the HTTP upgrade request.
+	handshakeTimeout = 5 * time.Second
+	// idleTimeout closes kept-alive connections that never upgraded.
+	idleTimeout = 15 * time.Second
+)
 
 // Collectors provide system snapshots and metrics for device sessions.
 type Collectors struct {
@@ -68,45 +81,34 @@ type Options struct {
 
 // localNode is the validated form of state.Node.
 type localNode struct {
-	id         string
-	publicKey  tunnel.Key
-	privateKey tunnel.Key
-	prefix     netip.Prefix
-	address    netip.Addr
-	listenPort int
-	endpoints  []string
+	id          string
+	certificate tls.Certificate
+	pin         string
+	listenPort  int
+	endpoints   []string
 }
 
 func parseNode(node *state.Node) (*localNode, error) {
-	privateKey, err := tunnel.ParseKey(node.WireGuardPrivateKey)
+	identity := certpin.Identity{PrivateKey: node.TLSPrivateKey, Certificate: node.TLSCertificate}
+	certificate, err := identity.TLSCertificate()
 	if err != nil {
-		return nil, fmt.Errorf("node private key: %w", err)
-	}
-	publicKey, err := privateKey.PublicKey()
-	if err != nil {
-		return nil, err
-	}
-	prefix, err := tunnel.ParsePrefix(node.TunnelPrefix)
-	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("node TLS identity: %w", err)
 	}
 	if node.ListenPort < 1 || node.ListenPort > 65535 {
 		return nil, errors.New("node listen port is out of range")
 	}
 
 	return &localNode{
-		id:         node.NodeID,
-		publicKey:  publicKey,
-		privateKey: privateKey,
-		prefix:     prefix,
-		address:    tunnel.NodeAddress(prefix),
-		listenPort: node.ListenPort,
-		endpoints:  node.Endpoints,
+		id:          node.NodeID,
+		certificate: certificate,
+		pin:         certpin.Of(certificate.Leaf),
+		listenPort:  node.ListenPort,
+		endpoints:   node.Endpoints,
 	}, nil
 }
 
-// Run serves paired devices over WireGuard and the CLI over the control
-// socket until ctx is cancelled.
+// Run serves devices over TLS on the node's port and the CLI over the
+// control socket until ctx is cancelled.
 func Run(ctx context.Context, store *state.Store, node *state.Node, options Options) error {
 	if options.Logger == nil {
 		options.Logger = slog.New(slog.DiscardHandler)
@@ -120,45 +122,39 @@ func Run(ctx context.Context, store *state.Store, node *state.Node, options Opti
 	if err != nil {
 		return fmt.Errorf("load node identity: %w", err)
 	}
-	devices, err := loadRegistry(store)
+	devices, legacy, err := loadRegistry(store)
 	if err != nil {
 		return err
 	}
+	if legacy {
+		options.Logger.Warn("devices paired over WireGuard can no longer connect; pair them again with `loreva-agent invite`")
+	}
 
-	peers := make([]tunnel.Peer, 0, len(devices.list()))
-	for _, device := range devices.list() {
-		peer, err := devicePeer(device)
-		if err != nil {
-			return err
+	pending := newPairings(local, devices, options.Logger)
+	defer pending.closeAll()
+
+	tcpListener, err := net.Listen("tcp", fmt.Sprintf(":%d", local.listenPort))
+	if err != nil {
+		return fmt.Errorf("listen on TCP port %d: %w", local.listenPort, err)
+	}
+	authorize := func(pin string) error {
+		if _, paired := devices.byPin(pin); paired || pending.active() {
+			return nil
 		}
 
-		peers = append(peers, peer)
+		return certpin.ErrPolicy
 	}
+	sessionListener := tls.NewListener(
+		limitPerAddress(netutil.LimitListener(tcpListener, maxConnections), maxConnectionsPerAddress),
+		certpin.ServerConfig(local.certificate, authorize),
+	)
 
-	tun, err := tunnel.Start(tunnel.Config{
-		PrivateKey: local.privateKey,
-		ListenPort: local.listenPort,
-		Address:    local.address,
-		Logger:     options.Logger,
-	}, peers)
-	if err != nil {
-		return err
-	}
-	defer tun.Close()
-
-	sessionListener, err := tun.ListenTCP(netip.AddrPortFrom(local.address, protocol.DirectSessionPort))
-	if err != nil {
-		return err
-	}
 	controlListener, err := control.Listen(store.Dir())
 	if err != nil {
 		return errors.Join(err, sessionListener.Close())
 	}
 
-	pending := newPairings(local, tun, devices, options.Logger)
-	defer pending.closeAll()
-
-	service := newSessions(local, options, pending, devices, tun)
+	service := newSessions(local, options, pending, devices)
 	controller := &controlServer{pairings: pending, sessions: service, logger: options.Logger}
 
 	if options.Workloads != nil {
@@ -182,11 +178,13 @@ func serve(ctx context.Context, service *sessions, sessionListener net.Listener,
 	server := &http.Server{
 		Handler:           service.handler(),
 		BaseContext:       func(net.Listener) context.Context { return requestCtx },
-		ReadHeaderTimeout: 10 * time.Second,
-		IdleTimeout:       2 * time.Minute,
+		ReadHeaderTimeout: handshakeTimeout,
+		IdleTimeout:       idleTimeout,
 		MaxHeaderBytes:    16 * 1024,
 		ErrorLog:          slog.NewLogLogger(logger.Handler(), slog.LevelDebug),
 	}
+	// Every real request is a WebSocket upgrade; anything else gets one answer.
+	server.SetKeepAlivesEnabled(false)
 
 	errs := make(chan error, 2)
 	var workers sync.WaitGroup
@@ -201,7 +199,7 @@ func serve(ctx context.Context, service *sessions, sessionListener net.Listener,
 		}
 	})
 
-	logger.Info("direct access ready", "node_id", local.id, "udp_port", local.listenPort, "tunnel_address", local.address)
+	logger.Info("direct access ready", "node_id", local.id, "tcp_port", local.listenPort, "node_pin", local.pin)
 
 	var result error
 	select {

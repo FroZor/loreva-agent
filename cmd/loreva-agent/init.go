@@ -20,7 +20,7 @@ func runInit(arguments []string, _ *slog.Logger) error {
 	flags.SetOutput(io.Discard)
 
 	stateDir := flags.String("state-dir", "", "agent state directory")
-	port := flags.Int("port", 0, "WireGuard UDP port; default is a free random port in 20000-32000")
+	port := flags.Int("port", 0, "TCP port for devices; default is a free random port in 20000-32000")
 	var endpoints []string
 	flags.Func("endpoint", "public IP or IP:port to advertise in invites (repeatable)", func(value string) error {
 		endpoints = append(endpoints, value)
@@ -47,7 +47,7 @@ func runInit(arguments []string, _ *slog.Logger) error {
 		return err
 	}
 
-	_, err = fmt.Fprintf(os.Stdout, "Loreva Agent node initialized.\nNode ID: %s\nWireGuard UDP port: %d\n"+
+	_, err = fmt.Fprintf(os.Stdout, "Loreva Agent node initialized.\nNode ID: %s\nTCP port: %d (allow it in the firewall if inbound traffic is filtered)\n"+
 		"Next: start the agent, then run `sudo loreva-agent invite` to connect a device.\n", node.NodeID, node.ListenPort)
 
 	return err

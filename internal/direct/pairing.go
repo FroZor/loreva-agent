@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"net/netip"
 	"sync"
 	"time"
 
@@ -15,33 +14,29 @@ import (
 	"github.com/FroZor/loreva-agent/internal/pairing"
 	"github.com/FroZor/loreva-agent/internal/protocol"
 	"github.com/FroZor/loreva-agent/internal/state"
-	"github.com/FroZor/loreva-agent/internal/tunnel"
 )
 
 const (
 	defaultInviteTTL = 15 * time.Minute
 	minInviteTTL     = time.Minute
 	maxInviteTTL     = time.Hour
-	// decisionGrace keeps the temporary peer after a decision so the device
-	// can read the final status before the node drops it.
+	// decisionGrace keeps a decided invite around so the device can read
+	// the final status before the node forgets it.
 	decisionGrace     = 30 * time.Second
 	statusWait        = 25 * time.Second
 	maxActiveInvites  = 16
-	addressAttempts   = 8
 	inviteEventBuffer = 4
 )
 
-// inviteSession is one invite created through the control socket. Its
-// secrets exist only in memory and its temporary peer is removed when the
-// session ends.
+// inviteSession is one invite created through the control socket. Its token
+// exists only in memory and dies with the CLI connection that created it.
 type inviteSession struct {
 	invite    *pairing.Invite
-	peerKey   tunnel.Key
 	noConfirm bool
 	events    chan control.Message
 	timer     *time.Timer
 	pairing   *pairingSession
-	// graceUntil is when the temporary peer may go after a decision.
+	// graceUntil is when the invite may go after a decision.
 	graceUntil time.Time
 	done       bool
 }
@@ -54,25 +49,22 @@ type pairingSession struct {
 	changed chan struct{}
 }
 
-// pairings owns invite sessions. The temporary invite peer may reach only
-// the pairing endpoints, and each invite starts at most one pairing.
+// pairings owns invite sessions. Each invite starts at most one pairing.
 type pairings struct {
 	node     *localNode
-	tunnel   *tunnel.Tunnel
 	registry *registry
 	logger   *slog.Logger
 
 	mu      sync.Mutex
-	invites map[netip.Addr]*inviteSession
+	invites map[string]*inviteSession
 }
 
-func newPairings(node *localNode, tun *tunnel.Tunnel, devices *registry, logger *slog.Logger) *pairings {
+func newPairings(node *localNode, devices *registry, logger *slog.Logger) *pairings {
 	return &pairings{
 		node:     node,
-		tunnel:   tun,
 		registry: devices,
 		logger:   logger,
-		invites:  make(map[netip.Addr]*inviteSession),
+		invites:  make(map[string]*inviteSession),
 	}
 }
 
@@ -89,6 +81,28 @@ func (p *pairings) createInvite(ttl time.Duration, endpoints []string, noConfirm
 		return nil, "", err
 	}
 
+	inviteID, err := agentcrypto.NewUUID()
+	if err != nil {
+		return nil, "", err
+	}
+	token, err := pairing.NewToken()
+	if err != nil {
+		return nil, "", err
+	}
+
+	invite := &pairing.Invite{
+		InviteID:  inviteID,
+		NodeID:    p.node.id,
+		NodePin:   p.node.pin,
+		Endpoints: advertised,
+		Token:     token,
+		ExpiresAt: time.Now().Add(ttl).UTC().Truncate(time.Second),
+	}
+	encoded, err := invite.Encode()
+	if err != nil {
+		return nil, "", err
+	}
+
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -96,115 +110,62 @@ func (p *pairings) createInvite(ttl time.Duration, endpoints []string, noConfirm
 		return nil, "", errors.New("too many active invites")
 	}
 
-	invite, err := p.newInviteLocked(advertised, ttl)
-	if err != nil {
-		return nil, "", err
-	}
-	encoded, err := invite.Encode()
-	if err != nil {
-		return nil, "", err
-	}
-	peerKey, err := invite.PrivateKey.PublicKey()
-	if err != nil {
-		return nil, "", err
-	}
-
-	err = p.tunnel.AddPeer(tunnel.Peer{PublicKey: peerKey, PresharedKey: invite.PresharedKey, Address: invite.Address})
-	if err != nil {
-		return nil, "", err
-	}
-
 	session := &inviteSession{
 		invite:    invite,
-		peerKey:   peerKey,
 		noConfirm: noConfirm,
 		events:    make(chan control.Message, inviteEventBuffer),
 	}
 	session.timer = time.AfterFunc(ttl, func() { p.expire(session) })
-	p.invites[invite.Address] = session
+	p.invites[inviteID] = session
 
 	return session, encoded, nil
 }
 
-func (p *pairings) newInviteLocked(endpoints []netip.AddrPort, ttl time.Duration) (*pairing.Invite, error) {
-	inviteID, err := agentcrypto.NewUUID()
-	if err != nil {
-		return nil, err
-	}
-	privateKey, err := tunnel.GenerateKey()
-	if err != nil {
-		return nil, err
-	}
-	presharedKey, err := tunnel.GenerateKey()
-	if err != nil {
-		return nil, err
-	}
-	address, err := p.freeAddressLocked()
-	if err != nil {
-		return nil, err
-	}
-
-	return &pairing.Invite{
-		InviteID:      inviteID,
-		NodeID:        p.node.id,
-		NodePublicKey: p.node.publicKey,
-		NodeAddress:   p.node.address,
-		Endpoints:     endpoints,
-		PrivateKey:    privateKey,
-		PresharedKey:  presharedKey,
-		Address:       address,
-		ExpiresAt:     time.Now().Add(ttl).UTC().Truncate(time.Second),
-	}, nil
-}
-
-// freeAddressLocked returns a tunnel address no device or invite uses.
-func (p *pairings) freeAddressLocked() (netip.Addr, error) {
-	for range addressAttempts {
-		address, err := tunnel.RandomAddress(p.node.prefix)
-		if err != nil {
-			continue
-		}
-
-		if _, used := p.invites[address]; !used && !p.hasDevice(address) {
-			return address, nil
-		}
-	}
-
-	return netip.Addr{}, errors.New("could not allocate a tunnel address")
-}
-
-func (p *pairings) hasDevice(address netip.Addr) bool {
-	_, found := p.registry.byAddress(address)
-
-	return found
-}
-
-// isInvite reports whether address belongs to an active invite peer.
-func (p *pairings) isInvite(address netip.Addr) bool {
+// active reports whether any invite can still start a pairing. Without one,
+// the TLS listener refuses every client certificate it does not know.
+func (p *pairings) active() bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	_, found := p.invites[address]
+	for _, session := range p.invites {
+		if !session.done && session.pairing == nil {
+			return true
+		}
+	}
 
-	return found
+	return false
 }
 
-// start handles pairing.request from an invite peer.
-func (p *pairings) start(from netip.Addr, request protocol.PairingRequest) (protocol.PairingStarted, error) {
+// start handles pairing.request. devicePin is the pin of the client
+// certificate the device presented on this TLS connection, which proves it
+// holds the key; exporter is this connection's TLS exporter value.
+func (p *pairings) start(request protocol.PairingRequest, devicePin string, exporter []byte) (protocol.PairingStarted, error) {
+	token, err := pairing.DecodeToken(request.InviteToken)
+	if err != nil {
+		return protocol.PairingStarted{}, errForbidden
+	}
+	if err := pairing.ValidateDeviceName(request.DeviceName); err != nil {
+		return protocol.PairingStarted{}, newSessionError("invalid_device_name", err.Error())
+	}
+	if _, paired := p.registry.byPin(devicePin); paired {
+		return protocol.PairingStarted{}, newSessionError("already_paired", "this device key is already paired")
+	}
+
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	session := p.invites[from]
+	for _, other := range p.invites {
+		if other.pairing != nil && other.pairing.status == pairingPending && other.pairing.device.CertificatePin == devicePin {
+			return protocol.PairingStarted{}, newSessionError("pairing_pending", "this device key already has a pending pairing")
+		}
+	}
+
+	session := p.sessionByTokenLocked(token)
 	if session == nil {
 		return protocol.PairingStarted{}, errForbidden
 	}
 	if session.pairing != nil {
 		return protocol.PairingStarted{}, newSessionError("invite_used", "this invite has already been used")
-	}
-
-	transcript, sharedSecret, err := p.transcriptLocked(session, request)
-	if err != nil {
-		return protocol.PairingStarted{}, err
 	}
 
 	pairingID, err := agentcrypto.NewUUID()
@@ -215,29 +176,36 @@ func (p *pairings) start(from netip.Addr, request protocol.PairingRequest) (prot
 	if err != nil {
 		return protocol.PairingStarted{}, err
 	}
-	presharedKey, err := transcript.PresharedKey(sharedSecret, session.invite.PresharedKey)
+	nonce, err := pairing.NewNonce()
 	if err != nil {
 		return protocol.PairingStarted{}, err
 	}
 
+	transcript := pairing.Transcript{
+		InviteID:   session.invite.InviteID,
+		NodeID:     p.node.id,
+		NodePin:    p.node.pin,
+		DevicePin:  devicePin,
+		DeviceName: request.DeviceName,
+		NodeNonce:  nonce,
+		Exporter:   exporter,
+	}
 	session.pairing = &pairingSession{
 		id:     pairingID,
 		status: pairingPending,
 		sas:    transcript.SAS(),
 		device: state.Device{
-			ID:                 deviceID,
-			Name:               transcript.DeviceName,
-			WireGuardPublicKey: transcript.DevicePublicKey.String(),
-			PresharedKey:       presharedKey.String(),
-			TunnelAddress:      transcript.DeviceAddress.String(),
+			ID:             deviceID,
+			Name:           request.DeviceName,
+			CertificatePin: devicePin,
 		},
 		changed: make(chan struct{}),
 	}
 	p.notifyLocked(session, control.Message{
 		Type:        control.TypePairingRequested,
 		PairingID:   pairingID,
-		DeviceName:  transcript.DeviceName,
-		Fingerprint: transcript.DevicePublicKey.String(),
+		DeviceName:  request.DeviceName,
+		Fingerprint: devicePin,
 		SAS:         session.pairing.sas,
 	})
 
@@ -248,70 +216,39 @@ func (p *pairings) start(from netip.Addr, request protocol.PairingRequest) (prot
 	}
 
 	return protocol.PairingStarted{
-		Type:            protocol.PairingStartedType,
-		PairingID:       pairingID,
-		NodeNonce:       base64.StdEncoding.EncodeToString(transcript.NodeNonce),
-		MLKEMCiphertext: base64.StdEncoding.EncodeToString(transcript.Ciphertext),
-		DeviceAddress:   transcript.DeviceAddress.String(),
+		Type:      protocol.PairingStartedType,
+		PairingID: pairingID,
+		NodeNonce: base64.StdEncoding.EncodeToString(nonce),
 	}, nil
 }
 
-// transcriptLocked validates the device's commitment and completes the node
-// side of the key agreement.
-func (p *pairings) transcriptLocked(session *inviteSession, request protocol.PairingRequest) (*pairing.Transcript, []byte, error) {
-	if err := pairing.ValidateDeviceName(request.DeviceName); err != nil {
-		return nil, nil, newSessionError("invalid_device_name", err.Error())
+// sessionByTokenLocked compares the token with every live invite in
+// constant time, so timing reveals neither a match nor its position.
+func (p *pairings) sessionByTokenLocked(token []byte) *inviteSession {
+	var found *inviteSession
+	for _, session := range p.invites {
+		if pairing.TokenEqual(session.invite.Token, token) && !session.done {
+			found = session
+		}
 	}
 
-	devicePublicKey, err := tunnel.ParseKey(request.WireGuardPublicKey)
-	if err != nil || devicePublicKey.IsZero() || devicePublicKey == p.node.publicKey ||
-		devicePublicKey == session.peerKey || p.registry.hasPublicKey(devicePublicKey) {
-		return nil, nil, newSessionError("invalid_public_key", "wireguard_public_key must be a new 32-byte key")
-	}
-
-	encapsulationKey, err := base64.StdEncoding.Strict().DecodeString(request.MLKEMEncapsulationKey)
-	if err != nil {
-		return nil, nil, newSessionError("invalid_mlkem_key", "mlkem_encapsulation_key must be standard Base64")
-	}
-	sharedSecret, ciphertext, err := pairing.Encapsulate(encapsulationKey)
-	if err != nil {
-		return nil, nil, newSessionError("invalid_mlkem_key", "mlkem_encapsulation_key is not a valid ML-KEM-768 key")
-	}
-
-	deviceAddress, err := p.freeAddressLocked()
-	if err != nil {
-		return nil, nil, err
-	}
-	nonce, err := pairing.NewNonce()
-	if err != nil {
-		return nil, nil, err
-	}
-
-	transcript := &pairing.Transcript{
-		InviteID:         session.invite.InviteID,
-		NodeID:           p.node.id,
-		NodePublicKey:    p.node.publicKey,
-		DevicePublicKey:  devicePublicKey,
-		DeviceName:       request.DeviceName,
-		DeviceAddress:    deviceAddress,
-		EncapsulationKey: encapsulationKey,
-		Ciphertext:       ciphertext,
-		NodeNonce:        nonce,
-	}
-
-	return transcript, sharedSecret, nil
+	return found
 }
 
 // status reports the pairing status and, once approved, the device ID. While
 // the pairing is pending it waits up to statusWait for a decision.
-func (p *pairings) status(ctx context.Context, from netip.Addr, pairingID string) (string, string, error) {
+func (p *pairings) status(ctx context.Context, pairingID string) (string, string, error) {
 	p.mu.Lock()
-	session := p.invites[from]
-	if session == nil || session.pairing == nil || session.pairing.id != pairingID {
+	var current *pairingSession
+	for _, session := range p.invites {
+		if session.pairing != nil && session.pairing.id == pairingID {
+			current = session.pairing
+		}
+	}
+	if current == nil {
 		p.mu.Unlock()
 		return "", "", newSessionError("not_found", "pairing not found")
 	}
-	current := session.pairing
 	changed := current.changed
 	pending := current.status == pairingPending
 	p.mu.Unlock()
@@ -356,7 +293,7 @@ func (p *pairings) decideLocked(session *inviteSession, approve bool) error {
 
 	if approve {
 		current.device.PairedAt = time.Now().UTC()
-		if err := p.addDevice(current.device); err != nil {
+		if err := p.registry.add(current.device); err != nil {
 			p.finishLocked(session, protocol.PairingRejected)
 			return err
 		}
@@ -372,27 +309,8 @@ func (p *pairings) decideLocked(session *inviteSession, approve bool) error {
 	return nil
 }
 
-func (p *pairings) addDevice(device state.Device) error {
-	peer, err := devicePeer(device)
-	if err != nil {
-		return err
-	}
-	if err := p.registry.add(device); err != nil {
-		return err
-	}
-	if err := p.tunnel.AddPeer(peer); err != nil {
-		if _, removeErr := p.registry.remove(device.ID); removeErr != nil {
-			return errors.Join(err, removeErr)
-		}
-
-		return err
-	}
-
-	return nil
-}
-
-// finishLocked records a terminal status, tells the CLI, and keeps the
-// temporary peer for decisionGrace so the device can read the status.
+// finishLocked records a terminal status, tells the CLI, and keeps the invite
+// for decisionGrace so the device can read the status.
 func (p *pairings) finishLocked(session *inviteSession, status string) {
 	current := session.pairing
 	current.status = status
@@ -417,7 +335,7 @@ func (p *pairings) finishLocked(session *inviteSession, status string) {
 }
 
 // expire ends an invite when its lifetime or grace period runs out. A
-// pending pairing first becomes expired and keeps the peer for the grace
+// pending pairing first becomes expired and keeps the invite for the grace
 // period, so the device learns the result instead of timing out.
 func (p *pairings) expire(session *inviteSession) {
 	p.mu.Lock()
@@ -471,12 +389,8 @@ func (p *pairings) closeAll() {
 func (p *pairings) removeLocked(session *inviteSession) {
 	session.done = true
 	session.timer.Stop()
-	delete(p.invites, session.invite.Address)
+	delete(p.invites, session.invite.InviteID)
 	close(session.events)
-
-	if err := p.tunnel.RemovePeer(session.peerKey); err != nil {
-		p.logger.Warn("remove invite peer", "error", err)
-	}
 }
 
 func (p *pairings) notifyLocked(session *inviteSession, message control.Message) {
@@ -488,5 +402,18 @@ func (p *pairings) notifyLocked(session *inviteSession, message control.Message)
 	case session.events <- message:
 	default:
 		p.logger.Warn("control client is not reading invite events", "type", message.Type)
+	}
+}
+
+// abandon expires a pending pairing whose device disconnected, so the
+// operator cannot approve a device that is gone.
+func (p *pairings) abandon(pairingID string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	for _, session := range p.invites {
+		if session.pairing != nil && session.pairing.id == pairingID && session.pairing.status == pairingPending && !session.done {
+			p.finishLocked(session, protocol.PairingExpired)
+		}
 	}
 }

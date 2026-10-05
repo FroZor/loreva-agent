@@ -473,7 +473,7 @@ func canonicalContractMessages() []any {
 	requestID := "2ab9d734-7434-4cdf-bca4-6ce7a46cdd65"
 	nodeID := "65a1876f-a715-45fc-9ac0-e4bc31067059"
 	portalID := "d1b181c1-52ec-4d55-b2c9-b1428305b294"
-	wireguardKey := base64.StdEncoding.EncodeToString(make([]byte, 32))
+	pin := base64.StdEncoding.EncodeToString(make([]byte, 32))
 	jws := "e30.e30.A"
 	certificate := "-----BEGIN CERTIFICATE-----\nAA==\n-----END CERTIFICATE-----\n"
 	csr := "-----BEGIN CERTIFICATE REQUEST-----\nAA==\n-----END CERTIFICATE REQUEST-----\n"
@@ -564,18 +564,15 @@ func canonicalContractMessages() []any {
 		},
 		Error{Type: ErrorType, RequestID: requestID, Code: "not_found", Message: "device not found"},
 		PairingRequest{
-			Type: PairingRequestType, DeviceName: "laptop", WireGuardPublicKey: wireguardKey,
-			MLKEMEncapsulationKey: base64.StdEncoding.EncodeToString(make([]byte, 1184)),
+			Type: PairingRequestType, DeviceName: "laptop",
+			InviteToken: base64.RawURLEncoding.EncodeToString(make([]byte, 32)),
 		},
-		PairingStarted{
-			Type: PairingStartedType, PairingID: requestID, NodeNonce: wireguardKey,
-			MLKEMCiphertext: base64.StdEncoding.EncodeToString(make([]byte, 1088)), DeviceAddress: "fd00::2",
-		},
+		PairingStarted{Type: PairingStartedType, PairingID: requestID, NodeNonce: pin},
 		PairingResult{Type: PairingResultType, PairingID: requestID, Status: PairingApproved, DeviceID: requestID},
 		PairingResult{Type: PairingResultType, PairingID: requestID, Status: PairingExpired},
 		DevicesList{Type: DevicesListType, RequestID: requestID},
 		DevicesListResult{Type: DevicesListResultType, RequestID: requestID, Devices: []Device{{
-			ID: requestID, Name: "laptop", WireGuardPublicKey: wireguardKey, TunnelAddress: "fd00::2", PairedAt: now, Current: true,
+			ID: requestID, Name: "laptop", CertificatePin: pin, PairedAt: now, Current: true,
 		}}},
 		DeviceRemove{Type: DeviceRemoveType, RequestID: requestID, DeviceID: requestID},
 		DeviceRemoveResult{Type: DeviceRemoveResultType, RequestID: requestID, DeviceID: requestID},

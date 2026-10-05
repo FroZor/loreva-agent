@@ -1,25 +1,24 @@
 package pairing
 
 import (
-	"crypto/hkdf"
-	"crypto/mlkem"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base32"
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"net/netip"
 	"unicode"
 	"unicode/utf8"
-
-	"github.com/FroZor/loreva-agent/internal/tunnel"
 )
 
 const (
-	transcriptLabel = "loreva.pairing.transcript.v1"
-	sasLabel        = "loreva.pairing.sas.v1"
-	pskLabel        = "loreva.pairing.psk.v1"
+	transcriptLabel = "loreva.pairing.transcript.v2"
+	sasLabel        = "loreva.pairing.sas.v2"
+	// ExporterLabel is the TLS exporter label (RFC 8446 §7.5) that binds the
+	// transcript to the TLS connection the pairing runs on.
+	ExporterLabel = "EXPORTER-loreva-pairing-v2"
+	// ExporterSize is the length of the exported keying material.
+	ExporterSize = 32
 	// NonceSize is the length of the node's pairing nonce.
 	NonceSize = 32
 	// MaxDeviceNameLength bounds the device name shown on the node console.
@@ -28,36 +27,33 @@ const (
 )
 
 // Transcript is everything both sides must agree on. The device fixes its
-// keys and name before the node picks its nonce, so an attacker cannot grind
-// keys to collide with the short authentication string.
+// key and name before the node picks its nonce, so an attacker cannot grind
+// keys to collide with the short authentication string. The TLS exporter
+// ties the code to this very connection: a relay that terminates TLS on
+// either side ends up with different exporter values and a different code.
 type Transcript struct {
-	InviteID         string
-	NodeID           string
-	NodePublicKey    tunnel.Key
-	DevicePublicKey  tunnel.Key
-	DeviceName       string
-	DeviceAddress    netip.Addr
-	EncapsulationKey []byte
-	Ciphertext       []byte
-	NodeNonce        []byte
+	InviteID   string
+	NodeID     string
+	NodePin    string
+	DevicePin  string
+	DeviceName string
+	NodeNonce  []byte
+	Exporter   []byte
 }
 
 // Hash returns SHA-256 over the length-prefixed transcript fields.
 func (t *Transcript) Hash() [sha256.Size]byte {
 	digest := sha256.New()
-	address := t.DeviceAddress.As16()
 
 	for _, field := range [][]byte{
 		[]byte(transcriptLabel),
 		[]byte(t.InviteID),
 		[]byte(t.NodeID),
-		t.NodePublicKey[:],
-		t.DevicePublicKey[:],
+		[]byte(t.NodePin),
+		[]byte(t.DevicePin),
 		[]byte(t.DeviceName),
-		address[:],
-		t.EncapsulationKey,
-		t.Ciphertext,
 		t.NodeNonce,
+		t.Exporter,
 	} {
 		var length [4]byte
 		binary.BigEndian.PutUint32(length[:], uint32(len(field)))
@@ -79,41 +75,6 @@ func (t *Transcript) SAS() string {
 	encoded := base32.StdEncoding.EncodeToString(sum[:])[:sasLength]
 
 	return encoded[:sasLength/2] + "-" + encoded[sasLength/2:]
-}
-
-// PresharedKey derives the device's WireGuard PSK from the ML-KEM shared
-// secret, salted with the invite PSK and bound to the transcript. Learning
-// the invite later does not reveal it, and a quantum attacker who recorded
-// the pairing still has to break ML-KEM-768.
-func (t *Transcript) PresharedKey(sharedSecret []byte, invitePresharedKey tunnel.Key) (tunnel.Key, error) {
-	if len(sharedSecret) != mlkem.SharedKeySize {
-		return tunnel.Key{}, errors.New("ML-KEM shared secret has an invalid length")
-	}
-
-	transcript := t.Hash()
-	secret := append(append([]byte{}, sharedSecret...), transcript[:]...)
-
-	derived, err := hkdf.Key(sha256.New, secret, invitePresharedKey[:], pskLabel, tunnel.KeySize)
-	if err != nil {
-		return tunnel.Key{}, fmt.Errorf("derive device preshared key: %w", err)
-	}
-
-	var key tunnel.Key
-	copy(key[:], derived)
-
-	return key, nil
-}
-
-// Encapsulate runs the node side of ML-KEM-768 against the device's key.
-func Encapsulate(encapsulationKey []byte) (sharedSecret, ciphertext []byte, err error) {
-	key, err := mlkem.NewEncapsulationKey768(encapsulationKey)
-	if err != nil {
-		return nil, nil, fmt.Errorf("parse ML-KEM-768 encapsulation key: %w", err)
-	}
-
-	sharedSecret, ciphertext = key.Encapsulate()
-
-	return sharedSecret, ciphertext, nil
 }
 
 // NewNonce returns a fresh node nonce.

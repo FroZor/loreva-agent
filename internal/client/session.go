@@ -2,6 +2,7 @@ package client
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,40 +13,35 @@ import (
 
 	"github.com/coder/websocket"
 
+	"github.com/FroZor/loreva-agent/internal/certpin"
 	"github.com/FroZor/loreva-agent/internal/pairing"
 	"github.com/FroZor/loreva-agent/internal/protocol"
-	"github.com/FroZor/loreva-agent/internal/tunnel"
 	"github.com/FroZor/loreva-agent/internal/wsframe"
 )
 
 const (
-	probeTimeout      = 5 * time.Second
-	keepaliveInterval = 25
+	connectTimeout = 10 * time.Second
 	// maxFrameBytes bounds a frame from the node. Node reports are bounded
 	// to 512 KiB by the protocol.
 	maxFrameBytes = 1024 * 1024
 )
 
-// Session is an open direct session with one node: a userspace WireGuard
-// tunnel and the node protocol WebSocket inside it.
+// Session is an open direct session with one node over TLS.
 type Session struct {
 	// Hello is the node's first frame.
 	Hello protocol.SessionHello
 
-	tunnel   *tunnel.Tunnel
 	conn     *websocket.Conn
+	tls      tls.ConnectionState
 	endpoint netip.AddrPort
 }
 
-// endpointConfig is the local side of a tunnel to a node.
+// endpointConfig is what the device needs to reach a node.
 type endpointConfig struct {
-	privateKey    tunnel.Key
-	presharedKey  tunnel.Key
-	address       netip.Addr
-	nodeID        string
-	nodePublicKey tunnel.Key
-	nodeAddress   netip.Addr
-	endpoints     []netip.AddrPort
+	nodeID      string
+	nodePin     string
+	certificate tls.Certificate
+	endpoints   []netip.AddrPort
 }
 
 // Connect opens a device session with the credentials saved by Pair.
@@ -67,8 +63,7 @@ func Connect(ctx context.Context, credentials *Credentials) (*Session, error) {
 	return session, nil
 }
 
-// open tries each endpoint until the session handshake succeeds, which
-// proves the WireGuard handshake with the node's key completed.
+// open tries each endpoint until the session handshake succeeds.
 func open(ctx context.Context, config endpointConfig) (*Session, error) {
 	var failures []error
 
@@ -88,38 +83,40 @@ func open(ctx context.Context, config endpointConfig) (*Session, error) {
 }
 
 func openEndpoint(ctx context.Context, config endpointConfig, endpoint netip.AddrPort) (*Session, error) {
-	tun, err := tunnel.Start(tunnel.Config{PrivateKey: config.privateKey, Address: config.address}, []tunnel.Peer{{
-		PublicKey:           config.nodePublicKey,
-		PresharedKey:        config.presharedKey,
-		Address:             config.nodeAddress,
-		Endpoint:            endpoint,
-		PersistentKeepalive: keepaliveInterval,
-	}})
-	if err != nil {
-		return nil, err
-	}
+	tlsConfig := certpin.ClientConfig(config.certificate, config.nodePin)
 
-	address := netip.AddrPortFrom(config.nodeAddress, protocol.DirectSessionPort).String()
+	var state tls.ConnectionState
 	httpClient := &http.Client{Transport: &http.Transport{
-		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-			return tun.DialContext(ctx, "tcp", address)
+		DialTLSContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
+			raw, err := (&net.Dialer{}).DialContext(ctx, network, endpoint.String())
+			if err != nil {
+				return nil, err
+			}
+
+			conn := tls.Client(raw, tlsConfig)
+			if err := conn.HandshakeContext(ctx); err != nil {
+				_ = raw.Close()
+				return nil, err
+			}
+			state = conn.ConnectionState()
+
+			return conn, nil
 		},
 	}}
 
-	dialCtx, cancel := context.WithTimeout(ctx, probeTimeout)
+	dialCtx, cancel := context.WithTimeout(ctx, connectTimeout)
 	defer cancel()
 
-	conn, _, err := websocket.Dial(dialCtx, "ws://"+address+protocol.DirectSessionPath, &websocket.DialOptions{
+	conn, _, err := websocket.Dial(dialCtx, "wss://"+endpoint.String()+protocol.DirectSessionPath, &websocket.DialOptions{
 		HTTPClient:   httpClient,
 		Subprotocols: []string{protocol.DirectSessionSubprotocol},
 	})
 	if err != nil {
-		tun.Close()
 		return nil, err
 	}
 	conn.SetReadLimit(maxFrameBytes)
 
-	session := &Session{tunnel: tun, conn: conn, endpoint: endpoint}
+	session := &Session{conn: conn, tls: state, endpoint: endpoint}
 	if err := session.readHello(dialCtx, config.nodeID); err != nil {
 		session.Close()
 		return nil, err
@@ -164,10 +161,14 @@ func (s *Session) WriteJSON(ctx context.Context, value any) error {
 	return wsframe.WriteJSON(ctx, s.conn, value)
 }
 
-// Close ends the session and shuts the tunnel down.
+// Close ends the session.
 func (s *Session) Close() {
 	_ = s.conn.Close(websocket.StatusNormalClosure, "")
-	s.tunnel.Close()
+}
+
+// exporter returns this connection's TLS exporter value for pairing.
+func (s *Session) exporter() ([]byte, error) {
+	return s.tls.ExportKeyingMaterial(pairing.ExporterLabel, nil, pairing.ExporterSize)
 }
 
 // RemoteError is an error frame from the node.
@@ -181,26 +182,16 @@ func (e *RemoteError) Error() string {
 }
 
 func (c *Credentials) endpointConfig() (endpointConfig, error) {
-	var config endpointConfig
-	var err error
-
-	config.nodeID = c.NodeID
-	if config.privateKey, err = tunnel.ParseKey(c.PrivateKey); err != nil {
-		return config, fmt.Errorf("credentials private_key: %w", err)
-	}
-	if config.presharedKey, err = tunnel.ParseKey(c.PresharedKey); err != nil {
-		return config, fmt.Errorf("credentials preshared_key: %w", err)
-	}
-	if config.nodePublicKey, err = tunnel.ParseKey(c.NodePublicKey); err != nil {
-		return config, fmt.Errorf("credentials node_public_key: %w", err)
-	}
-	if config.address, err = netip.ParseAddr(c.Address); err != nil {
-		return config, fmt.Errorf("credentials address: %w", err)
-	}
-	if config.nodeAddress, err = netip.ParseAddr(c.NodeAddress); err != nil {
-		return config, fmt.Errorf("credentials node_address: %w", err)
+	if err := certpin.Validate(c.NodePin); err != nil {
+		return endpointConfig{}, fmt.Errorf("credentials node_pin: %w", err)
 	}
 
+	certificate, err := certpin.Identity{PrivateKey: c.PrivateKey, Certificate: c.Certificate}.TLSCertificate()
+	if err != nil {
+		return endpointConfig{}, fmt.Errorf("credentials TLS identity: %w", err)
+	}
+
+	config := endpointConfig{nodeID: c.NodeID, nodePin: c.NodePin, certificate: certificate}
 	for _, value := range c.Endpoints {
 		endpoint, err := pairing.ParseEndpoint(value)
 		if err != nil {

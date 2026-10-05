@@ -27,21 +27,11 @@ const (
 	maxSidecarLine = 64 * 1024
 )
 
-// Sidecar events on standard output, besides the node's own frames.
-const (
-	sidecarPairingCode      = "pairing.code"
-	sidecarPairingCompleted = "pairing.completed"
-	sidecarError            = "sidecar.error"
-)
-
-// runDevice is the device side of direct access. Loreva App runs it as a
-// sidecar process and talks JSON lines over standard input and output, so
-// the tunnel, the pairing cryptography, and the session live in this
-// binary and the app opens no network port:
+// runDevice is the reference device client, for testing and scripting. Loreva
+// App implements the same protocol itself:
 //
 //	loreva-agent device pair --credentials FILE [--name NAME] < key
-//	loreva-agent device pair --json [--name NAME] < key
-//	loreva-agent device connect --credentials FILE|-
+//	loreva-agent device connect --credentials FILE
 func runDevice(arguments []string, _ *slog.Logger) error {
 	if len(arguments) == 0 {
 		return errors.New("usage: loreva-agent device pair|connect ...")
@@ -60,20 +50,12 @@ func runDevice(arguments []string, _ *slog.Logger) error {
 	}
 }
 
-type sidecarEvent struct {
-	Type        string              `json:"type"`
-	Code        string              `json:"code,omitempty"`
-	Message     string              `json:"message,omitempty"`
-	Credentials *client.Credentials `json:"credentials,omitempty"`
-}
-
 func runDevicePair(ctx context.Context, arguments []string) error {
 	flags := flag.NewFlagSet("device pair", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 
 	credentialsPath := flags.String("credentials", "", "file to create for this device's credentials")
 	name := flags.String("name", "", "device name shown on the node (default: host name)")
-	jsonOutput := flags.Bool("json", false, "print JSON events, including the credentials, instead of writing a file")
 
 	if err := flags.Parse(arguments); err != nil {
 		return fmt.Errorf("parse device pair arguments: %w", err)
@@ -81,8 +63,8 @@ func runDevicePair(ctx context.Context, arguments []string) error {
 	if flags.NArg() != 0 {
 		return errors.New("the connection key is read from standard input, not from arguments")
 	}
-	if (*credentialsPath == "") == !*jsonOutput {
-		return errors.New("pass exactly one of --credentials FILE and --json")
+	if *credentialsPath == "" {
+		return errors.New("--credentials is required")
 	}
 	deviceName := *name
 	if deviceName == "" {
@@ -94,35 +76,7 @@ func runDevicePair(ctx context.Context, arguments []string) error {
 		deviceName = hostname
 	}
 
-	if *jsonOutput {
-		err := pairAndPrint(ctx, deviceName, json.NewEncoder(os.Stdout))
-		if err != nil {
-			_ = json.NewEncoder(os.Stdout).Encode(sidecarEvent{Type: sidecarError, Code: errorCode(err), Message: err.Error()})
-		}
-
-		return err
-	}
-
 	return pairToFile(ctx, deviceName, *credentialsPath)
-}
-
-func pairAndPrint(ctx context.Context, deviceName string, output *json.Encoder) error {
-	invite, err := readInvite()
-	if err != nil {
-		return err
-	}
-
-	credentials, err := client.Pair(ctx, invite, client.PairOptions{
-		DeviceName: deviceName,
-		ShowSAS: func(sas string) {
-			_ = output.Encode(sidecarEvent{Type: sidecarPairingCode, Code: sas})
-		},
-	})
-	if err != nil {
-		return err
-	}
-
-	return output.Encode(sidecarEvent{Type: sidecarPairingCompleted, Credentials: credentials})
 }
 
 func pairToFile(ctx context.Context, deviceName, path string) error {
@@ -180,25 +134,23 @@ func readInvite() (*pairing.Invite, error) {
 // runDeviceConnect bridges standard input and output to a device session:
 // every line on standard input is one frame to the node, and every frame
 // from the node is one line on standard output, starting with session.hello.
-// With --credentials - the first input line is the credentials JSON, so an
-// app can keep it in the operating system keychain instead of a file.
 func runDeviceConnect(ctx context.Context, arguments []string) error {
 	flags := flag.NewFlagSet("device connect", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 
-	credentialsPath := flags.String("credentials", "", "credentials file created by device pair, or - for standard input")
+	credentialsPath := flags.String("credentials", "", "credentials file created by device pair")
 
 	if err := flags.Parse(arguments); err != nil {
 		return fmt.Errorf("parse device connect arguments: %w", err)
 	}
 	if flags.NArg() != 0 || *credentialsPath == "" {
-		return errors.New("usage: loreva-agent device connect --credentials FILE|-")
+		return errors.New("usage: loreva-agent device connect --credentials FILE")
 	}
 
 	input := bufio.NewScanner(os.Stdin)
 	input.Buffer(make([]byte, 0, 4096), maxSidecarLine)
 
-	credentials, err := loadSidecarCredentials(*credentialsPath, input)
+	credentials, err := client.LoadCredentials(*credentialsPath)
 	if err != nil {
 		return err
 	}
@@ -210,18 +162,6 @@ func runDeviceConnect(ctx context.Context, arguments []string) error {
 	defer session.Close()
 
 	return bridge(ctx, session, input, os.Stdout)
-}
-
-func loadSidecarCredentials(path string, input *bufio.Scanner) (*client.Credentials, error) {
-	if path != "-" {
-		return client.LoadCredentials(path)
-	}
-
-	if !input.Scan() {
-		return nil, errors.Join(errors.New("expected credentials JSON on the first input line"), input.Err())
-	}
-
-	return client.ParseCredentials(input.Bytes())
 }
 
 // bridge copies frames in both directions until either side closes.
@@ -287,20 +227,5 @@ func bridge(ctx context.Context, session *client.Session, input *bufio.Scanner, 
 				return err
 			}
 		}
-	}
-}
-
-func errorCode(err error) string {
-	if remote, ok := errors.AsType[*client.RemoteError](err); ok {
-		return remote.Code
-	}
-
-	switch {
-	case errors.Is(err, client.ErrPairingRejected):
-		return "pairing_rejected"
-	case errors.Is(err, client.ErrPairingExpired):
-		return "pairing_expired"
-	default:
-		return "failed"
 	}
 }

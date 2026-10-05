@@ -55,17 +55,17 @@ type Identity struct {
 }
 
 // Node is the locally created identity that lets devices connect to the agent
-// directly over WireGuard, without a portal.
+// directly over TLS, without a portal.
 type Node struct {
 	Version int    `json:"version"`
 	NodeID  string `json:"node_id"`
-	// WireGuardPrivateKey is the standard Base64 encoding of the node's
-	// Curve25519 private key.
-	WireGuardPrivateKey string `json:"wireguard_private_key"`
-	ListenPort          int    `json:"listen_port"`
-	// TunnelPrefix is the node's random unique local IPv6 /64. The node uses
-	// the first address and assigns every peer its own address from it.
-	TunnelPrefix string `json:"tunnel_prefix"`
+	// TLSPrivateKey is the standard Base64 PKCS#8 DER of the node's TLS key.
+	TLSPrivateKey string `json:"tls_private_key"`
+	// TLSCertificate is the standard Base64 DER of the node's self-signed
+	// certificate. Devices pin its public key.
+	TLSCertificate string `json:"tls_certificate"`
+	// ListenPort is the TCP port of the direct access listener.
+	ListenPort int `json:"listen_port"`
 	// Endpoints are operator-supplied host:port values advertised in invites
 	// before the automatically detected interface addresses.
 	Endpoints []string  `json:"endpoints,omitempty"`
@@ -78,16 +78,12 @@ type Devices struct {
 	Items   []Device `json:"items"`
 }
 
-// Device is one paired client device and its WireGuard peer configuration.
+// Device is one paired client device.
 type Device struct {
 	ID   string `json:"id"`
 	Name string `json:"name"`
-	// WireGuardPublicKey is the standard Base64 encoding of the device's
-	// Curve25519 public key for this node.
-	WireGuardPublicKey string `json:"wireguard_public_key"`
-	// PresharedKey is the standard Base64 encoding of the WireGuard PSK
-	// derived during pairing.
-	PresharedKey  string    `json:"preshared_key"`
-	TunnelAddress string    `json:"tunnel_address"`
-	PairedAt      time.Time `json:"paired_at"`
+	// CertificatePin is the standard Base64 SHA-256 of the public key of the
+	// device's client certificate. Only that key can open a device session.
+	CertificatePin string    `json:"certificate_pin"`
+	PairedAt       time.Time `json:"paired_at"`
 }
