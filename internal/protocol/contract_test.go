@@ -362,6 +362,24 @@ func contractMessageTypes() map[string]string {
 		"containerConsoleInfoResult": ContainerConsoleInfoResultType,
 		"containerConsoleSend":       ContainerConsoleSendType,
 		"containerConsoleSendResult": ContainerConsoleSendResultType,
+		"fsList":                     FSListType,
+		"fsListResult":               FSListResultType,
+		"fsPathRequest":              FSStatType,
+		"fsStatResult":               FSStatResultType,
+		"fsChmod":                    FSChmodType,
+		"fsRename":                   FSRenameType,
+		"fsDelete":                   FSDeleteType,
+		"fsCopy":                     FSCopyType,
+		"fsArchive":                  FSArchiveType,
+		"fsExtract":                  FSExtractType,
+		"fsCancel":                   FSCancelType,
+		"fsProgress":                 FSProgressType,
+		"fsResult":                   FSResultType,
+		"fsReadOpen":                 FSReadOpenType,
+		"fsReadOpened":               FSReadOpenedType,
+		"fsWriteOpen":                FSWriteOpenType,
+		"fsWriteReady":               FSWriteReadyType,
+		"fsWriteResult":              FSWriteResultType,
 	}
 }
 
@@ -394,6 +412,25 @@ func contractDTOs() map[string]reflect.Type {
 		"containerConsoleInfoResult":     reflect.TypeFor[ContainerConsoleInfoResult](),
 		"containerConsoleSend":           reflect.TypeFor[ContainerConsoleSend](),
 		"containerConsoleSendResult":     reflect.TypeFor[ContainerConsoleSendResult](),
+		"fsEntry":                        reflect.TypeFor[FSEntry](),
+		"fsList":                         reflect.TypeFor[FSList](),
+		"fsListResult":                   reflect.TypeFor[FSListResult](),
+		"fsPathRequest":                  reflect.TypeFor[FSPathRequest](),
+		"fsStatResult":                   reflect.TypeFor[FSStatResult](),
+		"fsChmod":                        reflect.TypeFor[FSChmod](),
+		"fsRename":                       reflect.TypeFor[FSRename](),
+		"fsDelete":                       reflect.TypeFor[FSDelete](),
+		"fsCopy":                         reflect.TypeFor[FSCopy](),
+		"fsArchive":                      reflect.TypeFor[FSArchive](),
+		"fsExtract":                      reflect.TypeFor[FSExtract](),
+		"fsCancel":                       reflect.TypeFor[FSCancel](),
+		"fsProgress":                     reflect.TypeFor[FSProgress](),
+		"fsResult":                       reflect.TypeFor[FSResult](),
+		"fsReadOpen":                     reflect.TypeFor[FSReadOpen](),
+		"fsReadOpened":                   reflect.TypeFor[FSReadOpened](),
+		"fsWriteOpen":                    reflect.TypeFor[FSWriteOpen](),
+		"fsWriteReady":                   reflect.TypeFor[FSWriteReady](),
+		"fsWriteResult":                  reflect.TypeFor[FSWriteResult](),
 		"metricsSampleRecord":            reflect.TypeFor[MetricsSampleRecord](),
 		"metricsItem":                    reflect.TypeFor[MetricsItem](),
 		"metricsQueryResult":             reflect.TypeFor[MetricsQueryResult](),
@@ -500,6 +537,10 @@ func canonicalContractMessages() []any {
 	requestID := "2ab9d734-7434-4cdf-bca4-6ce7a46cdd65"
 	limitCores := 2.0
 	containerID := strings.Repeat("ab", 32)
+	fsEntry := FSEntry{
+		Name: "server.properties", Type: "file", Size: 22, Mode: 0o644, UID: 1000, GID: 1000,
+		ModifiedAt: now, Version: "1791221962324109625-22",
+	}
 	nodeID := "65a1876f-a715-45fc-9ac0-e4bc31067059"
 	portalID := "d1b181c1-52ec-4d55-b2c9-b1428305b294"
 	pin := base64.StdEncoding.EncodeToString(make([]byte, 32))
@@ -642,6 +683,31 @@ func canonicalContractMessages() []any {
 			Type: ContainerConsoleSendResultType, RequestID: requestID, ContainerID: containerID,
 			Adapter: "rcon", Output: "There are 0 of a max of 20 players online",
 		},
+		FSList{Type: FSListType, RequestID: requestID, ContainerID: containerID, Path: "/data", After: "logs"},
+		FSListResult{
+			Type: FSListResultType, RequestID: requestID, ContainerID: containerID, Path: "/data",
+			Entries: []FSEntry{fsEntry, {Name: "data", Type: "directory", Mode: 0o755, ModifiedAt: now, Mount: true}}, More: true,
+		},
+		FSPathRequest{Type: FSStatType, RequestID: requestID, ContainerID: containerID, Path: "/data/server.properties"},
+		FSPathRequest{Type: FSMkdirType, RequestID: requestID, ContainerID: containerID, Path: "/data/plugins"},
+		FSStatResult{Type: FSStatResultType, RequestID: requestID, ContainerID: containerID, Entry: fsEntry},
+		FSChmod{Type: FSChmodType, RequestID: requestID, ContainerID: containerID, Path: "/data/start.sh", Mode: 0o755},
+		FSRename{Type: FSRenameType, RequestID: requestID, ContainerID: containerID, Path: "/data/a.txt", To: "/data/b.txt"},
+		FSDelete{Type: FSDeleteType, RequestID: requestID, ContainerID: containerID, Paths: []string{"/data/logs"}},
+		FSCopy{Type: FSCopyType, RequestID: requestID, ContainerID: containerID, Paths: []string{"/data/world"}, To: "/backup"},
+		FSArchive{Type: FSArchiveType, RequestID: requestID, ContainerID: containerID, Paths: []string{"/data/world"}, To: "/data/world.zip", Format: "zip"},
+		FSExtract{Type: FSExtractType, RequestID: requestID, ContainerID: containerID, Path: "/data/world.zip", To: "/data"},
+		FSCancel{Type: FSCancelType, RequestID: requestID},
+		FSProgress{Type: FSProgressType, RequestID: requestID, Items: 120, Bytes: 1 << 20},
+		FSResult{Type: FSResultType, RequestID: requestID, ContainerID: containerID, Entry: &fsEntry, Items: 1, Bytes: 22},
+		FSReadOpen{Type: FSReadOpenType, RequestID: requestID, StreamID: 3, ContainerID: containerID, Path: "/data/server.properties", Offset: 0},
+		FSReadOpened{Type: FSReadOpenedType, RequestID: requestID, StreamID: 3, Entry: fsEntry, Offset: 0, Archive: false},
+		FSWriteOpen{
+			Type: FSWriteOpenType, RequestID: requestID, StreamID: 4, ContainerID: containerID, Path: "/data/server.properties",
+			Size: 22, SHA256: strings.Repeat("a", 64), ExpectedVersion: "1791221962324109625-22",
+		},
+		FSWriteReady{Type: FSWriteReadyType, RequestID: requestID, StreamID: 4, Offset: 0},
+		FSWriteResult{Type: FSWriteResultType, RequestID: requestID, StreamID: 4, Entry: fsEntry},
 		MetricsRollupReport{
 			Type: MetricsRollupType, SchemaVersion: MetricsSchemaVersion, RequestID: requestID, StreamID: portalID,
 			Metric: MetricRollupSeries{Type: MetricTypeNode, Points: []MetricRollup{rollup}},

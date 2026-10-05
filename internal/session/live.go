@@ -29,7 +29,9 @@ var (
 
 type readResult struct {
 	data []byte
-	err  error
+	// binary marks a binary stream frame; every other frame is JSON text.
+	binary bool
+	err    error
 }
 
 type liveState struct {
@@ -79,7 +81,7 @@ func (r *Runner) maintain(
 	if logger == nil {
 		logger = slog.New(slog.DiscardHandler)
 	}
-	containers := newContainerStreams(readCtx, r.collectors.Containers, conn, logger.With("portal_id", r.identity.PortalID))
+	containers := newContainerStreams(readCtx, r.collectors.Containers, r.collectors.Files, conn, logger.With("portal_id", r.identity.PortalID))
 	defer containers.close()
 
 	live := liveState{
@@ -103,6 +105,12 @@ func (r *Runner) maintain(
 				return result.err
 			}
 
+			if result.binary {
+				if err := live.containers.handleBinary(readCtx, result.data, portalReject(conn)); err != nil {
+					return err
+				}
+				continue
+			}
 			if err := r.handleWorkingMessage(readCtx, conn, sessionNonce, endpoint, result.data, &live, events); err != nil {
 				return err
 			}
@@ -172,11 +180,7 @@ func startFrameReader(ctx context.Context, conn *websocket.Conn) <-chan readResu
 				sendReadResult(ctx, results, readResult{err: err})
 				return
 			}
-			if messageType != websocket.MessageText {
-				sendReadResult(ctx, results, readResult{err: errors.New("peer sent a non-text protocol message")})
-				return
-			}
-			if !sendReadResult(ctx, results, readResult{data: data}) {
+			if !sendReadResult(ctx, results, readResult{data: data, binary: messageType == websocket.MessageBinary}) {
 				return
 			}
 		}

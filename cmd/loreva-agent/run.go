@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/FroZor/loreva-agent/internal/containerfiles"
 	"github.com/FroZor/loreva-agent/internal/containerio"
 	"github.com/FroZor/loreva-agent/internal/direct"
 	"github.com/FroZor/loreva-agent/internal/dockerapi"
@@ -115,7 +116,7 @@ func runAgent(arguments []string, logger *slog.Logger) error {
 		}
 	}()
 
-	containers, closeContainers := openContainerIO(logger)
+	containers, files, closeContainers := openContainerServices(ctx, logger)
 	defer closeContainers()
 
 	collectors := session.Collectors{
@@ -124,6 +125,7 @@ func runAgent(arguments []string, logger *slog.Logger) error {
 		Metrics:        metricStore,
 		Workloads:      workloadManager,
 		Containers:     containers,
+		Files:          files,
 		Logger:         logger,
 	}
 
@@ -140,6 +142,7 @@ func runAgent(arguments []string, logger *slog.Logger) error {
 				},
 				Workloads:  workloadManager,
 				Containers: containers,
+				Files:      files,
 				Logger:     logger,
 			})
 		})
@@ -153,16 +156,25 @@ func runAgent(arguments []string, logger *slog.Logger) error {
 	return runServices(ctx, services)
 }
 
-// openContainerIO connects container logs and consoles to Docker. Without
-// Docker the node still runs; device requests are then refused.
-func openContainerIO(logger *slog.Logger) (session.ContainerIO, func()) {
+// openContainerServices connects container logs, consoles, and the file
+// manager to Docker. Without Docker the node still runs; device requests
+// are then refused.
+func openContainerServices(ctx context.Context, logger *slog.Logger) (session.ContainerIO, session.ContainerFiles, func()) {
 	engine, err := dockerapi.Connect()
 	if err != nil {
-		logger.Warn("container logs and consoles are unavailable", "error", err)
-		return nil, func() {}
+		logger.Warn("container logs, consoles, and files are unavailable", "error", err)
+		return nil, nil, func() {}
 	}
 
-	return containerio.New(engine), func() {
+	files := containerfiles.New(engine, logger)
+	cleanupCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	if err := files.RemoveStale(cleanupCtx); err != nil {
+		logger.Warn("remove stale file helpers", "error", err)
+	}
+	cancel()
+
+	return containerio.New(engine), files, func() {
+		files.Close()
 		if err := engine.Close(); err != nil {
 			logger.Warn("close Docker client", "error", err)
 		}

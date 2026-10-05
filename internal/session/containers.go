@@ -39,28 +39,33 @@ type ContainerIO interface {
 // write frames, which the WebSocket connection allows concurrently.
 type containerStreams struct {
 	// ctx bounds every goroutine the session starts here.
-	ctx      context.Context
-	cancel   context.CancelFunc
-	io       ContainerIO
-	conn     *websocket.Conn
-	logger   *slog.Logger
-	streams  map[uint32]*outStream
-	finished chan uint32
-	requests chan struct{}
-	commands []time.Time
-	wait     sync.WaitGroup
+	ctx        context.Context
+	cancel     context.CancelFunc
+	io         ContainerIO
+	files      ContainerFiles
+	conn       *websocket.Conn
+	logger     *slog.Logger
+	streams    map[uint32]*outStream
+	uploads    map[uint32]*inStream
+	operations fileOperations
+	finished   chan uint32
+	requests   chan struct{}
+	commands   []time.Time
+	wait       sync.WaitGroup
 }
 
-func newContainerStreams(ctx context.Context, io ContainerIO, conn *websocket.Conn, logger *slog.Logger) *containerStreams {
+func newContainerStreams(ctx context.Context, io ContainerIO, files ContainerFiles, conn *websocket.Conn, logger *slog.Logger) *containerStreams {
 	ctx, cancel := context.WithCancel(ctx)
 
 	return &containerStreams{
 		ctx:      ctx,
 		cancel:   cancel,
 		io:       io,
+		files:    files,
 		conn:     conn,
 		logger:   logger,
 		streams:  make(map[uint32]*outStream),
+		uploads:  make(map[uint32]*inStream),
 		finished: make(chan uint32, protocol.MaxStreamsPerSession),
 		requests: make(chan struct{}, maxContainerRequests),
 	}
@@ -73,8 +78,9 @@ func (c *containerStreams) close() {
 	c.wait.Wait()
 }
 
-// handle serves a container log or console frame. It reports false for any
-// other message type, so every session type routes the same frames here.
+// handle serves a container log, console, or file manager frame. It reports
+// false for any other message type, so every session type routes the same
+// frames here.
 func (c *containerStreams) handle(ctx context.Context, messageType string, data []byte, reject rejectFunc) (bool, error) {
 	switch messageType {
 	case protocol.ContainerLogsOpenType:
@@ -88,13 +94,14 @@ func (c *containerStreams) handle(ctx context.Context, messageType string, data 
 	case protocol.ContainerConsoleSendType:
 		return true, c.handleConsoleSend(ctx, data, reject)
 	default:
-		return false, nil
+		return c.handleFile(ctx, messageType, data, reject)
 	}
 }
 
 // streamFinished forgets a stream whose goroutine has ended.
 func (c *containerStreams) streamFinished(id uint32) {
 	delete(c.streams, id)
+	delete(c.uploads, id)
 }
 
 func (c *containerStreams) handleLogsOpen(ctx context.Context, data []byte, reject rejectFunc) error {
@@ -102,17 +109,11 @@ func (c *containerStreams) handleLogsOpen(ctx context.Context, data []byte, reje
 	if err := protocol.DecodeStrict(data, &request); err != nil || !agentcrypto.ValidUUID(request.RequestID) {
 		return reject(ctx, "", "invalid_message", "container.logs.open does not match the protocol")
 	}
-	if request.StreamID == 0 || request.StreamID > protocol.MaxStreamID {
-		return reject(ctx, request.RequestID, "invalid_stream_id", "stream_id must be between 1 and 2147483647")
-	}
 	if c.io == nil {
 		return reject(ctx, request.RequestID, "containers_unavailable", "this node has no container runtime")
 	}
-	if _, exists := c.streams[request.StreamID]; exists {
-		return reject(ctx, request.RequestID, "stream_id_in_use", "stream_id is already open")
-	}
-	if len(c.streams) >= protocol.MaxStreamsPerSession {
-		return reject(ctx, request.RequestID, "too_many_streams", fmt.Sprintf("at most %d streams can be open", protocol.MaxStreamsPerSession))
+	if code, message := c.newStreamProblem(request.StreamID); code != "" {
+		return reject(ctx, request.RequestID, code, message)
 	}
 
 	options := containerio.LogOptions{Tail: request.Tail, Follow: request.Follow, Timestamps: request.Timestamps}
@@ -199,6 +200,9 @@ func (c *containerStreams) handleClose(ctx context.Context, data []byte, reject 
 
 	if stream, ok := c.streams[closing.StreamID]; ok {
 		stream.cancel()
+	}
+	if upload, ok := c.uploads[closing.StreamID]; ok {
+		upload.cancel()
 	}
 
 	return nil
@@ -315,7 +319,7 @@ func (c *containerStreams) endRequest() {
 }
 
 func (c *containerStreams) writeError(ctx context.Context, requestID string, err error) {
-	code, message := containerErrorCode(err)
+	code, message := fileErrorCode(err)
 	c.writeFrame(ctx, protocol.Error{Type: protocol.ErrorType, RequestID: requestID, Code: code, Message: boundedMessage(message)})
 }
 
@@ -327,11 +331,18 @@ func (c *containerStreams) writeFrame(ctx context.Context, frame any) bool {
 }
 
 func (c *containerStreams) writeChunk(ctx context.Context, id uint32, source containerio.Stream, data []byte) error {
-	frame := make([]byte, protocol.StreamFrameHeaderBytes+len(data))
-	frame[0] = protocol.StreamChannelStdout
+	channel := byte(protocol.StreamChannelStdout)
 	if source == containerio.Stderr {
-		frame[0] = protocol.StreamChannelStderr
+		channel = protocol.StreamChannelStderr
 	}
+
+	return c.writeBinary(ctx, channel, id, data)
+}
+
+// writeBinary writes one binary stream frame.
+func (c *containerStreams) writeBinary(ctx context.Context, channel byte, id uint32, data []byte) error {
+	frame := make([]byte, protocol.StreamFrameHeaderBytes+len(data))
+	frame[0] = channel
 	binary.BigEndian.PutUint32(frame[1:protocol.StreamFrameHeaderBytes], id)
 	copy(frame[protocol.StreamFrameHeaderBytes:], data)
 

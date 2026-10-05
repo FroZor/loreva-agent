@@ -53,7 +53,25 @@
     { "$ref": "#/$defs/containerConsoleInfo" },
     { "$ref": "#/$defs/containerConsoleInfoResult" },
     { "$ref": "#/$defs/containerConsoleSend" },
-    { "$ref": "#/$defs/containerConsoleSendResult" }
+    { "$ref": "#/$defs/containerConsoleSendResult" },
+    { "$ref": "#/$defs/fsList" },
+    { "$ref": "#/$defs/fsListResult" },
+    { "$ref": "#/$defs/fsPathRequest" },
+    { "$ref": "#/$defs/fsStatResult" },
+    { "$ref": "#/$defs/fsChmod" },
+    { "$ref": "#/$defs/fsRename" },
+    { "$ref": "#/$defs/fsDelete" },
+    { "$ref": "#/$defs/fsCopy" },
+    { "$ref": "#/$defs/fsArchive" },
+    { "$ref": "#/$defs/fsExtract" },
+    { "$ref": "#/$defs/fsCancel" },
+    { "$ref": "#/$defs/fsProgress" },
+    { "$ref": "#/$defs/fsResult" },
+    { "$ref": "#/$defs/fsReadOpen" },
+    { "$ref": "#/$defs/fsReadOpened" },
+    { "$ref": "#/$defs/fsWriteOpen" },
+    { "$ref": "#/$defs/fsWriteReady" },
+    { "$ref": "#/$defs/fsWriteResult" }
   ],
   "$defs": {
     "containerId": {
@@ -157,6 +175,255 @@
         "container_id": { "$ref": "#/$defs/containerId" },
         "adapter": { "enum": ["stdin", "rcon", "telnet"] },
         "output": { "type": "string", "maxLength": 8192 }
+      }
+    },
+    "fsPath": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096,
+      "pattern": "^/"
+    },
+    "fsPaths": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 1000,
+      "items": { "$ref": "#/$defs/fsPath" }
+    },
+    "fsEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "type", "size", "mode", "uid", "gid", "modified_at"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "type": { "enum": ["file", "directory", "symlink", "other"] },
+        "size": { "type": "integer", "minimum": 0 },
+        "mode": { "type": "integer", "minimum": 0, "maximum": 4095 },
+        "uid": { "type": "integer", "minimum": 0 },
+        "gid": { "type": "integer", "minimum": 0 },
+        "modified_at": { "$ref": "#/$defs/timestamp" },
+        "link_target": { "type": "string" },
+        "version": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "mount": { "type": "boolean" },
+        "virtual": { "type": "boolean" },
+        "read_only": { "type": "boolean" }
+      }
+    },
+    "fsList": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "request_id", "container_id", "path"],
+      "properties": {
+        "type": { "const": "fs.list" },
+        "request_id": { "$ref": "#/$defs/uuid" },
+        "container_id": { "$ref": "#/$defs/containerId" },
+        "path": { "$ref": "#/$defs/fsPath" },
+        "after": { "type": "string", "minLength": 1, "maxLength": 4096 }
+      }
+    },
+    "fsListResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "request_id", "container_id", "path", "entries", "more"],
+      "properties": {
+        "type": { "const": "fs.list.result" },
+        "request_id": { "$ref": "#/$defs/uuid" },
+        "container_id": { "$ref": "#/$defs/containerId" },
+        "path": { "$ref": "#/$defs/fsPath" },
+        "entries": { "type": "array", "maxItems": 500, "items": { "$ref": "#/$defs/fsEntry" } },
+        "more": { "type": "boolean" }
+      }
+    },
+    "fsPathRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "request_id", "container_id", "path"],
+      "properties": {
+        "type": { "enum": ["fs.stat", "fs.mkdir"] },
+        "request_id": { "$ref": "#/$defs/uuid" },
+        "container_id": { "$ref": "#/$defs/containerId" },
+        "path": { "$ref": "#/$defs/fsPath" }
+      }
+    },
+    "fsStatResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "request_id", "container_id", "entry"],
+      "properties": {
+        "type": { "const": "fs.stat.result" },
+        "request_id": { "$ref": "#/$defs/uuid" },
+        "container_id": { "$ref": "#/$defs/containerId" },
+        "entry": { "$ref": "#/$defs/fsEntry" }
+      }
+    },
+    "fsChmod": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "request_id", "container_id", "path", "mode"],
+      "properties": {
+        "type": { "const": "fs.chmod" },
+        "request_id": { "$ref": "#/$defs/uuid" },
+        "container_id": { "$ref": "#/$defs/containerId" },
+        "path": { "$ref": "#/$defs/fsPath" },
+        "mode": { "type": "integer", "minimum": 0, "maximum": 511 }
+      }
+    },
+    "fsRename": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "request_id", "container_id", "path", "to"],
+      "properties": {
+        "type": { "const": "fs.rename" },
+        "request_id": { "$ref": "#/$defs/uuid" },
+        "container_id": { "$ref": "#/$defs/containerId" },
+        "path": { "$ref": "#/$defs/fsPath" },
+        "to": { "$ref": "#/$defs/fsPath" }
+      }
+    },
+    "fsDelete": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "request_id", "container_id", "paths"],
+      "properties": {
+        "type": { "const": "fs.delete" },
+        "request_id": { "$ref": "#/$defs/uuid" },
+        "container_id": { "$ref": "#/$defs/containerId" },
+        "paths": { "$ref": "#/$defs/fsPaths" }
+      }
+    },
+    "fsCopy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "request_id", "container_id", "paths", "to"],
+      "properties": {
+        "type": { "const": "fs.copy" },
+        "request_id": { "$ref": "#/$defs/uuid" },
+        "container_id": { "$ref": "#/$defs/containerId" },
+        "paths": { "$ref": "#/$defs/fsPaths" },
+        "to": { "$ref": "#/$defs/fsPath" }
+      }
+    },
+    "fsArchive": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "request_id", "container_id", "paths", "to", "format"],
+      "properties": {
+        "type": { "const": "fs.archive" },
+        "request_id": { "$ref": "#/$defs/uuid" },
+        "container_id": { "$ref": "#/$defs/containerId" },
+        "paths": { "$ref": "#/$defs/fsPaths" },
+        "to": { "$ref": "#/$defs/fsPath" },
+        "format": { "enum": ["zip", "tar.gz"] }
+      }
+    },
+    "fsExtract": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "request_id", "container_id", "path", "to"],
+      "properties": {
+        "type": { "const": "fs.extract" },
+        "request_id": { "$ref": "#/$defs/uuid" },
+        "container_id": { "$ref": "#/$defs/containerId" },
+        "path": { "$ref": "#/$defs/fsPath" },
+        "to": { "$ref": "#/$defs/fsPath" }
+      }
+    },
+    "fsCancel": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "request_id"],
+      "properties": {
+        "type": { "const": "fs.cancel" },
+        "request_id": { "$ref": "#/$defs/uuid" }
+      }
+    },
+    "fsProgress": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "request_id", "items", "bytes"],
+      "properties": {
+        "type": { "const": "fs.progress" },
+        "request_id": { "$ref": "#/$defs/uuid" },
+        "items": { "type": "integer", "minimum": 0 },
+        "bytes": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "fsResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "request_id", "container_id", "items", "bytes", "skipped"],
+      "properties": {
+        "type": { "const": "fs.result" },
+        "request_id": { "$ref": "#/$defs/uuid" },
+        "container_id": { "$ref": "#/$defs/containerId" },
+        "entry": { "$ref": "#/$defs/fsEntry" },
+        "entries": { "type": "array", "maxItems": 1000, "items": { "$ref": "#/$defs/fsEntry" } },
+        "items": { "type": "integer", "minimum": 0 },
+        "bytes": { "type": "integer", "minimum": 0 },
+        "skipped": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "fsReadOpen": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "request_id", "stream_id", "container_id", "path", "offset"],
+      "properties": {
+        "type": { "const": "fs.read.open" },
+        "request_id": { "$ref": "#/$defs/uuid" },
+        "stream_id": { "$ref": "#/$defs/streamId" },
+        "container_id": { "$ref": "#/$defs/containerId" },
+        "path": { "$ref": "#/$defs/fsPath" },
+        "offset": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "fsReadOpened": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "request_id", "stream_id", "entry", "offset", "archive"],
+      "properties": {
+        "type": { "const": "fs.read.opened" },
+        "request_id": { "$ref": "#/$defs/uuid" },
+        "stream_id": { "$ref": "#/$defs/streamId" },
+        "entry": { "$ref": "#/$defs/fsEntry" },
+        "offset": { "type": "integer", "minimum": 0 },
+        "archive": { "type": "boolean" }
+      }
+    },
+    "fsWriteOpen": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "request_id", "stream_id", "container_id", "path", "size", "sha256"],
+      "properties": {
+        "type": { "const": "fs.write.open" },
+        "request_id": { "$ref": "#/$defs/uuid" },
+        "stream_id": { "$ref": "#/$defs/streamId" },
+        "container_id": { "$ref": "#/$defs/containerId" },
+        "path": { "$ref": "#/$defs/fsPath" },
+        "size": { "type": "integer", "minimum": 0 },
+        "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "expected_version": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "mode": { "type": "integer", "minimum": 1, "maximum": 511 }
+      }
+    },
+    "fsWriteReady": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "request_id", "stream_id", "offset"],
+      "properties": {
+        "type": { "const": "fs.write.ready" },
+        "request_id": { "$ref": "#/$defs/uuid" },
+        "stream_id": { "$ref": "#/$defs/streamId" },
+        "offset": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "fsWriteResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "request_id", "stream_id", "entry"],
+      "properties": {
+        "type": { "const": "fs.write.result" },
+        "request_id": { "$ref": "#/$defs/uuid" },
+        "stream_id": { "$ref": "#/$defs/streamId" },
+        "entry": { "$ref": "#/$defs/fsEntry" }
       }
     },
     "uuid": {

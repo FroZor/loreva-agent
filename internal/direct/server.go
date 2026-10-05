@@ -77,7 +77,9 @@ type Options struct {
 	Workloads session.WorkloadController
 	// Containers may be nil when the node has no container runtime.
 	Containers session.ContainerIO
-	Logger     *slog.Logger
+	// Files may be nil when the node has no container runtime.
+	Files  session.ContainerFiles
+	Logger *slog.Logger
 }
 
 // localNode is the validated form of state.Node.

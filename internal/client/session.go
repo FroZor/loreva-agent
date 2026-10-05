@@ -3,6 +3,7 @@ package client
 import (
 	"context"
 	"crypto/tls"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -165,6 +166,17 @@ func (s *Session) Write(ctx context.Context, frame []byte) error {
 	}
 
 	return s.conn.Write(ctx, websocket.MessageText, frame)
+}
+
+// WriteStream sends one binary stream frame: the channel byte, the
+// big-endian stream ID, then the data.
+func (s *Session) WriteStream(ctx context.Context, channel byte, streamID uint32, data []byte) error {
+	frame := make([]byte, 5+len(data))
+	frame[0] = channel
+	binary.BigEndian.PutUint32(frame[1:5], streamID)
+	copy(frame[5:], data)
+
+	return s.conn.Write(ctx, websocket.MessageBinary, frame)
 }
 
 // WriteJSON encodes value and sends it as one frame.

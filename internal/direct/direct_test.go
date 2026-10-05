@@ -36,6 +36,7 @@ type testNode struct {
 	stateDir   string
 	workloads  *fakeWorkloads
 	containers *fakeContainers
+	files      *fakeFiles
 }
 
 // fakeWorkloads records what device sessions hand to the workload runtime.
@@ -132,6 +133,7 @@ func startNode(t *testing.T) *testNode {
 
 	workloads := newFakeWorkloads()
 	containers := &fakeContainers{}
+	files := newFakeFiles(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
@@ -140,6 +142,7 @@ func startNode(t *testing.T) *testNode {
 			Collectors: testCollectors(t),
 			Workloads:  workloads,
 			Containers: containers,
+			Files:      files,
 		})
 	}()
 	t.Cleanup(func() {
@@ -149,7 +152,7 @@ func startNode(t *testing.T) *testNode {
 		}
 	})
 
-	return &testNode{node: node, stateDir: store.Dir(), workloads: workloads, containers: containers}
+	return &testNode{node: node, stateDir: store.Dir(), workloads: workloads, containers: containers, files: files}
 }
 
 // dialControl waits for the control socket of a starting node.

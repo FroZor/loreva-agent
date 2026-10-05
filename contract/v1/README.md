@@ -282,6 +282,36 @@ A command is one line of 1 to 1024 bytes of UTF-8 text without control character
 
 Errors carry the request's `request_id` and one of these codes: `invalid_container_id`, `container_not_found`, `container_not_running`, `console_unavailable`, `console_misconfigured`, `console_unreachable`, `console_auth_failed`, `invalid_command`, `rate_limited`, `busy`, `containers_unavailable`, `invalid_stream_id`, `stream_id_in_use`, `too_many_streams`, `container_io_failed`.
 
+### Files in container volumes
+
+The file manager works inside one container, named by `container_id` like the log and console requests, and is served identically on device and portal sessions. It reaches the container's volumes and mounted folders, and nothing else: no file of the node, of another container, or of the container's image. Paths are absolute paths as the container sees them, such as `/data/server.properties`.
+
+The node itself has no access to Docker's data. For each container with the file manager open it asks Docker for a helper container that shares only that container's volumes (`--volumes-from`), has no network, a read-only root file system, `no-new-privileges`, 256 MiB of memory, 64 processes, and only the capabilities `CHOWN`, `DAC_OVERRIDE`, and `FOWNER`. The helper runs the agent's own binary (`loreva-agent files-helper`) from a local image `loreva-agent-files:<digest>` imported from that binary, so nothing is downloaded. Inside the helper every access goes through a directory handle per mount (Go `os.Root`), so neither `..` nor a symbolic link leads out of a mount, even one pointing at `/etc`. The helper works whether the container runs or is stopped, stops after 2 minutes without requests, and Docker removes it. Helpers carry the label `dev.loreva.role=files-helper`; the agent removes leftovers when it starts.
+
+| Request | Answer | Use |
+| --- | --- | --- |
+| `fs.list` `path`, `after` | `fs.list.result` | One page of up to 500 entries sorted by name; `more` means the next page starts `after` the last name. `/` and other folders above the mounts list only the folders that lead to mounts (`virtual`) |
+| `fs.stat` `path` | `fs.stat.result` | One entry, without following a final symbolic link |
+| `fs.mkdir` `path` | `fs.result` | New folder |
+| `fs.rename` `path`, `to` | `fs.result` | Rename or move within one volume; an existing `to` is refused with `already_exists`, a move to another volume with `cross_device` |
+| `fs.chmod` `path`, `mode` | `fs.result` | Permission bits 0 to 0777 (511) |
+| `fs.delete` `paths` | `fs.progress`, `fs.result` | Remove files and folders with their content |
+| `fs.copy` `paths`, `to` | `fs.progress`, `fs.result` | Copy into the folder `to`, also into another volume (paste). A taken name gets ` (1)`, ` (2)`, … before the extension; `entries` are the copies |
+| `fs.archive` `paths`, `to`, `format` | `fs.progress`, `fs.result` | Pack into a new `zip` or `tar.gz` file `to`, to download a large folder as one file |
+| `fs.extract` `path`, `to` | `fs.progress`, `fs.result` | Unpack a zip, tar, or tar.gz archive into the folder `to` |
+| `fs.read.open` `path`, `offset`, `stream_id` | `fs.read.opened`, then data | Download a file from `offset`, or a folder as an uncompressed tar stream (`archive` true) |
+| `fs.write.open` `path`, `size`, `sha256`, `stream_id` | `fs.write.ready`, then `fs.write.result` | Upload or save a file |
+
+`paths` of one request (1 to 1000) must be in one folder. Every entry has `name`, `type` (`file`, `directory`, `symlink`, `other`), `size`, `mode` (permission bits as a number, 0644 is 420), `uid`, `gid`, `modified_at`, and, where they apply, `link_target`, `version`, `mount` (the root of a volume), `virtual`, and `read_only` (the volume is mounted read-only). Mount roots cannot be renamed, deleted, or replaced (`mount_root`), and read-only mounts refuse every change (`read_only`).
+
+**Long operations.** `fs.delete`, `fs.copy`, `fs.archive`, and `fs.extract` report `fs.progress` (`items` and `bytes` done) up to four times a second and end with `fs.result` carrying the totals and `skipped`: objects the format cannot hold or that were left alone. `fs.cancel` with the operation's `request_id` stops it; it then ends with `error` `cancelled`. At most 4 run at once per session. An archive is written to a temporary file next to `to` and renamed into place when complete; a zip leaves out symbolic links and special files, a tar.gz keeps symbolic links. Extraction creates only folders and regular files, never overwrites an existing file (it counts it in `skipped`), ignores names that are absolute or climb out with `..`, drops set-user-ID and set-group-ID bits, and stops at 100000 entries or 64 GiB (`too_large`). New files and folders get the owner of the folder they are created in, and copies keep the owner of their source, so a server running as an unprivileged user can still change them.
+
+**Download.** The content arrives as binary frames on channel 3 of `stream_id`, with the same layout, 2 MiB window, `stream.credit`, and `stream.close` as a log stream. A download sends exactly the `size` of `fs.read.opened`'s entry minus `offset`; to resume an interrupted download, open it again with `offset` set to the bytes already received and check that `version` did not change.
+
+**Upload and editing.** `fs.write.open` announces `size` and the lowercase hex SHA-256 of the whole file. `expected_version` makes the write fail with `version_conflict` unless the file still has that `version`; this is how an editor saves without overwriting a change made meanwhile (open the file, keep its `version`, save with it). `absent` requires that no file exists yet. `mode` (1 to 0777) applies to a new file; a replaced file keeps its mode and owner. After `fs.write.ready` the device sends the content from `offset` in binary frames on channel 3 of `stream_id`, 1 to 32768 bytes each; the device may have up to 2 MiB sent and not yet credited, and the node returns `stream.credit` as it stores data. The node writes into a partial file next to the target, checks the SHA-256, and renames it over the target, so the old file stays intact until the new one is complete; a mismatch fails with `checksum_mismatch`. If the connection breaks, the partial file stays, and the same upload (same path, size, and SHA-256) resumes at the `offset` `fs.write.ready` reports. Abandoned partial files are removed after 7 days. A device cancels an upload with `stream.close` `cancelled`; no data for 30 seconds fails it with `upload_timeout`.
+
+Errors carry the request's `request_id` and one of these codes, in addition to those of logs and consoles: `no_volumes`, `files_unavailable`, `invalid_request`, `invalid_path`, `outside_mounts`, `mount_root`, `not_found`, `already_exists`, `not_a_directory`, `is_a_directory`, `not_regular_file`, `not_empty`, `permission_denied`, `read_only`, `cross_device`, `version_conflict`, `checksum_mismatch`, `too_large`, `no_space`, `unsupported_format`, `upload_timeout`, `invalid_credit`, `cancelled`, `failed`. A failed download ends with `stream.close` `failed` and one of these codes.
+
 ## Metric units
 
 - Node CPU (`cpu.total.usage_percent`, `cpu.logical[].usage_percent`) is a share of the whole machine or of one logical CPU: 0 to 100.
@@ -307,7 +337,7 @@ The store lives in `metrics/` in the agent's state directory as DEFLATE-compress
 
 ## Rules outside JSON Schema
 
-- Frames carry JSON in text frames. The only binary frames are the node's stream data described in [Container logs and consoles](#container-logs-and-consoles); the portal and devices send text frames only. JSON is strict: unknown fields, duplicate keys, trailing data, and multiple values are rejected.
+- Frames carry JSON in text frames. The only binary frames are stream data: the node's log and download data described in [Container logs and consoles](#container-logs-and-consoles), and upload data on channel 3 described in [Files in container volumes](#files-in-container-volumes). JSON is strict: unknown fields, duplicate keys, trailing data, and multiple values are rejected.
 - The normal inbound frame limit is 64 KiB. Node reports are bounded to 512 KiB, and their collected snapshot is bounded to 480 KiB.
 - Challenge expiry, JWS signatures and claims, certificate validation, source expiry and URL canonicalization, monotonic source generations, request correlation, enrollment idempotency, workload ownership, plan approvals, and retry state are semantic checks performed by the implementations.
 - A workload command is bound to the current `connect.challenge` nonce, exact portal and node identities, a maximum 60-second lifetime, and at most 30 seconds of positive clock skew.

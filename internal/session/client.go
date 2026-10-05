@@ -92,6 +92,9 @@ type Collectors struct {
 	// Containers serves container logs and consoles; it may be nil when
 	// the node has no container runtime.
 	Containers ContainerIO
+	// Files serves the file manager in container volumes; it may be nil
+	// when the node has no container runtime.
+	Files ContainerFiles
 	// Logger receives the audit log of console commands; nil discards it.
 	Logger *slog.Logger
 }

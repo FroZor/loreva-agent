@@ -81,7 +81,7 @@ func ServeDevice(ctx context.Context, conn *websocket.Conn, config DeviceConfig)
 		conn:        conn,
 		exchange:    data,
 		uploadTimer: uploadTimer,
-		containers:  newContainerStreams(readCtx, config.Collectors.Containers, conn, config.Logger),
+		containers:  newContainerStreams(readCtx, config.Collectors.Containers, config.Collectors.Files, conn, config.Logger),
 	}
 	defer session.cancelUpload()
 	defer session.containers.close()
@@ -100,6 +100,12 @@ func ServeDevice(ctx context.Context, conn *websocket.Conn, config DeviceConfig)
 				return result.err
 			}
 
+			if result.binary {
+				if err := session.containers.handleBinary(readCtx, result.data, session.reject); err != nil {
+					return err
+				}
+				continue
+			}
 			if err := session.handle(readCtx, result.data, events); err != nil {
 				return err
 			}
