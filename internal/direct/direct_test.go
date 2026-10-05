@@ -32,9 +32,10 @@ import (
 const testTimeout = 30 * time.Second
 
 type testNode struct {
-	node      *state.Node
-	stateDir  string
-	workloads *fakeWorkloads
+	node       *state.Node
+	stateDir   string
+	workloads  *fakeWorkloads
+	containers *fakeContainers
 }
 
 // fakeWorkloads records what device sessions hand to the workload runtime.
@@ -130,6 +131,7 @@ func startNode(t *testing.T) *testNode {
 	}
 
 	workloads := newFakeWorkloads()
+	containers := &fakeContainers{}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
@@ -137,6 +139,7 @@ func startNode(t *testing.T) *testNode {
 			Version:    "test",
 			Collectors: testCollectors(t),
 			Workloads:  workloads,
+			Containers: containers,
 		})
 	}()
 	t.Cleanup(func() {
@@ -146,7 +149,7 @@ func startNode(t *testing.T) *testNode {
 		}
 	})
 
-	return &testNode{node: node, stateDir: store.Dir(), workloads: workloads}
+	return &testNode{node: node, stateDir: store.Dir(), workloads: workloads, containers: containers}
 }
 
 // dialControl waits for the control socket of a starting node.

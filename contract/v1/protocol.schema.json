@@ -45,9 +45,120 @@
     { "$ref": "#/$defs/artifactUploadResult" },
     { "$ref": "#/$defs/metricsRollup" },
     { "$ref": "#/$defs/metricsQuery" },
-    { "$ref": "#/$defs/metricsQueryResult" }
+    { "$ref": "#/$defs/metricsQueryResult" },
+    { "$ref": "#/$defs/containerLogsOpen" },
+    { "$ref": "#/$defs/containerLogsOpened" },
+    { "$ref": "#/$defs/streamCredit" },
+    { "$ref": "#/$defs/streamClose" },
+    { "$ref": "#/$defs/containerConsoleInfo" },
+    { "$ref": "#/$defs/containerConsoleInfoResult" },
+    { "$ref": "#/$defs/containerConsoleSend" },
+    { "$ref": "#/$defs/containerConsoleSendResult" }
   ],
   "$defs": {
+    "containerId": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "streamId": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 2147483647
+    },
+    "consoleAdapter": {
+      "enum": ["stdin", "rcon", "telnet", "none"]
+    },
+    "containerLogsOpen": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "request_id", "stream_id", "container_id", "tail", "follow", "timestamps"],
+      "properties": {
+        "type": { "const": "container.logs.open" },
+        "request_id": { "$ref": "#/$defs/uuid" },
+        "stream_id": { "$ref": "#/$defs/streamId" },
+        "container_id": { "$ref": "#/$defs/containerId" },
+        "tail": { "type": "integer", "minimum": 0, "maximum": 10000 },
+        "since": { "$ref": "#/$defs/timestamp" },
+        "follow": { "type": "boolean" },
+        "timestamps": { "type": "boolean" }
+      }
+    },
+    "containerLogsOpened": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "request_id", "stream_id", "tty"],
+      "properties": {
+        "type": { "const": "container.logs.opened" },
+        "request_id": { "$ref": "#/$defs/uuid" },
+        "stream_id": { "$ref": "#/$defs/streamId" },
+        "tty": { "type": "boolean" }
+      }
+    },
+    "streamCredit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "stream_id", "bytes"],
+      "properties": {
+        "type": { "const": "stream.credit" },
+        "stream_id": { "$ref": "#/$defs/streamId" },
+        "bytes": { "type": "integer", "minimum": 1, "maximum": 2097152 }
+      }
+    },
+    "streamClose": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "stream_id", "reason"],
+      "properties": {
+        "type": { "const": "stream.close" },
+        "stream_id": { "$ref": "#/$defs/streamId" },
+        "reason": { "enum": ["ended", "failed", "cancelled"] },
+        "code": { "$ref": "#/$defs/errorCode" }
+      }
+    },
+    "containerConsoleInfo": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "request_id", "container_id"],
+      "properties": {
+        "type": { "const": "container.console.info" },
+        "request_id": { "$ref": "#/$defs/uuid" },
+        "container_id": { "$ref": "#/$defs/containerId" }
+      }
+    },
+    "containerConsoleInfoResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "request_id", "container_id", "adapter"],
+      "properties": {
+        "type": { "const": "container.console.info.result" },
+        "request_id": { "$ref": "#/$defs/uuid" },
+        "container_id": { "$ref": "#/$defs/containerId" },
+        "adapter": { "$ref": "#/$defs/consoleAdapter" }
+      }
+    },
+    "containerConsoleSend": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "request_id", "container_id", "command"],
+      "properties": {
+        "type": { "const": "container.console.send" },
+        "request_id": { "$ref": "#/$defs/uuid" },
+        "container_id": { "$ref": "#/$defs/containerId" },
+        "command": { "type": "string", "minLength": 1, "maxLength": 1024 }
+      }
+    },
+    "containerConsoleSendResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "request_id", "container_id", "adapter", "output"],
+      "properties": {
+        "type": { "const": "container.console.send.result" },
+        "request_id": { "$ref": "#/$defs/uuid" },
+        "container_id": { "$ref": "#/$defs/containerId" },
+        "adapter": { "enum": ["stdin", "rcon", "telnet"] },
+        "output": { "type": "string", "maxLength": 8192 }
+      }
+    },
     "uuid": {
       "type": "string",
       "format": "uuid"

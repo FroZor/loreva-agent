@@ -147,6 +147,17 @@ func (s *Session) Read(ctx context.Context) ([]byte, error) {
 	return wsframe.ReadRawJSON(ctx, s.conn)
 }
 
+// ReadFrame returns the next frame. A binary frame carries stream data:
+// a channel byte, the big-endian stream ID, then the data.
+func (s *Session) ReadFrame(ctx context.Context) (isBinary bool, data []byte, err error) {
+	messageType, data, err := s.conn.Read(ctx)
+	if err != nil {
+		return false, nil, err
+	}
+
+	return messageType == websocket.MessageBinary, data, nil
+}
+
 // Write sends one JSON frame to the node. The node validates it strictly.
 func (s *Session) Write(ctx context.Context, frame []byte) error {
 	if !json.Valid(frame) {

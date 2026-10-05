@@ -45,7 +45,9 @@ type DeviceConfig struct {
 	// WorkloadResults carries responses to commands of the node's devices.
 	WorkloadResults <-chan any
 	Devices         DeviceDirectory
-	Logger          *slog.Logger
+	// Containers may be nil when the node has no container runtime.
+	Containers ContainerIO
+	Logger     *slog.Logger
 }
 
 // ServeDevice runs the node protocol for one paired device until the device
@@ -76,8 +78,15 @@ func ServeDevice(ctx context.Context, conn *websocket.Conn, config DeviceConfig)
 	uploadTimer := newStoppedTimer()
 	defer uploadTimer.Stop()
 
-	session := &deviceSession{config: config, conn: conn, exchange: data, uploadTimer: uploadTimer}
+	session := &deviceSession{
+		config:      config,
+		conn:        conn,
+		exchange:    data,
+		uploadTimer: uploadTimer,
+		containers:  newContainerStreams(readCtx, config.Containers, conn, config.Logger),
+	}
 	defer session.cancelUpload()
+	defer session.containers.close()
 
 	events := Events{ReportRejected: func(rejection NodeReportRejection) {
 		config.Logger.Warn("device rejected a node report", "type", rejection.Type, "code", rejection.Code)
@@ -96,6 +105,8 @@ func ServeDevice(ctx context.Context, conn *websocket.Conn, config DeviceConfig)
 			if err := session.handle(readCtx, result.data, events); err != nil {
 				return err
 			}
+		case id := <-session.containers.finished:
+			session.containers.streamFinished(id)
 		case response := <-config.WorkloadResults:
 			if err := writeDeviceFrame(readCtx, conn, response); err != nil {
 				return fmt.Errorf("write workload response: %w", err)
@@ -142,6 +153,7 @@ type deviceSession struct {
 	exchange    *exchange
 	upload      *artifactUpload
 	uploadTimer *time.Timer
+	containers  *containerStreams
 }
 
 // artifactUpload streams announced chunks into the workload artifact cache.
@@ -183,6 +195,16 @@ func (s *deviceSession) handle(ctx context.Context, data []byte, events Events) 
 		return s.handleUploadRequest(ctx, data)
 	case protocol.ArtifactUploadChunkType:
 		return s.handleUploadChunk(ctx, data)
+	case protocol.ContainerLogsOpenType:
+		return s.containers.handleLogsOpen(ctx, data, s.reject)
+	case protocol.StreamCreditType:
+		return s.containers.handleCredit(ctx, data, s.reject)
+	case protocol.StreamCloseType:
+		return s.containers.handleClose(ctx, data, s.reject)
+	case protocol.ContainerConsoleInfoType:
+		return s.containers.handleConsoleInfo(ctx, data, s.reject)
+	case protocol.ContainerConsoleSendType:
+		return s.containers.handleConsoleSend(ctx, data, s.reject)
 	default:
 		return s.reject(ctx, "", "unsupported_message", "unsupported message type "+messageType)
 	}

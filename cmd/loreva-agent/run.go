@@ -13,7 +13,9 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/FroZor/loreva-agent/internal/containerio"
 	"github.com/FroZor/loreva-agent/internal/direct"
+	"github.com/FroZor/loreva-agent/internal/dockerapi"
 	"github.com/FroZor/loreva-agent/internal/metrics"
 	"github.com/FroZor/loreva-agent/internal/metricstore"
 	"github.com/FroZor/loreva-agent/internal/networkinfo"
@@ -113,6 +115,9 @@ func runAgent(arguments []string, logger *slog.Logger) error {
 		}
 	}()
 
+	containers, closeContainers := openContainerIO(logger)
+	defer closeContainers()
+
 	collectors := session.Collectors{
 		Specifications: specifications.Collect,
 		Network:        networkinfo.Collect,
@@ -131,8 +136,9 @@ func runAgent(arguments []string, logger *slog.Logger) error {
 					Network:        collectors.Network,
 					Metrics:        collectors.Metrics,
 				},
-				Workloads: workloadManager,
-				Logger:    logger,
+				Workloads:  workloadManager,
+				Containers: containers,
+				Logger:     logger,
 			})
 		})
 	}
@@ -143,6 +149,22 @@ func runAgent(arguments []string, logger *slog.Logger) error {
 	}
 
 	return runServices(ctx, services)
+}
+
+// openContainerIO connects container logs and consoles to Docker. Without
+// Docker the node still runs; device requests are then refused.
+func openContainerIO(logger *slog.Logger) (session.ContainerIO, func()) {
+	engine, err := dockerapi.Connect()
+	if err != nil {
+		logger.Warn("container logs and consoles are unavailable", "error", err)
+		return nil, func() {}
+	}
+
+	return containerio.New(engine), func() {
+		if err := engine.Close(); err != nil {
+			logger.Warn("close Docker client", "error", err)
+		}
+	}
 }
 
 // runServices runs services until the first one returns, then stops the rest.

@@ -354,6 +354,14 @@ func contractMessageTypes() map[string]string {
 		"metricsRollup":              MetricsRollupType,
 		"metricsQuery":               MetricsQueryType,
 		"metricsQueryResult":         MetricsQueryResultType,
+		"containerLogsOpen":          ContainerLogsOpenType,
+		"containerLogsOpened":        ContainerLogsOpenedType,
+		"streamCredit":               StreamCreditType,
+		"streamClose":                StreamCloseType,
+		"containerConsoleInfo":       ContainerConsoleInfoType,
+		"containerConsoleInfoResult": ContainerConsoleInfoResultType,
+		"containerConsoleSend":       ContainerConsoleSendType,
+		"containerConsoleSendResult": ContainerConsoleSendResultType,
 	}
 }
 
@@ -378,6 +386,14 @@ func contractDTOs() map[string]reflect.Type {
 		"metricRollupSeries":             reflect.TypeFor[MetricRollupSeries](),
 		"metricsRollup":                  reflect.TypeFor[MetricsRollupReport](),
 		"metricsQuery":                   reflect.TypeFor[MetricsQuery](),
+		"containerLogsOpen":              reflect.TypeFor[ContainerLogsOpen](),
+		"containerLogsOpened":            reflect.TypeFor[ContainerLogsOpened](),
+		"streamCredit":                   reflect.TypeFor[StreamCredit](),
+		"streamClose":                    reflect.TypeFor[StreamClose](),
+		"containerConsoleInfo":           reflect.TypeFor[ContainerConsoleInfo](),
+		"containerConsoleInfoResult":     reflect.TypeFor[ContainerConsoleInfoResult](),
+		"containerConsoleSend":           reflect.TypeFor[ContainerConsoleSend](),
+		"containerConsoleSendResult":     reflect.TypeFor[ContainerConsoleSendResult](),
 		"metricsSampleRecord":            reflect.TypeFor[MetricsSampleRecord](),
 		"metricsItem":                    reflect.TypeFor[MetricsItem](),
 		"metricsQueryResult":             reflect.TypeFor[MetricsQueryResult](),
@@ -483,6 +499,7 @@ func canonicalContractMessages() []any {
 	now := time.Date(2030, time.January, 2, 3, 4, 5, 0, time.UTC)
 	requestID := "2ab9d734-7434-4cdf-bca4-6ce7a46cdd65"
 	limitCores := 2.0
+	containerID := strings.Repeat("ab", 32)
 	nodeID := "65a1876f-a715-45fc-9ac0-e4bc31067059"
 	portalID := "d1b181c1-52ec-4d55-b2c9-b1428305b294"
 	pin := base64.StdEncoding.EncodeToString(make([]byte, 32))
@@ -610,6 +627,21 @@ func canonicalContractMessages() []any {
 		ArtifactUploadChunk{Type: ArtifactUploadChunkType, RequestID: requestID, Offset: 0, Data: "AAAA"},
 		ArtifactUploadResult{Type: ArtifactUploadResultType, RequestID: requestID, State: ArtifactStored},
 		ArtifactUploadResult{Type: ArtifactUploadResultType, RequestID: requestID, State: ArtifactRejected, Code: "invalid_artifact"},
+		ContainerLogsOpen{
+			Type: ContainerLogsOpenType, RequestID: requestID, StreamID: 1, ContainerID: containerID,
+			Tail: 500, Since: &now, Follow: true, Timestamps: true,
+		},
+		ContainerLogsOpened{Type: ContainerLogsOpenedType, RequestID: requestID, StreamID: 1, TTY: true},
+		StreamCredit{Type: StreamCreditType, StreamID: 1, Bytes: MaxStreamChunkBytes},
+		StreamClose{Type: StreamCloseType, StreamID: 1, Reason: StreamFailed, Code: "container_not_found"},
+		StreamClose{Type: StreamCloseType, StreamID: 1, Reason: StreamCancelled},
+		ContainerConsoleInfo{Type: ContainerConsoleInfoType, RequestID: requestID, ContainerID: containerID},
+		ContainerConsoleInfoResult{Type: ContainerConsoleInfoResultType, RequestID: requestID, ContainerID: containerID, Adapter: "rcon"},
+		ContainerConsoleSend{Type: ContainerConsoleSendType, RequestID: requestID, ContainerID: containerID, Command: "list"},
+		ContainerConsoleSendResult{
+			Type: ContainerConsoleSendResultType, RequestID: requestID, ContainerID: containerID,
+			Adapter: "rcon", Output: "There are 0 of a max of 20 players online",
+		},
 		MetricsRollupReport{
 			Type: MetricsRollupType, SchemaVersion: MetricsSchemaVersion, RequestID: requestID, StreamID: portalID,
 			Metric: MetricRollupSeries{Type: MetricTypeNode, Points: []MetricRollup{rollup}},

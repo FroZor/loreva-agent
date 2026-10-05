@@ -264,6 +264,7 @@ func (s *sessions) serveDevice(ctx context.Context, conn *websocket.Conn, device
 		Workloads:       s.options.Workloads,
 		WorkloadResults: tracked.results,
 		Devices:         directory{sessions: s},
+		Containers:      s.options.Containers,
 		Logger:          s.logger.With("device_id", device.ID),
 	})
 	if err != nil && sessionCtx.Err() == nil {

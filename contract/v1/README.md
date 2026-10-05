@@ -237,6 +237,9 @@ A device sends requests at any time:
 | `artifact.upload.request` followed by `artifact.upload.chunk` frames | `artifact.upload.result` |
 | `devices.list` | `devices.list.result` |
 | `device.remove` | `device.remove.result`; the removed device's sessions end |
+| `container.logs.open` | `container.logs.opened`, then binary stream frames and a final `stream.close` |
+| `container.console.info` | `container.console.info.result` |
+| `container.console.send` | `container.console.send.result` |
 
 A request the node cannot accept is answered with `error`, which carries the request's `request_id` when it had a valid one.
 
@@ -245,6 +248,39 @@ A device workload request is the payload of a portal workload command without th
 The portal serves artifacts to the agent; a device uploads them before planning instead. `artifact.upload.request` announces the artifact (`artifact_id`, `sha256`, `size_bytes`, at most 32 MiB), then `artifact.upload.chunk` frames carry it in order: `offset` is the number of bytes sent so far and `data` is at most 32 KiB, standard Base64. After the last byte the node checks the size and the digest and answers `artifact.upload.result`. A session uploads one artifact at a time. A plan then references the artifact by the same `artifact_id`, `sha256`, and `size_bytes`.
 
 Every paired device may use every operation. Revoking a device ends its open sessions, and the node refuses its key in the TLS handshake from then on.
+
+### Container logs and consoles
+
+These requests work for any container on the node, named by its full 64-character Docker ID (`container_id` of the container metrics). They are served on device sessions.
+
+**Logs.** `container.logs.open` asks for a container's log: `tail` past lines (0 to 10000), optionally only entries after `since`, with `follow` to keep receiving new output and `timestamps` to prefix each line with Docker's RFC 3339 time. The device picks `stream_id` (1 to 2147483647, unique among its open streams; at most 8 streams are open per session). The node answers `container.logs.opened` with `tty`: when true the container has a terminal, stdout and stderr arrive merged, and the data may carry terminal control sequences such as colours. Docker serves logs only for the `local`, `json-file`, and `journald` logging drivers or with dual logging; otherwise the request fails with `error`.
+
+The log data travels in binary WebSocket frames, without Base64:
+
+```text
+byte 0      channel: 1 = stdout (or the merged TTY output), 2 = stderr
+bytes 1-4   stream_id, big-endian uint32
+bytes 5-    1 to 32768 bytes of output
+```
+
+Flow control works per stream, as SSH channels and HTTP/2 streams do. The node may have at most 2 MiB (2097152 bytes) of data sent and not yet credited; it waits when that window is used up. The device returns credit with `stream.credit` (`bytes` 1 to 2097152) as it consumes data, usually the size of each frame it has processed; credit beyond the 2 MiB window is refused with `error` `invalid_credit`. A slow reader therefore pauses only its own stream; Docker keeps the log, and metrics and other frames keep flowing.
+
+The node ends a stream with `stream.close`: `reason` `ended` when the log ended (the container stopped, or `follow` was false), or `failed` with a `code`. The device cancels a stream with `stream.close` `reason` `cancelled`; the node then stops and does not answer. Credit for an unknown or finished stream is ignored.
+
+**Console.** `container.console.send` delivers one command line to the container's console and answers `container.console.send.result` with the `adapter` used and `output`, the console's reply. `container.console.info` tells which adapter a container offers, so the app shows the input line only where it works. The node picks the adapter from the container:
+
+| Adapter | When | How |
+| --- | --- | --- |
+| `stdin` | The container was created with an open stdin (`docker run -i`, Compose `stdin_open: true`, Pterodactyl Eggs) and has no `dev.loreva.console` label, or the label is `stdin` | The node attaches to the container's stdin and writes the line. The server prints its reaction to its log, so `output` is empty; open a log stream to see it |
+| `rcon` | Label `dev.loreva.console=rcon` | Source RCON (the protocol of Minecraft, ARK, Palworld, Counter-Strike, and others): the node authenticates and sends the command; `output` is the reply |
+| `telnet` | Label `dev.loreva.console=telnet` | A line-based telnet console such as the one of 7 Days to Die: the node logs in, sends the command, and returns what the server printed until it was quiet for a second |
+| `none` | No open stdin and no label, or `dev.loreva.console=none` | Commands are refused with `console_unavailable` |
+
+For `rcon` and `telnet`, `dev.loreva.console.port` sets the port (defaults 25575 and 8081) and `dev.loreva.console.password_env` names the container environment variable that holds the password (default `RCON_PASSWORD` for RCON, none for telnet; RCON requires a password). The node connects to the container's own address on its Docker network, or to 127.0.0.1 for a container on the host network, so the console port does not need to be published. RCON and telnet are not encrypted; their traffic and the password stay on the node, and only the command and its reply cross the session.
+
+A command is one line of 1 to 1024 bytes of UTF-8 text without control characters, so a frame cannot smuggle a second command after a line break. At most 20 commands per 10 seconds and 4 console or log-open requests in progress are accepted per session (`rate_limited`, `busy`). `output` is at most 8 KiB of text without control characters other than line feed and tab. The node writes every command to its log with the device, the container, the adapter, and the first 256 bytes of the command.
+
+Errors carry the request's `request_id` and one of these codes: `invalid_container_id`, `container_not_found`, `container_not_running`, `console_unavailable`, `console_misconfigured`, `console_unreachable`, `console_auth_failed`, `invalid_command`, `rate_limited`, `busy`, `containers_unavailable`, `invalid_stream_id`, `stream_id_in_use`, `too_many_streams`, `container_io_failed`.
 
 ## Metric units
 
@@ -271,7 +307,7 @@ The store lives in `metrics/` in the agent's state directory as DEFLATE-compress
 
 ## Rules outside JSON Schema
 
-- Only text frames are accepted. JSON is strict: unknown fields, duplicate keys, trailing data, and multiple values are rejected.
+- Frames carry JSON in text frames. The only binary frames are the node's stream data described in [Container logs and consoles](#container-logs-and-consoles); a device sends text frames only. JSON is strict: unknown fields, duplicate keys, trailing data, and multiple values are rejected.
 - The normal inbound frame limit is 64 KiB. Node reports are bounded to 512 KiB, and their collected snapshot is bounded to 480 KiB.
 - Challenge expiry, JWS signatures and claims, certificate validation, source expiry and URL canonicalization, monotonic source generations, request correlation, enrollment idempotency, workload ownership, plan approvals, and retry state are semantic checks performed by the implementations.
 - A workload command is bound to the current `connect.challenge` nonce, exact portal and node identities, a maximum 60-second lifetime, and at most 30 seconds of positive clock skew.
