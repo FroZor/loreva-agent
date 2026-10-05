@@ -70,10 +70,7 @@ func (r *Runner) maintain(
 		defer sourceExpiryTimer.Stop()
 	}
 
-	data, err := newExchange(readCtx, r.collectors, &r.reports, &r.metrics)
-	if err != nil {
-		return &permanentError{Err: err}
-	}
+	data := newExchange(readCtx, r.collectors, &r.reports, "portal:"+r.identity.PortalID)
 	defer data.stop()
 
 	live := liveState{
@@ -116,8 +113,8 @@ func (r *Runner) maintain(
 			if err := live.retryReport(readCtx, conn); err != nil {
 				return err
 			}
-		case sample := <-live.metrics.results:
-			if err := live.metricCollected(readCtx, conn, sample); err != nil {
+		case <-live.metrics.wake:
+			if err := live.metricsStored(readCtx, conn); err != nil {
 				return err
 			}
 		case <-live.metricsReplyTimer.C:

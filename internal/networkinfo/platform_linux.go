@@ -14,6 +14,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -258,12 +259,12 @@ func detectLinuxFirewallProviders() []protocol.FirewallProvider {
 		providers = append(providers, protocol.FirewallProvider{Name: "iptables", Role: "filter", Status: "detected"})
 	}
 
-	if fileExists("/run/firewalld/firewalld.pid") || fileExists("/var/run/firewalld/firewalld.pid") {
+	if fileExists(hostPath("/run/firewalld/firewalld.pid")) || fileExists(hostPath("/var/run/firewalld/firewalld.pid")) {
 		providers = append(providers, protocol.FirewallProvider{
 			Name: "firewalld", Role: "manager", Status: "active", Backend: detectedFilterBackend(providers),
 		})
 	}
-	if configuration, err := readNetworkFile("/etc/ufw/ufw.conf", 64*1024); err == nil {
+	if configuration, err := readNetworkFile(hostPath("/etc/ufw/ufw.conf"), 64*1024); err == nil {
 		status := "inactive"
 		if strings.Contains(strings.ToUpper(string(configuration)), "ENABLED=YES") {
 			status = "active"
@@ -759,6 +760,16 @@ func upsertProvider(providers []protocol.FirewallProvider, replacement protocol.
 	}
 
 	return append(providers, replacement)
+}
+
+// hostPath maps a host file into this process's file system when the agent
+// runs in a container with the host root mounted at HOST_ROOT.
+func hostPath(path string) string {
+	if root := os.Getenv("HOST_ROOT"); root != "" {
+		return filepath.Join(root, path)
+	}
+
+	return path
 }
 
 func fileExists(path string) bool {

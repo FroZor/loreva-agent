@@ -53,7 +53,8 @@ func collectLinuxMemoryModules(ctx context.Context) (
 	[]protocol.MemoryModuleSpecifications,
 	[]protocol.CollectionIssue,
 ) {
-	entries, err := os.ReadDir("/sys/firmware/dmi/entries")
+	dmiEntries := hostSysPath("firmware/dmi/entries")
+	entries, err := os.ReadDir(dmiEntries)
 	if err != nil {
 		return nil, []protocol.CollectionIssue{issue("memory.modules", err)}
 	}
@@ -74,7 +75,7 @@ func collectLinuxMemoryModules(ctx context.Context) (
 			return modules, []protocol.CollectionIssue{{Component: "memory.modules", Code: issueTruncated}}
 		}
 
-		raw, err := readBoundedFile(filepath.Join("/sys/firmware/dmi/entries", entry.Name(), "raw"), maxSysfsFileSize)
+		raw, err := readBoundedFile(filepath.Join(dmiEntries, entry.Name(), "raw"), maxSysfsFileSize)
 		if err != nil {
 			return nil, []protocol.CollectionIssue{issue("memory.modules", err)}
 		}
@@ -493,4 +494,16 @@ func readBoundedFile(path string, limit int64) (data []byte, resultErr error) {
 	}
 
 	return data, nil
+}
+
+// hostSysPath resolves a path below the host's /sys. In a container with the
+// host root mounted read-only, HOST_SYS (the variable gopsutil also uses)
+// points at the host's sysfs, which container runtimes do not mask.
+func hostSysPath(path string) string {
+	root := os.Getenv("HOST_SYS")
+	if root == "" {
+		root = "/sys"
+	}
+
+	return filepath.Join(root, path)
 }

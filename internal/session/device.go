@@ -67,10 +67,7 @@ func ServeDevice(ctx context.Context, conn *websocket.Conn, config DeviceConfig)
 
 	reads := startFrameReader(readCtx, conn)
 
-	data, err := newExchange(readCtx, config.Collectors, &nodeReportState{}, &metricState{})
-	if err != nil {
-		return err
-	}
+	data := newExchange(readCtx, config.Collectors, &nodeReportState{}, "device:"+config.Hello.DeviceID)
 	defer data.stop()
 
 	pingTimer := time.NewTimer(nextPingDelay())
@@ -113,8 +110,8 @@ func ServeDevice(ctx context.Context, conn *websocket.Conn, config DeviceConfig)
 			if err := data.retryReport(readCtx, conn); err != nil {
 				return err
 			}
-		case sample := <-data.metrics.results:
-			if err := data.metricCollected(readCtx, conn, sample); err != nil {
+		case <-data.metrics.wake:
+			if err := data.metricsStored(readCtx, conn); err != nil {
 				return err
 			}
 		case <-data.metricsReplyTimer.C:
@@ -176,6 +173,8 @@ func (s *deviceSession) handle(ctx context.Context, data []byte, events Events) 
 		protocol.WorkloadRestartRequestType,
 		protocol.WorkloadDeleteRequestType:
 		return s.handleWorkload(ctx, data)
+	case protocol.MetricsQueryType:
+		return s.handleMetricsQuery(ctx, data)
 	case protocol.DevicesListType:
 		return s.handleDevicesList(ctx, data)
 	case protocol.DeviceRemoveType:
@@ -410,4 +409,27 @@ func boundedMessage(message string) string {
 	}
 
 	return message
+}
+
+// maxQueryRange bounds one metrics.query; the store keeps a week anyway.
+const maxQueryRange = 8 * 24 * time.Hour
+
+func (s *deviceSession) handleMetricsQuery(ctx context.Context, data []byte) error {
+	var query protocol.MetricsQuery
+	if err := protocol.DecodeStrict(data, &query); err != nil || !agentcrypto.ValidUUID(query.RequestID) {
+		return s.reject(ctx, "", "invalid_message", "metrics.query needs a UUID request_id, from, and to")
+	}
+	if query.To.Before(query.From) || query.To.Sub(query.From) > maxQueryRange {
+		return s.reject(ctx, query.RequestID, "invalid_range", "to must not be before from, and the range must be at most 8 days")
+	}
+	if s.config.Collectors.Metrics == nil {
+		return s.reject(ctx, query.RequestID, "metrics_unavailable", "this node keeps no metrics")
+	}
+
+	result, err := queryResult(s.config.Collectors.Metrics, query.RequestID, query.From, query.To)
+	if err != nil {
+		return fmt.Errorf("answer metrics query: %w", err)
+	}
+
+	return writeDeviceFrame(ctx, s.conn, result)
 }

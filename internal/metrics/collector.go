@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -409,7 +410,7 @@ func collectStorage(
 		}
 		seen[partition.Mountpoint] = struct{}{}
 
-		usage, err := disk.UsageWithContext(ctx, partition.Mountpoint)
+		usage, err := disk.UsageWithContext(ctx, hostPath(partition.Mountpoint))
 		if err != nil {
 			continue
 		}
@@ -768,4 +769,17 @@ func sanitizeID(value string) string {
 	value = sanitize(value, 128)
 
 	return strings.NewReplacer("/", "_", "\\", "_", " ", "_").Replace(value)
+}
+
+// hostPath maps a host mount point into this process's file system. When the
+// agent runs in a container with the host root mounted read-only (HOST_ROOT,
+// the same variable gopsutil uses for HOST_PROC and friends), mount points
+// listed from the host's /proc are reachable only below that root.
+func hostPath(mountpoint string) string {
+	root := os.Getenv("HOST_ROOT")
+	if root == "" || !filepath.IsAbs(mountpoint) || filepath.Clean(mountpoint) != mountpoint {
+		return mountpoint
+	}
+
+	return filepath.Join(root, mountpoint)
 }

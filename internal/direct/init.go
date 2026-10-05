@@ -40,7 +40,7 @@ type InitOptions struct {
 // node identity.
 func Init(store *state.Store, options InitOptions) (*state.Node, error) {
 	_, err := store.LoadNode()
-	if err == nil || errors.Is(err, state.ErrLegacyDirect) {
+	if err == nil {
 		return nil, errors.New("this node is already initialized")
 	}
 	if !errors.Is(err, state.ErrNotFound) {
@@ -84,34 +84,6 @@ func Init(store *state.Store, options InitOptions) (*state.Node, error) {
 	}
 
 	return node, nil
-}
-
-// LoadNode loads the node identity. node.json of the WireGuard era is
-// upgraded in place: the node keeps its ID and endpoints and gets a TLS
-// identity. Its port is kept when it is free for TCP.
-func LoadNode(store *state.Store) (*state.Node, bool, error) {
-	node, err := store.LoadNode()
-	if err == nil || !errors.Is(err, state.ErrLegacyDirect) {
-		return node, false, err
-	}
-
-	identity, err := certpin.Generate()
-	if err != nil {
-		return nil, false, err
-	}
-	if node.ListenPort < 1 || node.ListenPort > 65535 || !tcpPortFree(node.ListenPort) {
-		if node.ListenPort, err = pickListenPort(); err != nil {
-			return nil, false, err
-		}
-	}
-
-	node.TLSPrivateKey = identity.PrivateKey
-	node.TLSCertificate = identity.Certificate
-	if err := store.ReplaceNode(node); err != nil {
-		return nil, false, fmt.Errorf("upgrade node identity: %w", err)
-	}
-
-	return node, true, nil
 }
 
 // pickListenPort returns a random TCP port in the configured range that is

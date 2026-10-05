@@ -11,7 +11,6 @@ import (
 
 	"github.com/FroZor/loreva-agent/internal/agentcrypto"
 	"github.com/FroZor/loreva-agent/internal/connectivity"
-	"github.com/FroZor/loreva-agent/internal/metrics"
 	"github.com/FroZor/loreva-agent/internal/networkinfo"
 	"github.com/FroZor/loreva-agent/internal/protocol"
 	"github.com/FroZor/loreva-agent/internal/specifications"
@@ -79,7 +78,6 @@ type Runner struct {
 	masterEndpoint    string
 	collectors        Collectors
 	reports           nodeReportState
-	metrics           metricState
 	workloads         WorkloadController
 	artifacts         workload.ArtifactSource
 }
@@ -88,7 +86,7 @@ type Runner struct {
 type Collectors struct {
 	Specifications func(context.Context) (specifications.Snapshot, error)
 	Network        func(context.Context) (networkinfo.Snapshot, error)
-	Metrics        func(context.Context) <-chan metrics.Sample
+	Metrics        MetricsSource
 	Workloads      WorkloadController
 }
 

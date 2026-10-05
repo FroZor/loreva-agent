@@ -42,7 +42,10 @@
     { "$ref": "#/$defs/deviceWorkloadCommand" },
     { "$ref": "#/$defs/artifactUploadRequest" },
     { "$ref": "#/$defs/artifactUploadChunk" },
-    { "$ref": "#/$defs/artifactUploadResult" }
+    { "$ref": "#/$defs/artifactUploadResult" },
+    { "$ref": "#/$defs/metricsRollup" },
+    { "$ref": "#/$defs/metricsQuery" },
+    { "$ref": "#/$defs/metricsQueryResult" }
   ],
   "$defs": {
     "uuid": {
@@ -1632,6 +1635,106 @@
       "minLength": 44,
       "maxLength": 44,
       "pattern": "^[A-Za-z0-9+/]{43}=$"
+    },
+    "metricAggregate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["min", "avg", "max", "max_at"],
+      "properties": {
+        "min": { "type": "number" },
+        "avg": { "type": "number" },
+        "max": { "type": "number" },
+        "max_at": { "$ref": "#/$defs/timestamp" }
+      }
+    },
+    "metricRollup": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["first_sequence", "last_sequence", "start", "end", "samples", "series"],
+      "properties": {
+        "first_sequence": { "type": "integer", "minimum": 0 },
+        "last_sequence": { "type": "integer", "minimum": 0 },
+        "start": { "$ref": "#/$defs/timestamp" },
+        "end": { "$ref": "#/$defs/timestamp" },
+        "samples": { "type": "integer", "minimum": 0 },
+        "series": {
+          "type": "object",
+          "maxProperties": 4096,
+          "propertyNames": { "minLength": 1, "maxLength": 512 },
+          "additionalProperties": { "$ref": "#/$defs/metricAggregate" }
+        }
+      }
+    },
+    "metricRollupSeries": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "points"],
+      "properties": {
+        "type": { "enum": ["node", "container"] },
+        "points": { "type": "array", "minItems": 1, "maxItems": 60, "items": { "$ref": "#/$defs/metricRollup" } }
+      }
+    },
+    "metricsRollup": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "schema_version", "request_id", "stream_id", "metric"],
+      "properties": {
+        "type": { "const": "metrics.rollup" },
+        "schema_version": { "const": 1 },
+        "request_id": { "$ref": "#/$defs/uuid" },
+        "stream_id": { "$ref": "#/$defs/uuid" },
+        "metric": { "$ref": "#/$defs/metricRollupSeries" }
+      }
+    },
+    "metricsQuery": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "request_id", "from", "to"],
+      "properties": {
+        "type": { "const": "metrics.query" },
+        "request_id": { "$ref": "#/$defs/uuid" },
+        "from": { "$ref": "#/$defs/timestamp" },
+        "to": { "$ref": "#/$defs/timestamp" }
+      }
+    },
+    "metricsSampleRecord": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sequence", "observed_at", "interval_ms", "observation_scope", "node", "containers"],
+      "properties": {
+        "sequence": { "type": "integer", "minimum": 1 },
+        "observed_at": { "$ref": "#/$defs/timestamp" },
+        "interval_ms": { "type": "integer", "minimum": 1 },
+        "observation_scope": { "type": "string", "maxLength": 32 },
+        "node": { "$ref": "#/$defs/nodeMetrics" },
+        "containers": { "type": ["array", "null"], "items": { "$ref": "#/$defs/containerMetrics" } },
+        "collection_issues": { "type": "array", "items": { "$ref": "#/$defs/collectionIssue" } }
+      }
+    },
+    "metricsItem": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "sample": { "$ref": "#/$defs/metricsSampleRecord" },
+        "node": { "$ref": "#/$defs/metricRollup" },
+        "container": { "$ref": "#/$defs/metricRollup" }
+      },
+      "oneOf": [
+        { "required": ["sample"], "not": { "anyOf": [{ "required": ["node"] }, { "required": ["container"] }] } },
+        { "required": ["node", "container"], "not": { "required": ["sample"] } }
+      ]
+    },
+    "metricsQueryResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "request_id", "stream_id", "items"],
+      "properties": {
+        "type": { "const": "metrics.query.result" },
+        "request_id": { "$ref": "#/$defs/uuid" },
+        "stream_id": { "$ref": "#/$defs/uuid" },
+        "items": { "type": "array", "items": { "$ref": "#/$defs/metricsItem" } },
+        "next_from": { "$ref": "#/$defs/timestamp" }
+      }
     }
   }
 }

@@ -365,6 +365,9 @@ func (s *sessions) revoke(deviceID, callerID string) error {
 	} else {
 		go s.closeDevice(removed.ID)
 	}
+	if metrics := s.options.Collectors.Metrics; metrics != nil {
+		metrics.RemoveCursor("device:" + removed.ID)
+	}
 	s.logger.Info("device revoked", "device_id", removed.ID, "device_name", removed.Name)
 
 	return nil

@@ -351,6 +351,9 @@ func contractMessageTypes() map[string]string {
 		"artifactUploadRequest":      ArtifactUploadRequestType,
 		"artifactUploadChunk":        ArtifactUploadChunkType,
 		"artifactUploadResult":       ArtifactUploadResultType,
+		"metricsRollup":              MetricsRollupType,
+		"metricsQuery":               MetricsQueryType,
+		"metricsQueryResult":         MetricsQueryResultType,
 	}
 }
 
@@ -370,6 +373,14 @@ func contractDTOs() map[string]reflect.Type {
 		"artifactUploadRequest":          reflect.TypeFor[ArtifactUploadRequest](),
 		"artifactUploadChunk":            reflect.TypeFor[ArtifactUploadChunk](),
 		"artifactUploadResult":           reflect.TypeFor[ArtifactUploadResult](),
+		"metricAggregate":                reflect.TypeFor[MetricAggregate](),
+		"metricRollup":                   reflect.TypeFor[MetricRollup](),
+		"metricRollupSeries":             reflect.TypeFor[MetricRollupSeries](),
+		"metricsRollup":                  reflect.TypeFor[MetricsRollupReport](),
+		"metricsQuery":                   reflect.TypeFor[MetricsQuery](),
+		"metricsSampleRecord":            reflect.TypeFor[MetricsSampleRecord](),
+		"metricsItem":                    reflect.TypeFor[MetricsItem](),
+		"metricsQueryResult":             reflect.TypeFor[MetricsQueryResult](),
 		"jwk":                            reflect.TypeFor[agentcrypto.JWK](),
 		"connectChallengeClaims":         reflect.TypeFor[Challenge](),
 		"agentInfo":                      reflect.TypeFor[AgentInfo](),
@@ -474,6 +485,17 @@ func canonicalContractMessages() []any {
 	nodeID := "65a1876f-a715-45fc-9ac0-e4bc31067059"
 	portalID := "d1b181c1-52ec-4d55-b2c9-b1428305b294"
 	pin := base64.StdEncoding.EncodeToString(make([]byte, 32))
+	nodeMetrics := NodeMetrics{
+		CPU:     CPUMetrics{Total: CPUUtilizationMetrics{UsagePercent: 10, IdlePercent: 90}, Logical: []LogicalProcessorMetrics{}},
+		Memory:  MemoryMetrics{UsedBytes: 512, AvailableBytes: 512},
+		Storage: StorageMetrics{Devices: []StorageDeviceMetrics{}, Filesystems: []FilesystemMetrics{}},
+		Network: []NetworkMetrics{}, GPUs: []GPUMetrics{},
+		Processes: ProcessMetrics{Items: []ProcessMetric{}},
+	}
+	rollup := MetricRollup{
+		FirstSequence: 1, LastSequence: 60, Start: now, End: now.Add(time.Minute), Samples: 60,
+		Series: map[string]MetricAggregate{"cpu.total.usage_percent": {Min: 1, Avg: 2, Max: 90, MaxAt: now}},
+	}
 	jws := "e30.e30.A"
 	certificate := "-----BEGIN CERTIFICATE-----\nAA==\n-----END CERTIFICATE-----\n"
 	csr := "-----BEGIN CERTIFICATE REQUEST-----\nAA==\n-----END CERTIFICATE REQUEST-----\n"
@@ -587,6 +609,22 @@ func canonicalContractMessages() []any {
 		ArtifactUploadChunk{Type: ArtifactUploadChunkType, RequestID: requestID, Offset: 0, Data: "AAAA"},
 		ArtifactUploadResult{Type: ArtifactUploadResultType, RequestID: requestID, State: ArtifactStored},
 		ArtifactUploadResult{Type: ArtifactUploadResultType, RequestID: requestID, State: ArtifactRejected, Code: "invalid_artifact"},
+		MetricsRollupReport{
+			Type: MetricsRollupType, SchemaVersion: MetricsSchemaVersion, RequestID: requestID, StreamID: portalID,
+			Metric: MetricRollupSeries{Type: MetricTypeNode, Points: []MetricRollup{rollup}},
+		},
+		MetricsQuery{Type: MetricsQueryType, RequestID: requestID, From: now.Add(-time.Hour), To: now},
+		MetricsQueryResult{
+			Type: MetricsQueryResultType, RequestID: requestID, StreamID: portalID,
+			Items: []MetricsItem{
+				{Node: &rollup, Container: &rollup},
+				{Sample: &MetricsSampleRecord{
+					Sequence: 1, ObservedAt: now, IntervalMS: 1000, ObservationScope: ObservationScopeHost,
+					Node: nodeMetrics, Containers: []ContainerMetrics{},
+				}},
+			},
+			NextFrom: &now,
+		},
 		NodeSpecificationsReport{
 			Type: NodeSpecificationsReportType, SchemaVersion: NodeSpecificationsSchemaVersion,
 			RequestID: requestID, ObservedAt: now, ObservationScope: ObservationScopeHost,

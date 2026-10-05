@@ -20,6 +20,7 @@ import (
 	"github.com/FroZor/loreva-agent/internal/control"
 	"github.com/FroZor/loreva-agent/internal/direct"
 	"github.com/FroZor/loreva-agent/internal/metrics"
+	"github.com/FroZor/loreva-agent/internal/metricstore"
 	"github.com/FroZor/loreva-agent/internal/networkinfo"
 	"github.com/FroZor/loreva-agent/internal/pairing"
 	"github.com/FroZor/loreva-agent/internal/protocol"
@@ -94,7 +95,17 @@ func (f *fakeWorkloads) StoreArtifact(reference protocol.ArtifactReference, data
 	return nil
 }
 
-func testCollectors() direct.Collectors {
+func testCollectors(t *testing.T) direct.Collectors {
+	t.Helper()
+
+	metricStore, err := metricstore.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := metricStore.Append(metrics.Snapshot{ObservedAt: time.Now().UTC(), Interval: time.Second, ObservationScope: "host"}); err != nil {
+		t.Fatal(err)
+	}
+
 	return direct.Collectors{
 		Specifications: func(context.Context) (specifications.Snapshot, error) {
 			return specifications.Snapshot{ObservationScope: "host"}, nil
@@ -102,16 +113,7 @@ func testCollectors() direct.Collectors {
 		Network: func(context.Context) (networkinfo.Snapshot, error) {
 			return networkinfo.Snapshot{ObservationScope: "host"}, nil
 		},
-		Metrics: func(context.Context) <-chan metrics.Sample {
-			samples := make(chan metrics.Sample, 1)
-			samples <- metrics.Sample{Snapshot: metrics.Snapshot{
-				ObservedAt:       time.Now().UTC(),
-				Interval:         time.Second,
-				ObservationScope: "host",
-			}}
-
-			return samples
-		},
+		Metrics: metricStore,
 	}
 }
 
@@ -133,7 +135,7 @@ func startNode(t *testing.T) *testNode {
 	go func() {
 		done <- direct.Run(ctx, store, node, direct.Options{
 			Version:    "test",
-			Collectors: testCollectors(),
+			Collectors: testCollectors(t),
 			Workloads:  workloads,
 		})
 	}()
@@ -615,7 +617,7 @@ func TestShutdownEndsPendingPairing(t *testing.T) {
 	runCtx, stop := context.WithCancel(ctx)
 	done := make(chan error, 1)
 	go func() {
-		done <- direct.Run(runCtx, store, node, direct.Options{Collectors: testCollectors()})
+		done <- direct.Run(runCtx, store, node, direct.Options{Collectors: testCollectors(t)})
 	}()
 
 	conn := (&testNode{node: node, stateDir: store.Dir()}).dialControl(t)

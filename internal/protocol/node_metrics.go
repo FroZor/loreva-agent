@@ -242,3 +242,84 @@ type ContainerPIDMetrics struct {
 	Current uint64 `json:"current"`
 	Limit   uint64 `json:"limit"`
 }
+
+// Metrics history message types.
+const (
+	MetricsRollupType      = "metrics.rollup"
+	MetricsQueryType       = "metrics.query"
+	MetricsQueryResultType = "metrics.query.result"
+)
+
+// MetricAggregate summarizes one series over a window. MaxAt is the time of
+// the peak.
+type MetricAggregate struct {
+	Min   float64   `json:"min"`
+	Avg   float64   `json:"avg"`
+	Max   float64   `json:"max"`
+	MaxAt time.Time `json:"max_at"`
+}
+
+// MetricRollup is a compacted window of samples of one metric type. Series
+// are keyed by the path of a numeric field, with array elements keyed by
+// their identifier, for example "cpu.total.usage_percent" or
+// "network.network:2.rx_bytes_per_second".
+type MetricRollup struct {
+	FirstSequence uint64                     `json:"first_sequence"`
+	LastSequence  uint64                     `json:"last_sequence"`
+	Start         time.Time                  `json:"start"`
+	End           time.Time                  `json:"end"`
+	Samples       int                        `json:"samples"`
+	Series        map[string]MetricAggregate `json:"series"`
+}
+
+// MetricsRollupReport carries compacted history to a reader that missed the
+// full samples; it is acknowledged like metrics.report.
+type MetricsRollupReport struct {
+	Type          string             `json:"type"`
+	SchemaVersion int                `json:"schema_version"`
+	RequestID     string             `json:"request_id"`
+	StreamID      string             `json:"stream_id"`
+	Metric        MetricRollupSeries `json:"metric"`
+}
+
+// MetricRollupSeries is a batch of rollups of one metric type.
+type MetricRollupSeries struct {
+	Type   string         `json:"type"`
+	Points []MetricRollup `json:"points"`
+}
+
+// MetricsQuery asks for stored history in a time range.
+type MetricsQuery struct {
+	Type      string    `json:"type"`
+	RequestID string    `json:"request_id"`
+	From      time.Time `json:"from"`
+	To        time.Time `json:"to"`
+}
+
+// MetricsQueryResult answers metrics.query, oldest first. NextFrom is set
+// when the answer was cut to fit a frame: query again from it.
+type MetricsQueryResult struct {
+	Type      string        `json:"type"`
+	RequestID string        `json:"request_id"`
+	StreamID  string        `json:"stream_id"`
+	Items     []MetricsItem `json:"items"`
+	NextFrom  *time.Time    `json:"next_from,omitempty"`
+}
+
+// MetricsItem is a full sample or a compacted window.
+type MetricsItem struct {
+	Sample    *MetricsSampleRecord `json:"sample,omitempty"`
+	Node      *MetricRollup        `json:"node,omitempty"`
+	Container *MetricRollup        `json:"container,omitempty"`
+}
+
+// MetricsSampleRecord is one full collected sample of both metric types.
+type MetricsSampleRecord struct {
+	Sequence         uint64             `json:"sequence"`
+	ObservedAt       time.Time          `json:"observed_at"`
+	IntervalMS       uint64             `json:"interval_ms"`
+	ObservationScope string             `json:"observation_scope"`
+	Node             NodeMetrics        `json:"node"`
+	Containers       []ContainerMetrics `json:"containers"`
+	CollectionIssues []CollectionIssue  `json:"collection_issues,omitempty"`
+}

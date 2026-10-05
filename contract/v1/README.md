@@ -32,7 +32,7 @@ agent  connect.proof
 portal connect.accepted | connect.rejected
 ```
 
-After `connect.accepted`, the agent can send `renew.request`, `node.specifications.report`, `node.network.report`, and `metrics.report`. A metrics frame contains `metric.type`: `node`, `container`, or a versioned `plugin:<name>` adapter namespace. The portal can send the correlated accepted/rejected responses, `sources.update`, `drain`, or a signed `portal.command`.
+After `connect.accepted`, the agent can send `renew.request`, `node.specifications.report`, `node.network.report`, `metrics.report`, and `metrics.rollup` (see [Metrics store](#metrics-store)). A metrics frame contains `metric.type`: `node`, `container`, or a versioned `plugin:<name>` adapter namespace. The portal can send the correlated accepted/rejected responses, `sources.update`, `drain`, or a signed `portal.command`.
 
 ## Workload commands
 
@@ -221,10 +221,13 @@ device opens wss://<endpoint>/v1/session with its paired certificate
 node   session.hello                 peer = device, device_id
 node   node.specifications.report    device answers node.specifications.accepted | rejected
 node   node.network.report           device answers node.network.accepted | rejected
-node   metrics.report ...            device answers metrics.accepted | rejected, one at a time
+node   metrics.rollup / metrics.report  stored history from the device's cursor, then live samples;
+                                     device answers metrics.accepted | rejected, one frame at a time
 ```
 
 Node reports and metrics are the same frames as on the portal session and follow the same rules: one report is outstanding at a time, a report is retried with the same `request_id` until it is acknowledged, and metrics start after both node reports. A device that stops acknowledging stops receiving metrics.
+
+A device can also ask for stored history at any time with `metrics.query` (`from`, `to`, at most 8 days apart); the node answers `metrics.query.result` with the stored items in that range, oldest first, cut to one frame with `next_from` set when more remain.
 
 A device sends requests at any time:
 
@@ -242,6 +245,23 @@ A device workload request is the payload of a portal workload command without th
 The portal serves artifacts to the agent; a device uploads them before planning instead. `artifact.upload.request` announces the artifact (`artifact_id`, `sha256`, `size_bytes`, at most 32 MiB), then `artifact.upload.chunk` frames carry it in order: `offset` is the number of bytes sent so far and `data` is at most 32 KiB, standard Base64. After the last byte the node checks the size and the digest and answers `artifact.upload.result`. A session uploads one artifact at a time. A plan then references the artifact by the same `artifact_id`, `sha256`, and `size_bytes`.
 
 Every paired device may use every operation. Revoking a device ends its open sessions, and the node refuses its key in the TLS handshake from then on.
+
+## Metrics store
+
+The agent writes every metrics sample into a store on disk and serves every reader from it: the portal and each paired device are readers with their own cursor, the last sequence they acknowledged. A reader that was offline receives everything it missed on its next connection; data leaves the store only by age, never because a reader read it. A newly paired device starts at the oldest stored data. Revoking a device deletes its cursor.
+
+| Age | Kept as |
+| --- | --- |
+| Up to 1 hour | Every sample (process lists only for the last 5 minutes) |
+| 1 hour to 1 day | One rollup per minute. Neighbouring minutes that differ only by noise (under 2 percentage points for `*_percent` series, under 2 % otherwise) are merged. A minute with a spike (a `*_percent` series moving 10 points or more, or another series moving by half its average) keeps all its samples |
+| 1 day to 7 days | One rollup per hour |
+| Older | Removed; the store also drops its oldest data above 200 MB |
+
+A rollup (`metricRollup`) covers `first_sequence` to `last_sequence` and holds, for every numeric series, `min`, `avg`, `max`, and `max_at` (when the peak happened). A series is named by the path of a numeric field of the sample; array elements are named by their identifier field, for example `cpu.total.usage_percent` or `network.network:2.rx_bytes_per_second`.
+
+Delivery reads the store in sequence order. Full samples go out as `metrics.report`, up to 60 samples per frame; compacted windows go out as `metrics.rollup`, up to 60 rollups per frame. Each batch is a `node` frame followed by a `container` frame with the same items, and the reader's cursor moves when the second frame is acknowledged. `stream_id` identifies the store and stays the same across restarts, and `sequence` keeps growing within it, so a reader can drop duplicates by sequence. A sample's node and container frames carry the same `sequence`.
+
+The store lives in `metrics/` in the agent's state directory as DEFLATE-compressed JSON records, mode 0600.
 
 ## Rules outside JSON Schema
 

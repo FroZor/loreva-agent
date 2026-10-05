@@ -7,7 +7,6 @@ import (
 
 	"github.com/coder/websocket"
 
-	"github.com/FroZor/loreva-agent/internal/metrics"
 	"github.com/FroZor/loreva-agent/internal/protocol"
 )
 
@@ -29,25 +28,17 @@ type identityRejection struct{ err error }
 func (rejection *identityRejection) Error() string { return rejection.err.Error() }
 func (rejection *identityRejection) Unwrap() error { return rejection.err }
 
-func newExchange(
-	ctx context.Context,
-	collectors Collectors,
-	reports *nodeReportState,
-	metricState *metricState,
-) (*exchange, error) {
-	metricReporter, err := newMetricReporter(ctx, collectors.Metrics, metricState)
-	if err != nil {
-		return nil, err
-	}
-
+// newExchange starts the exchange for one peer. reader names the peer's
+// cursor in the metrics store.
+func newExchange(ctx context.Context, collectors Collectors, reports *nodeReportState, reader string) *exchange {
 	return &exchange{
 		reports:           newNodeReporter(ctx, collectors, reports),
 		reportReplyTimer:  newStoppedTimer(),
 		reportRetryTimer:  newStoppedTimer(),
-		metrics:           metricReporter,
+		metrics:           newMetricReporter(collectors.Metrics, reader),
 		metricsReplyTimer: newStoppedTimer(),
 		metricsRetryTimer: newStoppedTimer(),
-	}, nil
+	}
 }
 
 func (x *exchange) stop() {
@@ -81,10 +72,9 @@ func (x *exchange) retryReport(ctx context.Context, conn *websocket.Conn) error 
 	return nil
 }
 
-func (x *exchange) metricCollected(ctx context.Context, conn *websocket.Conn, sample metrics.Sample) error {
-	if err := x.metrics.enqueue(sample); err != nil {
-		return nil
-	}
+// metricsStored sends newly stored metrics once the node reports are done.
+func (x *exchange) metricsStored(ctx context.Context, conn *websocket.Conn) error {
+	x.metrics.woke()
 	if !x.reports.state.complete {
 		return nil
 	}

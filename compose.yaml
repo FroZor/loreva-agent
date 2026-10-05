@@ -4,6 +4,19 @@ services:
     pull_policy: always
     restart: unless-stopped
     user: "0:0"
+    # The agent reports on the host, not on its container: it shares the
+    # host's process and hostname namespaces and reads the host root
+    # read-only. The Docker socket below already grants root-equivalent access.
+    pid: host
+    uts: host
+    environment:
+      HOST_ROOT: /host
+      HOST_ETC: /host/etc
+      HOST_PROC: /host/proc
+      HOST_SYS: /host/sys
+      HOST_RUN: /host/run
+      HOST_DEV: /host/dev
+      HOST_VAR: /host/var
     read_only: true
     cap_drop:
       - ALL
@@ -16,6 +29,23 @@ services:
       - type: bind
         source: /var/run/docker.sock
         target: /var/run/docker.sock
+      - type: bind
+        source: /
+        target: /host
+        read_only: true
+        bind:
+          propagation: rslave
+      # Host secrets the agent never reads stay hidden behind empty mounts.
+      - type: tmpfs
+        target: /host/root
+      - type: tmpfs
+        target: /host/home
+      - type: tmpfs
+        target: /host/etc/ssh
+      - type: bind
+        source: /dev/null
+        target: /host/etc/shadow
+        read_only: true
     logging:
       driver: json-file
       options:

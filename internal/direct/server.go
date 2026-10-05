@@ -15,7 +15,6 @@ import (
 
 	"github.com/FroZor/loreva-agent/internal/certpin"
 	"github.com/FroZor/loreva-agent/internal/control"
-	"github.com/FroZor/loreva-agent/internal/metrics"
 	"github.com/FroZor/loreva-agent/internal/networkinfo"
 	"github.com/FroZor/loreva-agent/internal/session"
 	"github.com/FroZor/loreva-agent/internal/specifications"
@@ -40,7 +39,7 @@ const (
 type Collectors struct {
 	Specifications func(context.Context) (specifications.Snapshot, error)
 	Network        func(context.Context) (networkinfo.Snapshot, error)
-	Metrics        func(context.Context) <-chan metrics.Sample
+	Metrics        session.MetricsSource
 }
 
 func (c Collectors) session() session.Collectors {
@@ -122,12 +121,9 @@ func Run(ctx context.Context, store *state.Store, node *state.Node, options Opti
 	if err != nil {
 		return fmt.Errorf("load node identity: %w", err)
 	}
-	devices, legacy, err := loadRegistry(store)
+	devices, err := loadRegistry(store)
 	if err != nil {
 		return err
-	}
-	if legacy {
-		options.Logger.Warn("devices paired over WireGuard can no longer connect; pair them again with `loreva-agent invite`")
 	}
 
 	pending := newPairings(local, devices, options.Logger)
