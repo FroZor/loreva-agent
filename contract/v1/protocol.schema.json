@@ -1249,9 +1249,11 @@
     "containerCPUMetrics": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["usage_percent", "throttled_seconds_total", "throttled_periods_total"],
+      "required": ["usage_percent", "online_cpus", "throttled_seconds_total", "throttled_periods_total"],
       "properties": {
         "usage_percent": { "type": "number", "minimum": 0, "maximum": 409600 },
+        "online_cpus": { "type": "integer", "minimum": 1, "maximum": 4096 },
+        "limit_cores": { "type": "number", "exclusiveMinimum": 0, "maximum": 4096 },
         "throttled_seconds_total": { "type": "number", "minimum": 0 },
         "throttled_periods_total": { "type": "integer", "minimum": 0 }
       }

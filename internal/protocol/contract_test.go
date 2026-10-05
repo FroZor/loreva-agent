@@ -482,6 +482,7 @@ func contractDTOs() map[string]reflect.Type {
 func canonicalContractMessages() []any {
 	now := time.Date(2030, time.January, 2, 3, 4, 5, 0, time.UTC)
 	requestID := "2ab9d734-7434-4cdf-bca4-6ce7a46cdd65"
+	limitCores := 2.0
 	nodeID := "65a1876f-a715-45fc-9ac0-e4bc31067059"
 	portalID := "d1b181c1-52ec-4d55-b2c9-b1428305b294"
 	pin := base64.StdEncoding.EncodeToString(make([]byte, 32))
@@ -661,7 +662,10 @@ func canonicalContractMessages() []any {
 			RequestID: requestID, StreamID: portalID,
 			Metric: MetricSeries{Type: MetricTypeContainer, Samples: []MetricSample{{
 				Sequence: 2, ObservedAt: now, IntervalMS: 1000, ObservationScope: ObservationScopeRuntime,
-				Containers: &ContainerMetricSet{Items: []ContainerMetrics{}},
+				Containers: &ContainerMetricSet{Items: []ContainerMetrics{{
+					ContainerID: "container-1", Runtime: "docker", Name: "minecraft", State: "running",
+					CPU: ContainerCPUMetrics{UsagePercent: 161, OnlineCPUs: 4, LimitCores: &limitCores},
+				}}},
 			}}},
 		},
 		MetricsReport{

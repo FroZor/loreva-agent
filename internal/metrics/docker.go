@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -22,11 +23,19 @@ const (
 	containerWorkers    = 8
 	maxContainerStats   = 2 * 1024 * 1024
 	dockerProbeInterval = 30 * time.Second
+
+	// containerLimitsInterval bounds how long a container's CPU limit is
+	// reused before Docker is asked again; limits change only on update.
+	containerLimitsInterval = time.Minute
+	// defaultCPUPeriod is the CFS period Docker applies when only a quota is set.
+	defaultCPUPeriod = 100_000
+	maxCPUSetSize    = 1 << 16
 )
 
 type containerObservation struct {
-	metric protocol.ContainerMetrics
-	raw    rawContainer
+	metric        protocol.ContainerMetrics
+	raw           rawContainer
+	limitsUnknown bool
 }
 
 type containerCollection struct {
@@ -65,12 +74,14 @@ func (collector *Collector) collectContainers(
 	observations := make([]containerObservation, 0, len(containers))
 	nextRaw := make(map[string]rawContainer, len(containers))
 	partial := false
+	limitsUnknown := false
 
 	for collection := range collector.collectContainerObservations(ctx, containers) {
 		if collection.err != nil {
 			partial = true
 			continue
 		}
+		limitsUnknown = limitsUnknown || collection.observation.limitsUnknown
 
 		observations = append(observations, collection.observation)
 		nextRaw[collection.summary.ID] = collection.observation.raw
@@ -91,6 +102,9 @@ func (collector *Collector) collectContainers(
 	}
 	if truncated {
 		*issues = append(*issues, issue("containers.docker", "truncated"))
+	}
+	if limitsUnknown {
+		*issues = append(*issues, issue("containers.docker.limits", "partial"))
 	}
 
 	return metrics
@@ -169,12 +183,16 @@ func (collector *Collector) observeContainer(
 
 	current := rawDockerCounters(stats)
 	previous, hasPrevious := collector.containers[summary.ID]
+	limitsKnown := collector.readCPULimit(ctx, summary.ID, previous, hasPrevious, &current)
+
 	metric := protocol.ContainerMetrics{
 		ContainerID: sanitize(summary.ID, 128),
 		Runtime:     "docker",
 		Name:        containerName(summary),
 		State:       sanitize(string(summary.State), 64),
 		CPU: protocol.ContainerCPUMetrics{
+			OnlineCPUs:            current.onlineCPUs,
+			LimitCores:            containerLimitCores(current),
 			ThrottledSecondsTotal: float64(stats.CPUStats.ThrottlingData.ThrottledTime) / float64(time.Second),
 			ThrottledPeriodsTotal: stats.CPUStats.ThrottlingData.ThrottledPeriods,
 		},
@@ -204,7 +222,103 @@ func (collector *Collector) observeContainer(
 		}
 	}
 
-	return containerObservation{metric: metric, raw: current}, nil
+	return containerObservation{metric: metric, raw: current, limitsUnknown: !limitsKnown}, nil
+}
+
+// readCPULimit sets the container's CPU limit on current. It reuses the
+// previous value while it is fresh and reports false when Docker could not
+// say what the limit is.
+func (collector *Collector) readCPULimit(
+	ctx context.Context,
+	containerID string,
+	previous rawContainer,
+	hasPrevious bool,
+	current *rawContainer,
+) bool {
+	if hasPrevious {
+		current.cpuLimitCores = previous.cpuLimitCores
+		current.limitsReadAt = previous.limitsReadAt
+		if current.readAt.Sub(previous.limitsReadAt) < containerLimitsInterval {
+			return true
+		}
+	}
+
+	inspection, err := collector.dockerClient.ContainerInspect(ctx, containerID, client.ContainerInspectOptions{})
+	if err != nil || inspection.Container.HostConfig == nil {
+		return false
+	}
+
+	current.cpuLimitCores = cpuLimitCores(inspection.Container.HostConfig.Resources)
+	current.limitsReadAt = current.readAt
+
+	return true
+}
+
+// cpuLimitCores returns the most logical CPUs a container may use according
+// to its CFS quota and cpuset, or 0 when neither limits it.
+func cpuLimitCores(resources container.Resources) float64 {
+	limit := 0.0
+	switch {
+	case resources.NanoCPUs > 0:
+		limit = float64(resources.NanoCPUs) / 1e9
+	case resources.CPUQuota > 0:
+		period := resources.CPUPeriod
+		if period <= 0 {
+			period = defaultCPUPeriod
+		}
+		limit = float64(resources.CPUQuota) / float64(period)
+	}
+
+	cpus := cpusetSize(resources.CpusetCpus)
+	if cpus > 0 && (limit == 0 || float64(cpus) < limit) {
+		limit = float64(cpus)
+	}
+
+	return limit
+}
+
+// cpusetSize counts the CPUs in a cpuset list such as "0-3,8". It returns 0
+// for an empty or malformed list.
+func cpusetSize(list string) int {
+	if list == "" {
+		return 0
+	}
+
+	count := 0
+	for _, part := range strings.Split(list, ",") {
+		low, high, isRange := strings.Cut(part, "-")
+		if !isRange {
+			high = low
+		}
+
+		first, err := strconv.Atoi(low)
+		if err != nil || first < 0 {
+			return 0
+		}
+		last, err := strconv.Atoi(high)
+		if err != nil || last < first || last-first >= maxCPUSetSize {
+			return 0
+		}
+
+		count += last - first + 1
+		if count > maxCPUSetSize {
+			return 0
+		}
+	}
+
+	return count
+}
+
+// containerLimitCores reports the CPU limit only when it is tighter than the
+// CPUs the container can see anyway.
+func containerLimitCores(raw rawContainer) *float64 {
+	if raw.cpuLimitCores <= 0 || raw.cpuLimitCores >= float64(raw.onlineCPUs) {
+		return nil
+	}
+
+	limit := raw.cpuLimitCores
+
+	return &limit
 }
 
 func decodeContainerStats(reader io.Reader) (container.StatsResponse, error) {

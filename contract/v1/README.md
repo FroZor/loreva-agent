@@ -246,6 +246,12 @@ The portal serves artifacts to the agent; a device uploads them before planning 
 
 Every paired device may use every operation. Revoking a device ends its open sessions, and the node refuses its key in the TLS handshake from then on.
 
+## Metric units
+
+- Node CPU (`cpu.total.usage_percent`, `cpu.logical[].usage_percent`) is a share of the whole machine or of one logical CPU: 0 to 100.
+- Container CPU (`cpu.usage_percent`) follows `docker stats`: 100 is one fully busy logical CPU, so a container can report up to `online_cpus` × 100. For example, 161 on a 4-CPU node is about 1.6 CPUs, or 40 % of the machine. `online_cpus` is the number of logical CPUs the container sees. `limit_cores` is present only when a CPU quota or cpuset caps the container below `online_cpus`; then `usage_percent / limit_cores` is the share of its limit in percent.
+- A component that could not be measured is listed in `collection_issues` instead of being silently left out. For file systems the agent reports `storage.filesystems` with `not_available` when it can see none (for example in a container without the host's mount table) and `partial` when some could not be read. A failed CPU limit lookup is reported as `containers.docker.limits` `partial`.
+
 ## Metrics store
 
 The agent writes every metrics sample into a store on disk and serves every reader from it: the portal and each paired device are readers with their own cursor, the last sequence they acknowledged. A reader that was offline receives everything it missed on its next connection; data leaves the store only by age, never because a reader read it. A newly paired device starts at the oldest stored data. Revoking a device deletes its cursor.

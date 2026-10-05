@@ -205,11 +205,16 @@ type ContainerMetrics struct {
 	PIDs        ContainerPIDMetrics     `json:"pids"`
 }
 
-// ContainerCPUMetrics follows the single-logical-core percentage convention.
+// ContainerCPUMetrics follows the single-logical-core percentage convention:
+// 100 is one fully busy logical CPU, so UsagePercent can reach
+// OnlineCPUs*100. LimitCores is set only when a quota or cpuset caps the
+// container below OnlineCPUs.
 type ContainerCPUMetrics struct {
-	UsagePercent          float64 `json:"usage_percent"`
-	ThrottledSecondsTotal float64 `json:"throttled_seconds_total"`
-	ThrottledPeriodsTotal uint64  `json:"throttled_periods_total"`
+	UsagePercent          float64  `json:"usage_percent"`
+	OnlineCPUs            uint32   `json:"online_cpus"`
+	LimitCores            *float64 `json:"limit_cores,omitempty"`
+	ThrottledSecondsTotal float64  `json:"throttled_seconds_total"`
+	ThrottledPeriodsTotal uint64   `json:"throttled_periods_total"`
 }
 
 // ContainerMemoryMetrics contains current cgroup or job-object memory usage.
