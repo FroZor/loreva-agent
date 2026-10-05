@@ -178,7 +178,12 @@ func (m *mounts) writeReplace(current *call, resolved target, request Request, d
 		return Response{}, err
 	}
 
-	if err := receive(current, io.MultiWriter(file, hash), request.Size-offset); err != nil {
+	guard, err := newSpaceGuard(root, dir)
+	if err != nil {
+		return Response{}, err
+	}
+	defer guard.close()
+	if err := receive(current, io.MultiWriter(guard.writer(file), hash), request.Size-offset); err != nil {
 		return Response{}, err
 	}
 	if !equalDigest(hash.Sum(nil), digest) {
@@ -201,7 +206,7 @@ func (m *mounts) writeReplace(current *call, resolved target, request Request, d
 		return Response{}, err
 	}
 
-	applyMetadata(root, partial, resolved.rel, latest, request.Mode)
+	applyMetadata(root, file, resolved.rel, latest, request.Mode)
 	if err := root.Rename(partial, resolved.rel); err != nil {
 		return Response{}, err
 	}
@@ -220,16 +225,25 @@ func (m *mounts) writeInPlace(current *call, resolved target, request Request, d
 	if request.Size > maxFileMountWrite {
 		return Response{}, codedError(CodeTooLarge, fmt.Sprintf("a mounted single file can be written up to %d bytes", maxFileMountWrite))
 	}
+	// Each in-place write holds its content in memory; few run at once so
+	// the helper stays within its memory limit.
+	select {
+	case m.inPlace <- struct{}{}:
+		defer func() { <-m.inPlace }()
+	case <-current.ctx.Done():
+		return Response{}, current.ctx.Err()
+	}
 	if err := current.server.respond(current.id, Response{OK: true}); err != nil {
 		return Response{}, err
 	}
 
-	var content strings.Builder
-	if err := receive(current, &content, request.Size); err != nil {
+	var content bytes.Buffer
+	content.Grow(int(request.Size))
+	hash := sha256.New()
+	if err := receive(current, io.MultiWriter(&content, hash), request.Size); err != nil {
 		return Response{}, err
 	}
-	sum := sha256.Sum256([]byte(content.String()))
-	if !equalDigest(sum[:], digest) {
+	if !equalDigest(hash.Sum(nil), digest) {
 		return Response{}, codedError(CodeChecksumMismatch, "the received file does not match sha256")
 	}
 
@@ -238,7 +252,7 @@ func (m *mounts) writeInPlace(current *call, resolved target, request Request, d
 		return Response{}, err
 	}
 	defer file.Close()
-	if _, err := io.WriteString(file, content.String()); err != nil {
+	if _, err := content.WriteTo(file); err != nil {
 		return Response{}, err
 	}
 	if err := file.Sync(); err != nil {
@@ -292,24 +306,34 @@ func uploadName(target, digest string, size int64) string {
 	return uploadPrefix + hex.EncodeToString(sum[:12])
 }
 
+// openPartial opens the partial file of an upload to resume it, or
+// creates it. A partial file that is not a plain file with a single link,
+// or that changes between the check and the open, is replaced, so a
+// process in the container cannot point the upload at another file.
 func openPartial(root *os.Root, partial string, size int64) (*os.File, int64, error) {
 	info, err := root.Lstat(partial)
-	if err == nil && info.Mode().IsRegular() && info.Size() <= size {
-		file, err := root.OpenFile(partial, os.O_RDWR, 0)
-		if err == nil {
-			return file, info.Size(), nil
+	if err == nil && resumable(info, size) {
+		file, opened, openErr := openSame(root, partial, os.O_RDWR, info)
+		if openErr == nil {
+			return file, opened.Size(), nil
 		}
 	}
 	if err == nil {
-		// Not resumable: replace it.
 		if err := root.Remove(partial); err != nil {
 			return nil, 0, err
 		}
 	}
 
+	// O_EXCL never follows a symbolic link.
 	file, err := root.OpenFile(partial, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o600)
 
 	return file, 0, err
+}
+
+func resumable(info fs.FileInfo, size int64) bool {
+	stat, ok := info.Sys().(*syscall.Stat_t)
+
+	return ok && info.Mode().IsRegular() && stat.Nlink == 1 && info.Size() <= size
 }
 
 // removeStaleUploads drops partial uploads abandoned in dir long ago.
@@ -335,27 +359,26 @@ func removeStaleUploads(root *os.Root, dir string) {
 	}
 }
 
-// applyMetadata gives a new file the mode and owner of the file it replaces,
-// or of its parent directory when it is new.
-func applyMetadata(root *os.Root, name, target string, replaced fs.FileInfo, mode uint32) {
-	perm := fs.FileMode(0o644)
-	owner := replaced
+// applyMetadata gives the open partial file the mode and owner of the file
+// it replaces, or, for a new file, mode (0644 when unset) and the owner of
+// its folder. It is best effort: the content is already safe.
+func applyMetadata(root *os.Root, file *os.File, target string, replaced fs.FileInfo, mode uint32) {
+	perm, owner := fs.FileMode(0o644), replaced
 	switch {
-	case mode != 0:
-		perm = fs.FileMode(mode)
 	case replaced != nil:
 		perm = replaced.Mode().Perm()
+	case mode != 0:
+		perm = fs.FileMode(mode)
 	}
 	if owner == nil {
 		owner, _ = root.Stat(path.Dir(target))
 	}
 
-	_ = root.Chmod(name, perm)
-	if owner != nil {
-		if stat, ok := owner.Sys().(*syscall.Stat_t); ok {
-			_ = root.Lchown(name, int(stat.Uid), int(stat.Gid))
-		}
+	uid, gid, ok := ownerOf(owner)
+	if !ok {
+		uid = -1
 	}
+	_ = setMetadata(file, perm, uid, gid, time.Time{})
 }
 
 func equalDigest(a, b []byte) bool {

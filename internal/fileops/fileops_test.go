@@ -41,6 +41,15 @@ func newFixture(t *testing.T) *fixture {
 	writeFile(t, filepath.Join(base, "secret.txt"), "outside")
 	writeFile(t, filepath.Join(config, "app.yml"), "port: 1")
 
+	client := serve(t, []Mount{{Path: data}, {Path: config, ReadOnly: true}})
+
+	return &fixture{client: client, base: base, data: data, config: config}
+}
+
+// serve runs a helper for mounts over in-memory pipes.
+func serve(t *testing.T, mounts []Mount) *Client {
+	t.Helper()
+
 	helperIn, agentOut := io.Pipe()
 	agentIn, helperOut := io.Pipe()
 	served := make(chan error, 1)
@@ -58,11 +67,11 @@ func newFixture(t *testing.T) *fixture {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if err := client.Init(ctx, []Mount{{Path: data}, {Path: config, ReadOnly: true}}); err != nil {
+	if err := client.Init(ctx, mounts); err != nil {
 		t.Fatalf("Init: %v", err)
 	}
 
-	return &fixture{client: client, base: base, data: data, config: config}
+	return client
 }
 
 func writeFile(t *testing.T, name, content string) {

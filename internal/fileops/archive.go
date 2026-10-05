@@ -61,7 +61,12 @@ func (m *mounts) archive(current *call, paths []string, rawTo, format string) (R
 		}
 	}()
 
-	buffered := bufio.NewWriterSize(file, 256*1024)
+	guard, err := newSpaceGuard(to.mount.root, path.Dir(to.rel))
+	if err != nil {
+		return Response{}, err
+	}
+	defer guard.close()
+	buffered := bufio.NewWriterSize(guard.writer(file), 256*1024)
 	sink := newArchiveSink(buffered, format)
 	tracker := &progress{call: current}
 	var skipped int64
@@ -90,11 +95,8 @@ func (m *mounts) archive(current *call, paths []string, rawTo, format string) (R
 		return Response{}, err
 	}
 
-	applyMetadata(to.mount.root, temp, to.rel, nil, 0)
-	if _, err := to.mount.root.Lstat(to.rel); err == nil {
-		return Response{}, codedError(CodeAlreadyExists, to.path+" already exists")
-	}
-	if err := to.mount.root.Rename(temp, to.rel); err != nil {
+	applyMetadata(to.mount.root, file, to.rel, nil, 0)
+	if err := renameNoReplace(to.mount.root, temp, to.rel); err != nil {
 		return Response{}, err
 	}
 	done = true
@@ -313,11 +315,18 @@ func (m *mounts) extract(current *call, rawArchive, rawTo string) (Response, err
 	}
 	defer file.Close()
 
+	guard, err := newSpaceGuard(to.mount.root, to.rel)
+	if err != nil {
+		return Response{}, err
+	}
+	defer guard.close()
+
 	extractor := &extractor{
 		call:    current,
 		root:    to.mount.root,
 		base:    to.rel,
 		owner:   toInfo,
+		guard:   guard,
 		tracker: &progress{call: current},
 	}
 	if err := extractor.run(file, info.Size()); err != nil {
@@ -332,6 +341,7 @@ type extractor struct {
 	root    *os.Root
 	base    string
 	owner   fs.FileInfo
+	guard   *spaceGuard
 	tracker *progress
 	entries int
 	written int64
@@ -478,12 +488,21 @@ func (e *extractor) file(name string, mode fs.FileMode, content io.Reader) error
 		return err
 	}
 	budget := maxExtractBytes - e.written
-	copied, err := io.Copy(file, io.LimitReader(contextReader{ctx: e.call.ctx, reader: content}, budget+1))
-	closeErr := file.Close()
+	copied, err := io.Copy(e.guard.writer(file), io.LimitReader(contextReader{ctx: e.call.ctx, reader: content}, budget+1))
 	e.written += copied
 	if err == nil && copied > budget {
 		err = codedError(CodeTooLarge, fmt.Sprintf("the archive unpacks to more than %d bytes", int64(maxExtractBytes)))
 	}
+	if err == nil {
+		if uid, gid, ok := ownerOf(e.owner); ok {
+			err = file.Chown(uid, gid)
+		}
+	}
+	if err == nil {
+		// Chown cleared nothing worth keeping; set the mode after it.
+		err = file.Chmod(mode.Perm())
+	}
+	closeErr := file.Close()
 	if err == nil {
 		err = closeErr
 	}
@@ -491,31 +510,41 @@ func (e *extractor) file(name string, mode fs.FileMode, content io.Reader) error
 		_ = e.root.Remove(rel)
 		return err
 	}
-	e.chown(rel)
 	e.tracker.add(1, copied)
 
 	return nil
 }
 
-// mkdirAll creates the missing folders of rel, owned like the destination.
+// mkdirAll creates the missing folders of rel below the destination,
+// owned like the destination. Every existing component must be a real
+// folder: a symbolic link in the way is refused rather than followed.
 func (e *extractor) mkdirAll(rel string, perm fs.FileMode) error {
-	if rel == e.base || rel == "." {
-		return nil
-	}
-	if info, err := e.root.Stat(rel); err == nil {
-		if !info.IsDir() {
-			return codedError(CodeNotADirectory, rel+" is not a folder")
-		}
+	if rel == e.base {
 		return nil
 	}
 
-	if err := e.mkdirAll(path.Dir(rel), 0o755); err != nil {
-		return err
+	inside := rel
+	if e.base != "." {
+		inside = strings.TrimPrefix(rel, e.base+"/")
 	}
-	if err := e.root.Mkdir(rel, perm); err != nil && !errors.Is(err, fs.ErrExist) {
-		return err
+	current := e.base
+	for _, part := range strings.Split(inside, "/") {
+		current = path.Join(current, part)
+		info, err := e.root.Lstat(current)
+		switch {
+		case err == nil && info.IsDir():
+			continue
+		case err == nil:
+			return codedError(CodeNotADirectory, path.Base(current)+" is in the way and is not a folder")
+		case !errors.Is(err, fs.ErrNotExist):
+			return err
+		}
+
+		if err := e.root.Mkdir(current, perm); err != nil && !errors.Is(err, fs.ErrExist) {
+			return err
+		}
+		e.chown(current)
 	}
-	e.chown(rel)
 
 	return nil
 }

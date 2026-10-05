@@ -50,24 +50,28 @@ type containerStreams struct {
 	operations fileOperations
 	finished   chan uint32
 	requests   chan struct{}
-	commands   []time.Time
-	wait       sync.WaitGroup
+	// fileRequests bounds quick file requests separately, so they cannot
+	// starve console requests.
+	fileRequests chan struct{}
+	commands     []time.Time
+	wait         sync.WaitGroup
 }
 
 func newContainerStreams(ctx context.Context, io ContainerIO, files ContainerFiles, conn *websocket.Conn, logger *slog.Logger) *containerStreams {
 	ctx, cancel := context.WithCancel(ctx)
 
 	return &containerStreams{
-		ctx:      ctx,
-		cancel:   cancel,
-		io:       io,
-		files:    files,
-		conn:     conn,
-		logger:   logger,
-		streams:  make(map[uint32]*outStream),
-		uploads:  make(map[uint32]*inStream),
-		finished: make(chan uint32, protocol.MaxStreamsPerSession),
-		requests: make(chan struct{}, maxContainerRequests),
+		ctx:          ctx,
+		cancel:       cancel,
+		io:           io,
+		files:        files,
+		conn:         conn,
+		logger:       logger,
+		streams:      make(map[uint32]*outStream),
+		uploads:      make(map[uint32]*inStream),
+		finished:     make(chan uint32, protocol.MaxStreamsPerSession),
+		requests:     make(chan struct{}, maxContainerRequests),
+		fileRequests: make(chan struct{}, maxContainerRequests),
 	}
 }
 

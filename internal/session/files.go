@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"sync"
+	"time"
 
 	"github.com/FroZor/loreva-agent/internal/agentcrypto"
 	"github.com/FroZor/loreva-agent/internal/containerfiles"
@@ -14,9 +15,14 @@ import (
 	"github.com/FroZor/loreva-agent/internal/protocol"
 )
 
-// fileCreditBytes is how much upload data the node forwards before it
-// returns credit to the device.
-const fileCreditBytes = 256 * 1024
+const (
+	// fileCreditBytes is how much upload data the node forwards before it
+	// returns credit to the device.
+	fileCreditBytes = 256 * 1024
+	// quickFileTimeout bounds a list, stat, mkdir, rename, or chmod,
+	// including the start of the helper.
+	quickFileTimeout = 2 * time.Minute
+)
 
 // ContainerFiles runs file operations in the volumes of a container.
 type ContainerFiles interface {
@@ -224,12 +230,21 @@ func (c *containerStreams) quickFileOp(ctx context.Context, requestID, container
 	if c.files == nil {
 		return reject(ctx, requestID, "containers_unavailable", "this node has no container runtime")
 	}
-	if !c.startRequest() {
-		return reject(ctx, requestID, "busy", "too many container requests are in progress")
+	select {
+	case c.fileRequests <- struct{}{}:
+		c.wait.Add(1)
+	default:
+		return reject(ctx, requestID, "busy", "too many file requests are in progress")
 	}
 
-	go func(ctx context.Context) {
-		defer c.endRequest()
+	go func() {
+		defer c.wait.Done()
+		defer func() { <-c.fileRequests }()
+
+		// Starting a helper may take a while the first time, but a stuck
+		// one must not hold the slot for the whole session.
+		ctx, cancel := context.WithTimeout(c.ctx, quickFileTimeout)
+		defer cancel()
 
 		response, err := c.runFileOp(ctx, containerID, operation, nil)
 		if err != nil {
@@ -237,7 +252,7 @@ func (c *containerStreams) quickFileOp(ctx context.Context, requestID, container
 			return
 		}
 		c.writeFrame(ctx, result(response))
-	}(c.ctx)
+	}()
 
 	return nil
 }

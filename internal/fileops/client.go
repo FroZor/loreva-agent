@@ -147,7 +147,9 @@ func (c *Client) route(frame Frame) error {
 		}
 		call.deliver(response)
 	case FrameData:
-		if err := call.inbox.Put(frame.Payload); err != nil {
+		// Data for a call closed meanwhile is dropped; only a helper that
+		// ignores its window is broken.
+		if err := call.inbox.Put(frame.Payload); errors.Is(err, ErrWindowExceeded) {
 			return fmt.Errorf("helper data for call %d: %w", frame.Call, err)
 		}
 	case FrameCredit:

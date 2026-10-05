@@ -1,6 +1,8 @@
 package fileops
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -21,6 +23,8 @@ const (
 	listPageEntries = 500
 	// maxBatchPaths bounds the paths one delete, copy, or archive names.
 	maxBatchPaths = 1000
+	// maxInPlaceWrites bounds the in-memory writes of single-file mounts.
+	maxInPlaceWrites = 2
 )
 
 // mounts resolves container paths to the mounts the helper shares. Every
@@ -30,6 +34,8 @@ type mounts struct {
 	// byLength lists mounts with the longest path first, so the first
 	// match is the innermost mount.
 	byLength []*mount
+	// inPlace limits writes of single-file mounts held in memory.
+	inPlace chan struct{}
 }
 
 type mount struct {
@@ -57,7 +63,7 @@ func openMounts(list []Mount) (*mounts, error) {
 		return nil, codedError(CodeOutsideMounts, "the container has no volumes or mounted folders")
 	}
 
-	result := &mounts{}
+	result := &mounts{inPlace: make(chan struct{}, maxInPlaceWrites)}
 	for _, item := range list {
 		clean, err := cleanPath(item.Path)
 		if err != nil || clean == "/" {
@@ -156,6 +162,19 @@ func (m *mounts) virtualChildren(dir string) []string {
 	return names
 }
 
+// hasMountBelow reports a mount nested inside clean, whose content a
+// recursive delete or a rename would reach.
+func (m *mounts) hasMountBelow(clean string) bool {
+	prefix := strings.TrimSuffix(clean, "/") + "/"
+	for _, item := range m.byLength {
+		if strings.HasPrefix(item.path, prefix) {
+			return true
+		}
+	}
+
+	return false
+}
+
 func (m *mounts) isMountRoot(clean string) bool {
 	for _, item := range m.byLength {
 		if item.path == clean {
@@ -192,6 +211,9 @@ func (m *mounts) resolveChild(raw string) (target, error) {
 	}
 	if m.isMountRoot(resolved.path) {
 		return target{}, codedError(CodeMountRoot, resolved.path+" is a mount and cannot be replaced, renamed, or removed")
+	}
+	if m.hasMountBelow(resolved.path) {
+		return target{}, codedError(CodeMountRoot, resolved.path+" contains another mount and cannot be renamed or removed")
 	}
 
 	return resolved, nil
@@ -371,8 +393,18 @@ func unixMode(mode fs.FileMode) uint32 {
 	return bits
 }
 
+// version identifies a state of a file's content. It covers the inode and
+// the change time as well as the modification time and size, so an edit
+// that keeps the size and restores or reuses the modification time still
+// changes it.
 func version(info fs.FileInfo) string {
-	return fmt.Sprintf("%d-%d", info.ModTime().UnixNano(), info.Size())
+	fields := fmt.Sprintf("%d-%d", info.ModTime().UnixNano(), info.Size())
+	if stat, ok := info.Sys().(*syscall.Stat_t); ok {
+		fields += fmt.Sprintf("-%d-%d-%d.%d", stat.Dev, stat.Ino, stat.Ctim.Sec, stat.Ctim.Nsec)
+	}
+	sum := sha256.Sum256([]byte(fields))
+
+	return hex.EncodeToString(sum[:16])
 }
 
 func (m *mounts) mkdir(raw string) (Response, error) {
@@ -404,12 +436,7 @@ func (m *mounts) rename(rawFrom, rawTo string) (Response, error) {
 	if to.rel == from.rel || strings.HasPrefix(to.rel, from.rel+"/") {
 		return Response{}, codedError(CodeInvalidPath, "a folder cannot be moved into itself")
 	}
-	// Rename would silently replace an existing file.
-	if _, err := from.mount.root.Lstat(to.rel); err == nil {
-		return Response{}, codedError(CodeAlreadyExists, to.path+" already exists")
-	}
-
-	if err := from.mount.root.Rename(from.rel, to.rel); err != nil {
+	if err := renameNoReplace(from.mount.root, from.rel, to.rel); err != nil {
 		return Response{}, err
 	}
 
@@ -429,11 +456,17 @@ func (m *mounts) chmod(raw string, mode uint32) (Response, error) {
 	if err != nil {
 		return Response{}, err
 	}
-	if info.Mode()&fs.ModeSymlink != 0 {
-		return Response{}, codedError(CodeNotRegularFile, "the mode of a symbolic link cannot be changed")
+	if !info.Mode().IsRegular() && !info.IsDir() {
+		return Response{}, codedError(CodeNotRegularFile, "only the mode of files and folders can be changed")
 	}
 
-	if err := resolved.mount.root.Chmod(resolved.rel, fs.FileMode(mode)); err != nil {
+	file, _, err := openSame(resolved.mount.root, resolved.rel, os.O_RDONLY, info)
+	if err != nil {
+		return Response{}, err
+	}
+	err = file.Chmod(fs.FileMode(mode))
+	file.Close()
+	if err != nil {
 		return Response{}, err
 	}
 

@@ -62,6 +62,12 @@ func (m *Manager) ensureImage(ctx context.Context) (string, error) {
 	return reference, nil
 }
 
+func (m *Manager) forgetImage() {
+	m.imageMu.Lock()
+	m.image = ""
+	m.imageMu.Unlock()
+}
+
 func (m *Manager) importImage(ctx context.Context, reference string, size int64) error {
 	binary, err := os.Open(m.executable)
 	if err != nil {

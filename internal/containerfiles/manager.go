@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"path"
 	"regexp"
 	"sync"
 	"time"
@@ -196,6 +197,7 @@ func (m *Manager) acquire(ctx context.Context, target string) (*helper, error) {
 	current := m.helpers[target]
 	if current != nil && current.stopped() {
 		delete(m.helpers, target)
+		current.close()
 		current = nil
 	}
 	starting := current == nil
@@ -279,6 +281,11 @@ func (m *Manager) start(current *helper) error {
 	}
 
 	created, err := m.engine.ContainerCreate(ctx, helperOptions(image, current.target))
+	if errdefs.IsNotFound(err) {
+		// The image was removed, for example by `docker image prune -a`;
+		// the next attempt imports it again.
+		m.forgetImage()
+	}
 	if err != nil {
 		m.logger.Warn("create file helper", "container_id", current.target, "error", err)
 		return fmt.Errorf("%w: %w", ErrUnavailable, err)
@@ -331,6 +338,11 @@ func (m *Manager) targetMounts(ctx context.Context, target string) ([]fileops.Mo
 	for _, point := range inspection.Container.Mounts {
 		if point.Type != mount.TypeVolume && point.Type != mount.TypeBind {
 			continue
+		}
+		// A mount over the helper's binary would let the container run
+		// its own program with the helper's privileges.
+		if path.Clean(point.Destination) == helperBinary || path.Clean(point.Destination) == "/" {
+			return nil, fmt.Errorf("%w: the container mounts %s, which the helper needs", ErrUnavailable, point.Destination)
 		}
 		mounts = append(mounts, fileops.Mount{Path: point.Destination, ReadOnly: !point.RW})
 	}
