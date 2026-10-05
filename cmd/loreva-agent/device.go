@@ -22,9 +22,9 @@ import (
 
 const (
 	maxInviteLine = 8 * 1024
-	// maxSidecarLine bounds one frame on standard input; the node accepts
+	// maxFrameLine bounds one frame on standard input; the node accepts
 	// frames up to 64 KiB.
-	maxSidecarLine = 64 * 1024
+	maxFrameLine = 64 * 1024
 )
 
 // runDevice is the reference device client, for testing and scripting. Loreva
@@ -148,7 +148,7 @@ func runDeviceConnect(ctx context.Context, arguments []string) error {
 	}
 
 	input := bufio.NewScanner(os.Stdin)
-	input.Buffer(make([]byte, 0, 4096), maxSidecarLine)
+	input.Buffer(make([]byte, 0, 4096), maxFrameLine)
 
 	credentials, err := client.LoadCredentials(*credentialsPath)
 	if err != nil {

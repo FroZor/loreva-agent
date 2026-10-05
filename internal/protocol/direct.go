@@ -142,8 +142,8 @@ type DeviceRemoveResult struct {
 }
 
 // DeviceWorkloadCommand is a workload request from a paired device. The
-// device is authenticated by its WireGuard key, so the command is not
-// signed; the agent binds it to the node's direct controller scope.
+// device is authenticated by its TLS client certificate, so the command is
+// not signed; the agent binds it to the node's direct controller scope.
 type DeviceWorkloadCommand struct {
 	Type          string          `json:"type"`
 	SchemaVersion int             `json:"schema_version"`

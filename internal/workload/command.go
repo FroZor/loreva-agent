@@ -109,9 +109,9 @@ func constantTimeEqual(left, right string) bool {
 }
 
 // DeviceCommand turns a paired device's request into a command. Devices are
-// authenticated by their WireGuard keys, so the request is not signed. Every
-// device of a node shares one controller scope, the node ID, which keeps
-// device-created workloads apart from portal-created ones.
+// authenticated by their TLS client certificates, so the request is not
+// signed. Every device of a node shares one controller scope, the node ID,
+// which keeps device-created workloads apart from portal-created ones.
 func DeviceCommand(request protocol.DeviceWorkloadCommand, nodeID string, now time.Time) (protocol.WorkloadCommand, error) {
 	if request.SchemaVersion != protocol.WorkloadSchemaVersion {
 		return protocol.WorkloadCommand{}, errors.New("unsupported workload command schema_version")
