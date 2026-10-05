@@ -72,6 +72,8 @@ type rawContainer struct {
 	systemCPU       uint64
 	onlineCPUs      uint32
 	cpuUnitNanos    uint64
+	cpuLimitCores   float64
+	limitsReadAt    time.Time
 	readBytes       uint64
 	writeBytes      uint64
 	readOperations  uint64
@@ -404,6 +406,7 @@ func collectStorage(
 	}
 
 	seen := make(map[string]struct{}, len(partitions))
+	unreadable := 0
 	for _, partition := range partitions {
 		if _, exists := seen[partition.Mountpoint]; exists {
 			continue
@@ -412,6 +415,7 @@ func collectStorage(
 
 		usage, err := disk.UsageWithContext(ctx, hostPath(partition.Mountpoint))
 		if err != nil {
+			unreadable++
 			continue
 		}
 
@@ -428,6 +432,13 @@ func collectStorage(
 		}
 
 		result.Filesystems = append(result.Filesystems, filesystem)
+	}
+
+	switch {
+	case len(result.Filesystems) == 0:
+		*issues = append(*issues, issue("storage.filesystems", "not_available"))
+	case unreadable > 0:
+		*issues = append(*issues, issue("storage.filesystems", "partial"))
 	}
 
 	return result
