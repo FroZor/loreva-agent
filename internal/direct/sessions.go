@@ -257,14 +257,15 @@ func (s *sessions) serveDevice(ctx context.Context, conn *websocket.Conn, device
 	}
 	defer s.untrack(device.ID, tracked)
 
+	collectors := s.options.Collectors.session()
+	collectors.Containers = s.options.Containers
 	err := session.ServeDevice(sessionCtx, conn, session.DeviceConfig{
 		Hello:           s.hello(protocol.SessionPeerDevice, device.ID),
 		NodeID:          s.node.id,
-		Collectors:      s.options.Collectors.session(),
+		Collectors:      collectors,
 		Workloads:       s.options.Workloads,
 		WorkloadResults: tracked.results,
 		Devices:         directory{sessions: s},
-		Containers:      s.options.Containers,
 		Logger:          s.logger.With("device_id", device.ID),
 	})
 	if err != nil && sessionCtx.Err() == nil {

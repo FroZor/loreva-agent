@@ -32,7 +32,7 @@ agent  connect.proof
 portal connect.accepted | connect.rejected
 ```
 
-After `connect.accepted`, the agent can send `renew.request`, `node.specifications.report`, `node.network.report`, `metrics.report`, and `metrics.rollup` (see [Metrics store](#metrics-store)). A metrics frame contains `metric.type`: `node`, `container`, or a versioned `plugin:<name>` adapter namespace. The portal can send the correlated accepted/rejected responses, `sources.update`, `drain`, or a signed `portal.command`.
+After `connect.accepted`, the agent can send `renew.request`, `node.specifications.report`, `node.network.report`, `metrics.report`, and `metrics.rollup` (see [Metrics store](#metrics-store)). A metrics frame contains `metric.type`: `node`, `container`, or a versioned `plugin:<name>` adapter namespace. The portal can send the correlated accepted/rejected responses, `sources.update`, `drain`, a signed `portal.command`, and the container log and console requests of [Container logs and consoles](#container-logs-and-consoles).
 
 ## Workload commands
 
@@ -251,7 +251,7 @@ Every paired device may use every operation. Revoking a device ends its open ses
 
 ### Container logs and consoles
 
-These requests work for any container on the node, named by its full 64-character Docker ID (`container_id` of the container metrics). They are served on device sessions.
+These requests work for any container on the node, named by its full 64-character Docker ID (`container_id` of the container metrics). The node serves them identically on a device session and on the portal session: whoever opened an authenticated session can send them, and only the authentication differs (the device's pinned TLS key, or the portal's mTLS and ML-DSA connect proof).
 
 **Logs.** `container.logs.open` asks for a container's log: `tail` past lines (0 to 10000), optionally only entries after `since`, with `follow` to keep receiving new output and `timestamps` to prefix each line with Docker's RFC 3339 time. The device picks `stream_id` (1 to 2147483647, unique among its open streams; at most 8 streams are open per session). The node answers `container.logs.opened` with `tty`: when true the container has a terminal, stdout and stderr arrive merged, and the data may carry terminal control sequences such as colours. Docker serves logs only for the `local`, `json-file`, and `journald` logging drivers or with dual logging; otherwise the request fails with `error`.
 
@@ -278,7 +278,7 @@ The node ends a stream with `stream.close`: `reason` `ended` when the log ended 
 
 For `rcon` and `telnet`, `dev.loreva.console.port` sets the port (defaults 25575 and 8081) and `dev.loreva.console.password_env` names the container environment variable that holds the password (default `RCON_PASSWORD` for RCON, none for telnet; RCON requires a password). The node connects to the container's own address on its Docker network, or to 127.0.0.1 for a container on the host network, so the console port does not need to be published. RCON and telnet are not encrypted; their traffic and the password stay on the node, and only the command and its reply cross the session.
 
-A command is one line of 1 to 1024 bytes of UTF-8 text without control characters, so a frame cannot smuggle a second command after a line break. At most 20 commands per 10 seconds and 4 console or log-open requests in progress are accepted per session (`rate_limited`, `busy`). `output` is at most 8 KiB of text without control characters other than line feed and tab. The node writes every command to its log with the device, the container, the adapter, and the first 256 bytes of the command.
+A command is one line of 1 to 1024 bytes of UTF-8 text without control characters, so a frame cannot smuggle a second command after a line break. At most 20 commands per 10 seconds and 4 console or log-open requests in progress are accepted per session (`rate_limited`, `busy`). `output` is at most 8 KiB of text without control characters other than line feed and tab. The node writes every command to its log with the device or portal, the container, the adapter, and the first 256 bytes of the command.
 
 Errors carry the request's `request_id` and one of these codes: `invalid_container_id`, `container_not_found`, `container_not_running`, `console_unavailable`, `console_misconfigured`, `console_unreachable`, `console_auth_failed`, `invalid_command`, `rate_limited`, `busy`, `containers_unavailable`, `invalid_stream_id`, `stream_id_in_use`, `too_many_streams`, `container_io_failed`.
 
@@ -307,7 +307,7 @@ The store lives in `metrics/` in the agent's state directory as DEFLATE-compress
 
 ## Rules outside JSON Schema
 
-- Frames carry JSON in text frames. The only binary frames are the node's stream data described in [Container logs and consoles](#container-logs-and-consoles); a device sends text frames only. JSON is strict: unknown fields, duplicate keys, trailing data, and multiple values are rejected.
+- Frames carry JSON in text frames. The only binary frames are the node's stream data described in [Container logs and consoles](#container-logs-and-consoles); the portal and devices send text frames only. JSON is strict: unknown fields, duplicate keys, trailing data, and multiple values are rejected.
 - The normal inbound frame limit is 64 KiB. Node reports are bounded to 512 KiB, and their collected snapshot is bounded to 480 KiB.
 - Challenge expiry, JWS signatures and claims, certificate validation, source expiry and URL canonicalization, monotonic source generations, request correlation, enrollment idempotency, workload ownership, plan approvals, and retry state are semantic checks performed by the implementations.
 - A workload command is bound to the current `connect.challenge` nonce, exact portal and node identities, a maximum 60-second lifetime, and at most 30 seconds of positive clock skew.

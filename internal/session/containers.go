@@ -73,6 +73,25 @@ func (c *containerStreams) close() {
 	c.wait.Wait()
 }
 
+// handle serves a container log or console frame. It reports false for any
+// other message type, so every session type routes the same frames here.
+func (c *containerStreams) handle(ctx context.Context, messageType string, data []byte, reject rejectFunc) (bool, error) {
+	switch messageType {
+	case protocol.ContainerLogsOpenType:
+		return true, c.handleLogsOpen(ctx, data, reject)
+	case protocol.StreamCreditType:
+		return true, c.handleCredit(ctx, data, reject)
+	case protocol.StreamCloseType:
+		return true, c.handleClose(ctx, data, reject)
+	case protocol.ContainerConsoleInfoType:
+		return true, c.handleConsoleInfo(ctx, data, reject)
+	case protocol.ContainerConsoleSendType:
+		return true, c.handleConsoleSend(ctx, data, reject)
+	default:
+		return false, nil
+	}
+}
+
 // streamFinished forgets a stream whose goroutine has ended.
 func (c *containerStreams) streamFinished(id uint32) {
 	delete(c.streams, id)

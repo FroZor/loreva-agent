@@ -123,6 +123,8 @@ func runAgent(arguments []string, logger *slog.Logger) error {
 		Network:        networkinfo.Collect,
 		Metrics:        metricStore,
 		Workloads:      workloadManager,
+		Containers:     containers,
+		Logger:         logger,
 	}
 
 	var services []func(context.Context) error

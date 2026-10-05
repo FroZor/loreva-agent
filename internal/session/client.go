@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"time"
 
 	"github.com/FroZor/loreva-agent/internal/agentcrypto"
@@ -88,6 +89,11 @@ type Collectors struct {
 	Network        func(context.Context) (networkinfo.Snapshot, error)
 	Metrics        MetricsSource
 	Workloads      WorkloadController
+	// Containers serves container logs and consoles; it may be nil when
+	// the node has no container runtime.
+	Containers ContainerIO
+	// Logger receives the audit log of console commands; nil discards it.
+	Logger *slog.Logger
 }
 
 // WorkloadController accepts authenticated commands and returns asynchronous

@@ -45,9 +45,7 @@ type DeviceConfig struct {
 	// WorkloadResults carries responses to commands of the node's devices.
 	WorkloadResults <-chan any
 	Devices         DeviceDirectory
-	// Containers may be nil when the node has no container runtime.
-	Containers ContainerIO
-	Logger     *slog.Logger
+	Logger          *slog.Logger
 }
 
 // ServeDevice runs the node protocol for one paired device until the device
@@ -83,7 +81,7 @@ func ServeDevice(ctx context.Context, conn *websocket.Conn, config DeviceConfig)
 		conn:        conn,
 		exchange:    data,
 		uploadTimer: uploadTimer,
-		containers:  newContainerStreams(readCtx, config.Containers, conn, config.Logger),
+		containers:  newContainerStreams(readCtx, config.Collectors.Containers, conn, config.Logger),
 	}
 	defer session.cancelUpload()
 	defer session.containers.close()
@@ -178,6 +176,10 @@ func (s *deviceSession) handle(ctx context.Context, data []byte, events Events) 
 		return err
 	}
 
+	if handled, err := s.containers.handle(ctx, messageType, data, s.reject); handled {
+		return err
+	}
+
 	switch messageType {
 	case protocol.WorkloadPlanRequestType,
 		protocol.WorkloadExecuteRequestType,
@@ -195,16 +197,6 @@ func (s *deviceSession) handle(ctx context.Context, data []byte, events Events) 
 		return s.handleUploadRequest(ctx, data)
 	case protocol.ArtifactUploadChunkType:
 		return s.handleUploadChunk(ctx, data)
-	case protocol.ContainerLogsOpenType:
-		return s.containers.handleLogsOpen(ctx, data, s.reject)
-	case protocol.StreamCreditType:
-		return s.containers.handleCredit(ctx, data, s.reject)
-	case protocol.StreamCloseType:
-		return s.containers.handleClose(ctx, data, s.reject)
-	case protocol.ContainerConsoleInfoType:
-		return s.containers.handleConsoleInfo(ctx, data, s.reject)
-	case protocol.ContainerConsoleSendType:
-		return s.containers.handleConsoleSend(ctx, data, s.reject)
 	default:
 		return s.reject(ctx, "", "unsupported_message", "unsupported message type "+messageType)
 	}
