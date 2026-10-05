@@ -6,7 +6,6 @@ import (
 	"errors"
 	"math"
 	"net"
-	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -24,6 +23,7 @@ import (
 	gnet "github.com/shirou/gopsutil/v4/net"
 	"github.com/shirou/gopsutil/v4/process"
 
+	"github.com/FroZor/loreva-agent/internal/dockerapi"
 	"github.com/FroZor/loreva-agent/internal/observation"
 	"github.com/FroZor/loreva-agent/internal/protocol"
 	"github.com/FroZor/loreva-agent/internal/specifications"
@@ -117,7 +117,7 @@ func NewCollector(ctx context.Context) *Collector {
 	dockerClient, err := client.New(client.FromEnv)
 	if err != nil {
 		collector.startupIssues = append(collector.startupIssues, issue("containers.docker", classifyError(err)))
-	} else if err := validateDockerEndpoint(dockerClient.DaemonHost()); err != nil {
+	} else if err := dockerapi.ValidateEndpoint(dockerClient.DaemonHost()); err != nil {
 		collector.startupIssues = append(collector.startupIssues, issue("containers.docker", "insecure_endpoint"))
 		if closeErr := dockerClient.Close(); closeErr != nil {
 			collector.startupIssues = append(collector.startupIssues, issue("containers.docker", "cleanup_failed"))
@@ -139,24 +139,6 @@ func NewCollector(ctx context.Context) *Collector {
 	collector.previous = collectRawCounters(ctx, time.Now().UTC(), nil)
 
 	return collector
-}
-
-func validateDockerEndpoint(endpoint string) error {
-	parsed, err := url.Parse(endpoint)
-	if err != nil {
-		return err
-	}
-
-	switch strings.ToLower(parsed.Scheme) {
-	case "unix", "npipe", "ssh", "https":
-		return nil
-	case "tcp":
-		if os.Getenv(client.EnvTLSVerify) != "" {
-			return nil
-		}
-	}
-
-	return errors.New("Docker endpoint must use a local socket, SSH, or verified TLS")
 }
 
 // Close releases idle runtime-client resources.

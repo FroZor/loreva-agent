@@ -60,20 +60,6 @@ func TestContainerCPUPercentWindowsCounterUnit(t *testing.T) {
 	assertClose(t, "Windows container CPU", got, 10)
 }
 
-func TestValidateDockerEndpointRejectsUnprotectedTCP(t *testing.T) {
-	t.Setenv("DOCKER_TLS_VERIFY", "")
-
-	if err := validateDockerEndpoint("tcp://docker.example:2375"); err == nil {
-		t.Fatal("unprotected Docker TCP endpoint was accepted")
-	}
-}
-
-func TestValidateDockerEndpointAcceptsLocalSocket(t *testing.T) {
-	if err := validateDockerEndpoint("unix:///var/run/docker.sock"); err != nil {
-		t.Fatal(err)
-	}
-}
-
 func assertClose(t *testing.T, name string, got, want float64) {
 	t.Helper()
 
