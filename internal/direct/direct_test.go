@@ -116,6 +116,12 @@ func testCollectors(t *testing.T) direct.Collectors {
 			return networkinfo.Snapshot{ObservationScope: "host"}, nil
 		},
 		Metrics: metricStore,
+		Processes: func(pid int32, startedAt time.Time) (protocol.ProcessDetails, error) {
+			if pid != 42 {
+				return protocol.ProcessDetails{}, metrics.ErrProcessNotFound
+			}
+			return protocol.ProcessDetails{PID: pid, ParentPID: 1, StartedAt: startedAt, Name: "java", CommandLine: []string{"java", "-jar", "server.jar"}}, nil
+		},
 	}
 }
 
@@ -365,6 +371,29 @@ func TestPairAndUseSession(t *testing.T) {
 	expect(ctx, t, session, protocol.DevicesListResultType, &devices)
 	if len(devices.Devices) != 1 || !devices.Devices[0].Current || devices.Devices[0].Name != "test laptop" {
 		t.Fatalf("devices = %+v", devices)
+	}
+
+	// A refresh answers with a new network report, acknowledged as usual.
+	send(ctx, t, session, protocol.NodeNetworkRefresh{Type: protocol.NodeNetworkRefreshType, RequestID: "6f4f1c5e-8d2a-4c1b-9f3e-2a7b5c9d1e04"})
+	var refreshed protocol.NodeNetworkReport
+	expect(ctx, t, session, protocol.NodeNetworkReportType, &refreshed)
+	if refreshed.RequestID == network.RequestID {
+		t.Fatal("refreshed network report reused the first request_id")
+	}
+	send(ctx, t, session, protocol.NodeNetworkAccepted{Type: protocol.NodeNetworkAcceptedType, RequestID: refreshed.RequestID})
+
+	startedAt := time.Date(2026, 10, 6, 12, 0, 0, 0, time.UTC)
+	send(ctx, t, session, protocol.NodeProcessInspect{Type: protocol.NodeProcessInspectType, RequestID: "9c2d3e4f-5a6b-4c7d-8e9f-0a1b2c3d4e5f", PID: 42, StartedAt: startedAt})
+	var process protocol.NodeProcessInspectResult
+	expect(ctx, t, session, protocol.NodeProcessInspectResultType, &process)
+	if process.Process.PID != 42 || len(process.Process.CommandLine) != 3 {
+		t.Fatalf("process = %+v", process)
+	}
+	send(ctx, t, session, protocol.NodeProcessInspect{Type: protocol.NodeProcessInspectType, RequestID: "1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d", PID: 7, StartedAt: startedAt})
+	var missing protocol.Error
+	expect(ctx, t, session, protocol.ErrorType, &missing)
+	if missing.Code != "not_found" || missing.RequestID != "1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d" {
+		t.Fatalf("missing process = %+v", missing)
 	}
 
 	// The invite is single use: with no active invite left, the node refuses

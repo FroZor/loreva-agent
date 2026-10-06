@@ -170,6 +170,7 @@ func (collector *Collector) Collect(ctx context.Context) (Snapshot, error) {
 		Processes: collectProcesses(ctx, collector.previous.processes, interval, &current, &collector.users, &issues),
 	}
 	applyKernelRates(collector.previous.kernel, current.kernel, interval, &node.CPU, &node.Memory)
+	node.TCP = tcpMetrics(collector.previous.kernel, current.kernel, interval)
 	containers := collector.collectContainers(ctx, &issues)
 
 	collector.previous = current
@@ -312,6 +313,7 @@ func collectMemory(swap *mem.SwapMemoryStat, issues *[]protocol.CollectionIssue)
 	if err != nil {
 		*issues = append(*issues, issue("memory", classifyError(err)))
 	} else {
+		result.TotalBytes = memory.Total
 		result.UsedBytes = memory.Used
 		result.AvailableBytes = memory.Available
 		result.CachedBytes = memory.Cached
@@ -322,6 +324,7 @@ func collectMemory(swap *mem.SwapMemoryStat, issues *[]protocol.CollectionIssue)
 		*issues = append(*issues, issue("memory.swap", "collection_failed"))
 		return result
 	}
+	result.SwapTotalBytes = swap.Total
 	result.SwapUsedBytes = swap.Used
 
 	return result
@@ -363,6 +366,8 @@ func collectStorage(
 			WriteOperationsPerSecond: rate(previousDevice.WriteCount, currentDevice.WriteCount, seconds),
 			IOUtilizationPercent:     percent(float64(counterDeltaUint(previousDevice.IoTime, currentDevice.IoTime)) / interval.Seconds() / 10),
 			QueueDepth:               float64(currentDevice.IopsInProgress),
+			ReadBytesTotal:           currentDevice.ReadBytes,
+			WriteBytesTotal:          currentDevice.WriteBytes,
 		})
 	}
 
@@ -389,6 +394,9 @@ func collectStorage(
 		filesystem := protocol.FilesystemMetrics{
 			FilesystemID:   "filesystem:" + sanitizeID(partition.Device),
 			Mountpoint:     sanitize(partition.Mountpoint, 1024),
+			Device:         sanitize(partition.Device, 1024),
+			FilesystemType: sanitize(partition.Fstype, 64),
+			TotalBytes:     usage.Total,
 			UsedBytes:      usage.Used,
 			AvailableBytes: usage.Free,
 			UsedPercent:    percent(usage.UsedPercent),
@@ -459,6 +467,8 @@ func collectNetwork(
 			TXErrorsPerSecond:  rate(previousInterface.Errout, currentInterface.Errout, seconds),
 			RXDropsPerSecond:   rate(previousInterface.Dropin, currentInterface.Dropin, seconds),
 			TXDropsPerSecond:   rate(previousInterface.Dropout, currentInterface.Dropout, seconds),
+			RXBytesTotal:       currentInterface.BytesRecv,
+			TXBytesTotal:       currentInterface.BytesSent,
 		})
 	}
 

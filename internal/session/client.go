@@ -88,7 +88,10 @@ type Collectors struct {
 	Specifications func(context.Context) (specifications.Snapshot, error)
 	Network        func(context.Context) (networkinfo.Snapshot, error)
 	Metrics        MetricsSource
-	Workloads      WorkloadController
+	// Processes returns the details of one process; nil when the node
+	// cannot read its process table.
+	Processes func(pid int32, startedAt time.Time) (protocol.ProcessDetails, error)
+	Workloads WorkloadController
 	// Containers serves container logs and consoles; it may be nil when
 	// the node has no container runtime.
 	Containers ContainerIO

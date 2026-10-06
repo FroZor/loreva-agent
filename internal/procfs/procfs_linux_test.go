@@ -3,6 +3,10 @@
 package procfs
 
 import (
+	"bytes"
+	"os"
+	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 )
@@ -51,5 +55,33 @@ func TestContainerIDFromCgroup(t *testing.T) {
 		if got := containerIDPattern.FindStringSubmatch(line); got == nil || got[1] != id {
 			t.Errorf("container ID of %q = %v", line, got)
 		}
+	}
+}
+
+func TestCommandLineKeepsArgumentsAndReportsCut(t *testing.T) {
+	directory := t.TempDir()
+	path := filepath.Join(directory, "cmdline")
+
+	if err := os.WriteFile(path, []byte("mysql\x00-p secret\x00--host=db\x00"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	arguments, truncated := readCommandLine(path)
+	if truncated || !slices.Equal(arguments, []string{"mysql", "-p secret", "--host=db"}) {
+		t.Fatalf("arguments = %q, truncated = %v", arguments, truncated)
+	}
+
+	if err := os.WriteFile(path, bytes.Repeat([]byte("a"), maxCommandLine+10), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	arguments, truncated = readCommandLine(path)
+	if !truncated || len(arguments) != 1 || len(arguments[0]) != maxCommandLine {
+		t.Fatalf("long command line: %d arguments, truncated = %v", len(arguments), truncated)
+	}
+
+	if err := os.WriteFile(path, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if arguments, _ := readCommandLine(path); arguments == nil || len(arguments) != 0 {
+		t.Fatalf("kernel thread arguments = %q", arguments)
 	}
 }

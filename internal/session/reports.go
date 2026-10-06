@@ -274,16 +274,19 @@ func (reporter *nodeReporter) handleResponse(ctx context.Context, data []byte) e
 	if err != nil {
 		return errors.New("node report result is not valid JSON")
 	}
+	// A refreshed network report is acknowledged with the same message type
+	// as the previous one, so only the request_id tells a repeat apart.
 	if messageType == reporter.lastAcceptedType() {
 		requestID, err := decodeNodeReportAccepted(data, reporter.state.lastAcceptedKind)
 		if err != nil {
 			return err
 		}
-		if requestID != reporter.state.lastAcceptedRequestID {
+		if requestID == reporter.state.lastAcceptedRequestID {
+			return errDuplicateNodeReportAcknowledgement
+		}
+		if reporter.state.active == nil || reporter.state.active.kind != reporter.state.lastAcceptedKind {
 			return errors.New("conflicting duplicate node report acknowledgement")
 		}
-
-		return errDuplicateNodeReportAcknowledgement
 	}
 	if reporter.state.active == nil {
 		return errors.New("portal sent an unsolicited node report result")

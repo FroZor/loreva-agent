@@ -181,5 +181,3 @@ func processCPUSeconds(times *cpu.TimesStat) float64 {
 
 	return times.User + times.Nice + times.System + times.Irq + times.Softirq + times.Steal
 }
-
-type userCache struct{}

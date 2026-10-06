@@ -24,9 +24,14 @@ func ReadUsage(int32) Usage {
 	return Usage{}
 }
 
+// Read is not available outside Linux.
+func Read(int32) (Process, error) {
+	return Process{}, ErrUnsupported
+}
+
 // CommandLine is not available outside Linux.
-func CommandLine(int32) string {
-	return ""
+func CommandLine(int32) ([]string, bool) {
+	return []string{}, false
 }
 
 // Users is not available outside Linux.

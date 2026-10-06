@@ -32,7 +32,7 @@ agent  connect.proof
 portal connect.accepted | connect.rejected
 ```
 
-After `connect.accepted`, the agent can send `renew.request`, `node.specifications.report`, `node.network.report`, `metrics.report`, and `metrics.rollup` (see [Metrics store](#metrics-store)). A metrics frame contains `metric.type`: `node`, `container`, or a versioned `plugin:<name>` adapter namespace. The portal can send the correlated accepted/rejected responses, `sources.update`, `drain`, a signed `portal.command`, `metrics.query`, `node.network.refresh`, and the container log and console requests of [Container logs and consoles](#container-logs-and-consoles).
+After `connect.accepted`, the agent can send `renew.request`, `node.specifications.report`, `node.network.report`, `metrics.report`, and `metrics.rollup` (see [Metrics store](#metrics-store)). A metrics frame contains `metric.type`: `node`, `container`, or a versioned `plugin:<name>` adapter namespace. The portal can send the correlated accepted/rejected responses, `sources.update`, `drain`, a signed `portal.command`, `metrics.query`, `node.network.refresh`, `node.process.inspect`, and the container log and console requests of [Container logs and consoles](#container-logs-and-consoles).
 
 ## Workload commands
 
@@ -238,6 +238,7 @@ A device sends requests at any time:
 | `devices.list` | `devices.list.result` |
 | `device.remove` | `device.remove.result`; the removed device's sessions end |
 | `node.network.refresh` | a new `node.network.report`, see [Node network report](#node-network-report) |
+| `node.process.inspect` | `node.process.inspect.result`, see [Metric units](#metric-units) |
 | `container.logs.open` | `container.logs.opened`, then binary stream frames and a final `stream.close` |
 | `container.console.info` | `container.console.info.result` |
 | `container.console.send` | `container.console.send.result` |
@@ -339,6 +340,10 @@ When the agent runs in a container without the host's network namespace, interfa
 
 - Node CPU (`cpu.total.usage_percent`, `cpu.logical[].usage_percent`) is a share of the whole machine or of one logical CPU: 0 to 100.
 - Container CPU (`cpu.usage_percent`) follows `docker stats`: 100 is one fully busy logical CPU, so a container can report up to `online_cpus` × 100. For example, 161 on a 4-CPU node is about 1.6 CPUs, or 40 % of the machine. `online_cpus` is the number of logical CPUs the container sees. `limit_cores` is present only when a CPU quota or cpuset caps the container below `online_cpus`; then `usage_percent / limit_cores` is the share of its limit in percent.
+- Memory and swap report `total_bytes` and `swap_total_bytes` next to the used amounts. File systems report `device`, `filesystem_type`, and `total_bytes`; `used_percent` follows `df`: used against used plus available to unprivileged users.
+- `*_total` fields of network interfaces and storage devices are the kernel's counters since boot, so traffic over a period is the difference of two samples. In a rollup the `max` of such a series is its value at the end of the window.
+- `tcp` covers IPv4 and IPv6 of the host's network namespace: `established` and `time_wait` connections, `orphaned` sockets, sockets `in_use`, and per-second rates of opened (`active_opens`, `passive_opens`), failed, and reset connections and retransmitted segments. It comes from `/proc/net/snmp` and `/proc/net/sockstat`, which stay cheap on servers with many connections, and is left out until two samples exist.
+- A process item has no command line, which can be long and is sent every second. `node.process.inspect` with the item's `pid` and `started_at` returns `node.process.inspect.result` with `command_line` as an argument list (cut at 32 KiB, then `command_line_truncated` is set) and the process's identity. A process that has exited or whose PID was reused is answered with `error` `not_found`. Command lines are returned in full, including any passwords in them; masking them is the client's job.
 - A component that could not be measured is listed in `collection_issues` instead of being silently left out. For file systems the agent reports `storage.filesystems` with `not_available` when it can see none (for example in a container without the host's mount table) and `partial` when some could not be read. A failed CPU limit lookup is reported as `containers.docker.limits` `partial`.
 
 ## Metrics store

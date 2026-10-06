@@ -46,6 +46,8 @@
     { "$ref": "#/$defs/metricsRollup" },
     { "$ref": "#/$defs/metricsQuery" },
     { "$ref": "#/$defs/nodeNetworkRefresh" },
+    { "$ref": "#/$defs/nodeProcessInspect" },
+    { "$ref": "#/$defs/nodeProcessInspectResult" },
     { "$ref": "#/$defs/metricsQueryResult" },
     { "$ref": "#/$defs/containerLogsOpen" },
     { "$ref": "#/$defs/containerLogsOpened" },
@@ -1544,6 +1546,44 @@
         "details": { "type": "array", "maxItems": 128, "items": { "type": "string", "minLength": 1, "maxLength": 64 } }
       }
     },
+    "nodeProcessInspect": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "request_id", "pid", "started_at"],
+      "properties": {
+        "type": { "const": "node.process.inspect" },
+        "request_id": { "$ref": "#/$defs/uuid" },
+        "pid": { "type": "integer", "minimum": 1, "maximum": 2147483647 },
+        "started_at": { "$ref": "#/$defs/timestamp" }
+      }
+    },
+    "nodeProcessInspectResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "request_id", "process"],
+      "properties": {
+        "type": { "const": "node.process.inspect.result" },
+        "request_id": { "$ref": "#/$defs/uuid" },
+        "process": { "$ref": "#/$defs/processDetails" }
+      }
+    },
+    "processDetails": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pid", "parent_pid", "started_at", "name", "command_line", "command_line_truncated"],
+      "properties": {
+        "pid": { "type": "integer", "minimum": 1, "maximum": 2147483647 },
+        "parent_pid": { "type": "integer", "minimum": 0, "maximum": 2147483647 },
+        "started_at": { "$ref": "#/$defs/timestamp" },
+        "name": { "type": "string", "maxLength": 256 },
+        "state": { "enum": ["running", "sleeping", "blocked", "stopped", "zombie", "idle"] },
+        "uid": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+        "user": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "container_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "command_line": { "type": "array", "maxItems": 32768, "items": { "type": "string", "maxLength": 32768 } },
+        "command_line_truncated": { "type": "boolean" }
+      }
+    },
     "nodeNetworkRefresh": {
       "type": "object",
       "additionalProperties": false,
@@ -1638,12 +1678,14 @@
     "memoryMetrics": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["used_bytes", "available_bytes", "cached_bytes", "buffers_bytes", "swap_used_bytes"],
+      "required": ["total_bytes", "used_bytes", "available_bytes", "cached_bytes", "buffers_bytes", "swap_total_bytes", "swap_used_bytes"],
       "properties": {
+        "total_bytes": { "type": "integer", "minimum": 0 },
         "used_bytes": { "type": "integer", "minimum": 0 },
         "available_bytes": { "type": "integer", "minimum": 0 },
         "cached_bytes": { "type": "integer", "minimum": 0 },
         "buffers_bytes": { "type": "integer", "minimum": 0 },
+        "swap_total_bytes": { "type": "integer", "minimum": 0 },
         "swap_used_bytes": { "type": "integer", "minimum": 0 },
         "page_faults_per_second": { "type": "number", "minimum": 0 },
         "major_page_faults_per_second": { "type": "number", "minimum": 0 }
@@ -1652,7 +1694,7 @@
     "storageDeviceMetrics": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["device_id", "read_bytes_per_second", "write_bytes_per_second", "read_operations_per_second", "write_operations_per_second", "io_utilization_percent", "queue_depth"],
+      "required": ["device_id", "read_bytes_per_second", "write_bytes_per_second", "read_operations_per_second", "write_operations_per_second", "io_utilization_percent", "queue_depth", "read_bytes_total", "write_bytes_total"],
       "properties": {
         "device_id": { "type": "string", "minLength": 1, "maxLength": 255 },
         "read_bytes_per_second": { "type": "number", "minimum": 0 },
@@ -1660,16 +1702,21 @@
         "read_operations_per_second": { "type": "number", "minimum": 0 },
         "write_operations_per_second": { "type": "number", "minimum": 0 },
         "io_utilization_percent": { "type": "number", "minimum": 0, "maximum": 100 },
-        "queue_depth": { "type": "number", "minimum": 0 }
+        "queue_depth": { "type": "number", "minimum": 0 },
+        "read_bytes_total": { "type": "integer", "minimum": 0 },
+        "write_bytes_total": { "type": "integer", "minimum": 0 }
       }
     },
     "filesystemMetrics": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["filesystem_id", "mountpoint", "used_bytes", "available_bytes", "used_percent"],
+      "required": ["filesystem_id", "mountpoint", "device", "filesystem_type", "total_bytes", "used_bytes", "available_bytes", "used_percent"],
       "properties": {
         "filesystem_id": { "type": "string", "minLength": 1, "maxLength": 255 },
         "mountpoint": { "type": "string", "minLength": 1, "maxLength": 1024 },
+        "device": { "type": "string", "maxLength": 1024 },
+        "filesystem_type": { "type": "string", "maxLength": 64 },
+        "total_bytes": { "type": "integer", "minimum": 0 },
         "used_bytes": { "type": "integer", "minimum": 0 },
         "available_bytes": { "type": "integer", "minimum": 0 },
         "used_percent": { "type": "number", "minimum": 0, "maximum": 100 },
@@ -1688,7 +1735,7 @@
     "networkMetrics": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["interface_id", "rx_bytes_per_second", "tx_bytes_per_second", "rx_packets_per_second", "tx_packets_per_second", "rx_errors_per_second", "tx_errors_per_second", "rx_drops_per_second", "tx_drops_per_second"],
+      "required": ["interface_id", "rx_bytes_per_second", "tx_bytes_per_second", "rx_packets_per_second", "tx_packets_per_second", "rx_errors_per_second", "tx_errors_per_second", "rx_drops_per_second", "tx_drops_per_second", "rx_bytes_total", "tx_bytes_total"],
       "properties": {
         "interface_id": { "type": "string", "minLength": 1, "maxLength": 255 },
         "rx_bytes_per_second": { "type": "number", "minimum": 0 },
@@ -1698,7 +1745,25 @@
         "rx_errors_per_second": { "type": "number", "minimum": 0 },
         "tx_errors_per_second": { "type": "number", "minimum": 0 },
         "rx_drops_per_second": { "type": "number", "minimum": 0 },
-        "tx_drops_per_second": { "type": "number", "minimum": 0 }
+        "tx_drops_per_second": { "type": "number", "minimum": 0 },
+        "rx_bytes_total": { "type": "integer", "minimum": 0 },
+        "tx_bytes_total": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "tcpMetrics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["established", "time_wait", "orphaned", "in_use", "active_opens_per_second", "passive_opens_per_second", "failed_attempts_per_second", "resets_sent_per_second", "retransmitted_segments_per_second"],
+      "properties": {
+        "established": { "type": "integer", "minimum": 0 },
+        "time_wait": { "type": "integer", "minimum": 0 },
+        "orphaned": { "type": "integer", "minimum": 0 },
+        "in_use": { "type": "integer", "minimum": 0 },
+        "active_opens_per_second": { "type": "number", "minimum": 0 },
+        "passive_opens_per_second": { "type": "number", "minimum": 0 },
+        "failed_attempts_per_second": { "type": "number", "minimum": 0 },
+        "resets_sent_per_second": { "type": "number", "minimum": 0 },
+        "retransmitted_segments_per_second": { "type": "number", "minimum": 0 }
       }
     },
     "gpuMetrics": {
@@ -1832,6 +1897,7 @@
         "memory": { "$ref": "#/$defs/memoryMetrics" },
         "storage": { "$ref": "#/$defs/storageMetrics" },
         "network": { "type": "array", "maxItems": 256, "items": { "$ref": "#/$defs/networkMetrics" } },
+        "tcp": { "$ref": "#/$defs/tcpMetrics" },
         "gpus": { "type": "array", "maxItems": 256, "items": { "$ref": "#/$defs/gpuMetrics" } },
         "processes": { "$ref": "#/$defs/processMetrics" }
       }

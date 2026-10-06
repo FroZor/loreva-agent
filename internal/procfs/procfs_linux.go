@@ -21,7 +21,7 @@ const (
 	// user-space ABI regardless of its internal tick rate.
 	clockTicks = 100
 	// maxCommandLine bounds one command line; longer ones are cut.
-	maxCommandLine = 4096
+	maxCommandLine = 32 * 1024
 	maxStatusFile  = 64 * 1024
 )
 
@@ -169,9 +169,28 @@ func ReadUsage(pid int32) Usage {
 	return usage
 }
 
-// CommandLine returns the arguments of one process joined by spaces, cut at
-// 4 KiB. It is empty for kernel threads and unreadable processes.
-func CommandLine(pid int32) string {
+// Read reads one process's stat file.
+func Read(pid int32) (Process, error) {
+	bootTime, err := BootTime()
+	if err != nil {
+		return Process{}, err
+	}
+	data, err := os.ReadFile(hostfs.Proc(strconv.Itoa(int(pid)), "stat"))
+	if err != nil {
+		return Process{}, err
+	}
+
+	process, ok := parseStat(data, bootTime, uint64(os.Getpagesize()))
+	if !ok || process.PID != pid {
+		return Process{}, os.ErrNotExist
+	}
+
+	return process, nil
+}
+
+// CommandLine returns the arguments of one process, cut at 32 KiB; truncated
+// reports the cut. It is empty for kernel threads and unreadable processes.
+func CommandLine(pid int32) (arguments []string, truncated bool) {
 	return readCommandLine(hostfs.Proc(strconv.Itoa(int(pid)), "cmdline"))
 }
 
@@ -194,13 +213,19 @@ func readUID(path string) (uint32, bool) {
 	return 0, false
 }
 
-func readCommandLine(path string) string {
-	data, err := readBounded(path, maxCommandLine)
-	if err != nil {
-		return ""
+func readCommandLine(path string) ([]string, bool) {
+	data, err := readBounded(path, maxCommandLine+1)
+	if err != nil || len(data) == 0 {
+		return []string{}, false
+	}
+	truncated := len(data) > maxCommandLine
+	if truncated {
+		data = data[:maxCommandLine]
 	}
 
-	return strings.TrimSpace(string(bytes.ReplaceAll(bytes.TrimRight(data, "\x00"), []byte{0}, []byte{' '})))
+	arguments := strings.Split(strings.ToValidUTF8(string(bytes.TrimRight(data, "\x00")), "\uFFFD"), "\x00")
+
+	return arguments, truncated
 }
 
 func readContainerID(path string) string {

@@ -62,6 +62,7 @@ type NodeMetrics struct {
 	Memory    MemoryMetrics    `json:"memory"`
 	Storage   StorageMetrics   `json:"storage"`
 	Network   []NetworkMetrics `json:"network"`
+	TCP       *TCPMetrics      `json:"tcp,omitempty"`
 	GPUs      []GPUMetrics     `json:"gpus"`
 	Processes ProcessMetrics   `json:"processes"`
 }
@@ -105,10 +106,12 @@ type LoadAverageMetrics struct {
 
 // MemoryMetrics contains current memory gauges and paging rates.
 type MemoryMetrics struct {
+	TotalBytes               uint64   `json:"total_bytes"`
 	UsedBytes                uint64   `json:"used_bytes"`
 	AvailableBytes           uint64   `json:"available_bytes"`
 	CachedBytes              uint64   `json:"cached_bytes"`
 	BuffersBytes             uint64   `json:"buffers_bytes"`
+	SwapTotalBytes           uint64   `json:"swap_total_bytes"`
 	SwapUsedBytes            uint64   `json:"swap_used_bytes"`
 	PageFaultsPerSecond      *float64 `json:"page_faults_per_second,omitempty"`
 	MajorPageFaultsPerSecond *float64 `json:"major_page_faults_per_second,omitempty"`
@@ -129,12 +132,17 @@ type StorageDeviceMetrics struct {
 	WriteOperationsPerSecond float64 `json:"write_operations_per_second"`
 	IOUtilizationPercent     float64 `json:"io_utilization_percent"`
 	QueueDepth               float64 `json:"queue_depth"`
+	ReadBytesTotal           uint64  `json:"read_bytes_total"`
+	WriteBytesTotal          uint64  `json:"write_bytes_total"`
 }
 
 // FilesystemMetrics contains current capacity for one mounted filesystem.
 type FilesystemMetrics struct {
 	FilesystemID      string   `json:"filesystem_id"`
 	Mountpoint        string   `json:"mountpoint"`
+	Device            string   `json:"device"`
+	FilesystemType    string   `json:"filesystem_type"`
+	TotalBytes        uint64   `json:"total_bytes"`
 	UsedBytes         uint64   `json:"used_bytes"`
 	AvailableBytes    uint64   `json:"available_bytes"`
 	UsedPercent       float64  `json:"used_percent"`
@@ -152,6 +160,22 @@ type NetworkMetrics struct {
 	TXErrorsPerSecond  float64 `json:"tx_errors_per_second"`
 	RXDropsPerSecond   float64 `json:"rx_drops_per_second"`
 	TXDropsPerSecond   float64 `json:"tx_drops_per_second"`
+	RXBytesTotal       uint64  `json:"rx_bytes_total"`
+	TXBytesTotal       uint64  `json:"tx_bytes_total"`
+}
+
+// TCPMetrics summarizes the TCP stack of the host's network namespace for
+// IPv4 and IPv6 together. Gauges are current counts; rates are per second.
+type TCPMetrics struct {
+	Established                    uint64  `json:"established"`
+	TimeWait                       uint64  `json:"time_wait"`
+	Orphaned                       uint64  `json:"orphaned"`
+	InUse                          uint64  `json:"in_use"`
+	ActiveOpensPerSecond           float64 `json:"active_opens_per_second"`
+	PassiveOpensPerSecond          float64 `json:"passive_opens_per_second"`
+	FailedAttemptsPerSecond        float64 `json:"failed_attempts_per_second"`
+	ResetsSentPerSecond            float64 `json:"resets_sent_per_second"`
+	RetransmittedSegmentsPerSecond float64 `json:"retransmitted_segments_per_second"`
 }
 
 // GPUMetrics contains dynamic telemetry for one GPU from specifications.

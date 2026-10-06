@@ -16,6 +16,7 @@ import (
 	"github.com/FroZor/loreva-agent/internal/certpin"
 	"github.com/FroZor/loreva-agent/internal/control"
 	"github.com/FroZor/loreva-agent/internal/networkinfo"
+	"github.com/FroZor/loreva-agent/internal/protocol"
 	"github.com/FroZor/loreva-agent/internal/session"
 	"github.com/FroZor/loreva-agent/internal/specifications"
 	"github.com/FroZor/loreva-agent/internal/state"
@@ -40,10 +41,11 @@ type Collectors struct {
 	Specifications func(context.Context) (specifications.Snapshot, error)
 	Network        func(context.Context) (networkinfo.Snapshot, error)
 	Metrics        session.MetricsSource
+	Processes      func(pid int32, startedAt time.Time) (protocol.ProcessDetails, error)
 }
 
 func (c Collectors) session() session.Collectors {
-	return session.Collectors{Specifications: c.Specifications, Network: c.Network, Metrics: c.Metrics}
+	return session.Collectors{Specifications: c.Specifications, Network: c.Network, Metrics: c.Metrics, Processes: c.Processes}
 }
 
 // serialized runs each snapshot collector at most once at a time, so devices

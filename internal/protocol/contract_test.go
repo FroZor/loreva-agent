@@ -354,6 +354,8 @@ func contractMessageTypes() map[string]string {
 		"metricsRollup":              MetricsRollupType,
 		"metricsQuery":               MetricsQueryType,
 		"nodeNetworkRefresh":         NodeNetworkRefreshType,
+		"nodeProcessInspect":         NodeProcessInspectType,
+		"nodeProcessInspectResult":   NodeProcessInspectResultType,
 		"metricsQueryResult":         MetricsQueryResultType,
 		"containerLogsOpen":          ContainerLogsOpenType,
 		"containerLogsOpened":        ContainerLogsOpenedType,
@@ -406,6 +408,9 @@ func contractDTOs() map[string]reflect.Type {
 		"metricsRollup":                  reflect.TypeFor[MetricsRollupReport](),
 		"metricsQuery":                   reflect.TypeFor[MetricsQuery](),
 		"nodeNetworkRefresh":             reflect.TypeFor[NodeNetworkRefresh](),
+		"nodeProcessInspect":             reflect.TypeFor[NodeProcessInspect](),
+		"nodeProcessInspectResult":       reflect.TypeFor[NodeProcessInspectResult](),
+		"processDetails":                 reflect.TypeFor[ProcessDetails](),
 		"publicAddress":                  reflect.TypeFor[PublicAddress](),
 		"dnsConfiguration":               reflect.TypeFor[DNSConfiguration](),
 		"securityInformation":            reflect.TypeFor[SecurityInformation](),
@@ -522,6 +527,7 @@ func contractDTOs() map[string]reflect.Type {
 		"filesystemMetrics":              reflect.TypeFor[FilesystemMetrics](),
 		"storageMetrics":                 reflect.TypeFor[StorageMetrics](),
 		"networkMetrics":                 reflect.TypeFor[NetworkMetrics](),
+		"tcpMetrics":                     reflect.TypeFor[TCPMetrics](),
 		"gpuMetrics":                     reflect.TypeFor[GPUMetrics](),
 		"processMetric":                  reflect.TypeFor[ProcessMetric](),
 		"processMetrics":                 reflect.TypeFor[ProcessMetrics](),
@@ -555,10 +561,15 @@ func canonicalContractMessages() []any {
 	portalID := "d1b181c1-52ec-4d55-b2c9-b1428305b294"
 	pin := base64.StdEncoding.EncodeToString(make([]byte, 32))
 	nodeMetrics := NodeMetrics{
-		CPU:     CPUMetrics{Total: CPUUtilizationMetrics{UsagePercent: 10, IdlePercent: 90}, Logical: []LogicalProcessorMetrics{}},
-		Memory:  MemoryMetrics{UsedBytes: 512, AvailableBytes: 512},
-		Storage: StorageMetrics{Devices: []StorageDeviceMetrics{}, Filesystems: []FilesystemMetrics{}},
-		Network: []NetworkMetrics{}, GPUs: []GPUMetrics{},
+		CPU:    CPUMetrics{Total: CPUUtilizationMetrics{UsagePercent: 10, IdlePercent: 90}, Logical: []LogicalProcessorMetrics{}},
+		Memory: MemoryMetrics{TotalBytes: 1024, UsedBytes: 512, AvailableBytes: 512},
+		Storage: StorageMetrics{Devices: []StorageDeviceMetrics{}, Filesystems: []FilesystemMetrics{{
+			FilesystemID: "filesystem:dev-vda1", Mountpoint: "/", Device: "/dev/vda1", FilesystemType: "ext4",
+			TotalBytes: 100, UsedBytes: 40, AvailableBytes: 60, UsedPercent: 40,
+		}}},
+		Network:   []NetworkMetrics{{InterfaceID: "network:2", RXBytesTotal: 1000, TXBytesTotal: 2000}},
+		TCP:       &TCPMetrics{Established: 3, TimeWait: 1, InUse: 5, PassiveOpensPerSecond: 0.5},
+		GPUs:      []GPUMetrics{},
 		Processes: ProcessMetrics{Items: []ProcessMetric{}},
 	}
 	rollup := MetricRollup{
@@ -733,6 +744,11 @@ func canonicalContractMessages() []any {
 			Metric: MetricRollupSeries{Type: MetricTypeNode, Points: []MetricRollup{rollup}},
 		},
 		NodeNetworkRefresh{Type: NodeNetworkRefreshType, RequestID: requestID},
+		NodeProcessInspect{Type: NodeProcessInspectType, RequestID: requestID, PID: 812, StartedAt: now},
+		NodeProcessInspectResult{Type: NodeProcessInspectResultType, RequestID: requestID, Process: ProcessDetails{
+			PID: 812, ParentPID: 1, StartedAt: now, Name: "java", State: "sleeping", User: "minecraft",
+			CommandLine: []string{"java", "-Xmx4G", "-jar", "server.jar", "nogui"},
+		}},
 		MetricsQuery{Type: MetricsQueryType, RequestID: requestID, From: now.Add(-time.Hour), To: now},
 		MetricsQueryResult{
 			Type: MetricsQueryResultType, RequestID: requestID, StreamID: portalID,
