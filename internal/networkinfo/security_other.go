@@ -8,5 +8,6 @@ func collectSecurity([]protocol.ListeningPort) (protocol.SecurityInformation, []
 	return protocol.SecurityInformation{
 		IntrusionPrevention:    []protocol.SecurityService{},
 		MandatoryAccessControl: []protocol.SecurityService{},
+		Sessions:               []protocol.LoginSession{},
 	}, []protocol.CollectionIssue{{Component: "security", Code: "not_available"}}
 }

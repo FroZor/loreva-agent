@@ -1477,7 +1477,67 @@
         "status": { "type": "string", "minLength": 1, "maxLength": 64 },
         "providers": { "type": "array", "items": { "$ref": "#/$defs/firewallProvider" } },
         "rules": { "type": "array", "maxItems": 4096, "items": { "$ref": "#/$defs/firewallRule" } },
-        "truncated": { "type": "boolean" }
+        "truncated": { "type": "boolean" },
+        "ufw": { "$ref": "#/$defs/ufwConfiguration" },
+        "firewalld": { "$ref": "#/$defs/firewalldConfiguration" }
+      }
+    },
+    "ufwConfiguration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "rules"],
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "default_incoming": { "enum": ["allow", "deny", "reject"] },
+        "default_outgoing": { "enum": ["allow", "deny", "reject"] },
+        "default_routed": { "enum": ["allow", "deny", "reject"] },
+        "rules": { "type": "array", "maxItems": 1024, "items": { "$ref": "#/$defs/ufwRule" } }
+      }
+    },
+    "ufwRule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["family", "action", "direction", "route", "protocol", "to_address", "to_port", "from_address", "from_port"],
+      "properties": {
+        "family": { "enum": ["ipv4", "ipv6"] },
+        "action": { "type": "string", "maxLength": 16 },
+        "log": { "type": "string", "maxLength": 16 },
+        "direction": { "type": "string", "maxLength": 8 },
+        "route": { "type": "boolean" },
+        "protocol": { "type": "string", "maxLength": 16 },
+        "to_address": { "type": "string", "maxLength": 255 },
+        "to_port": { "type": "string", "maxLength": 255 },
+        "from_address": { "type": "string", "maxLength": 255 },
+        "from_port": { "type": "string", "maxLength": 255 },
+        "to_app": { "type": "string", "maxLength": 255 },
+        "from_app": { "type": "string", "maxLength": 255 },
+        "interface_in": { "type": "string", "maxLength": 64 },
+        "interface_out": { "type": "string", "maxLength": 64 },
+        "comment": { "type": "string", "maxLength": 255 }
+      }
+    },
+    "firewalldConfiguration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["default_zone", "zones"],
+      "properties": {
+        "default_zone": { "type": "string", "maxLength": 64 },
+        "zones": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/firewalldZone" } }
+      }
+    },
+    "firewalldZone": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "target", "interfaces", "sources", "services", "ports", "masquerade", "rich_rules"],
+      "properties": {
+        "name": { "type": "string", "maxLength": 64 },
+        "target": { "type": "string", "maxLength": 32 },
+        "interfaces": { "type": "array", "maxItems": 1024, "items": { "type": "string", "maxLength": 1024 } },
+        "sources": { "type": "array", "maxItems": 1024, "items": { "type": "string", "maxLength": 1024 } },
+        "services": { "type": "array", "maxItems": 1024, "items": { "type": "string", "maxLength": 1024 } },
+        "ports": { "type": "array", "maxItems": 1024, "items": { "type": "string", "maxLength": 1024 } },
+        "masquerade": { "type": "boolean" },
+        "rich_rules": { "type": "array", "maxItems": 1024, "items": { "type": "string", "maxLength": 1024 } }
       }
     },
     "nodeNetwork": {
@@ -1520,11 +1580,26 @@
     "securityInformation": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["intrusion_prevention", "mandatory_access_control"],
+      "required": ["intrusion_prevention", "mandatory_access_control", "sessions"],
       "properties": {
         "ssh": { "$ref": "#/$defs/sshConfiguration" },
         "intrusion_prevention": { "type": "array", "maxItems": 16, "items": { "$ref": "#/$defs/securityService" } },
-        "mandatory_access_control": { "type": "array", "maxItems": 16, "items": { "$ref": "#/$defs/securityService" } }
+        "mandatory_access_control": { "type": "array", "maxItems": 16, "items": { "$ref": "#/$defs/securityService" } },
+        "sessions": { "type": "array", "maxItems": 256, "items": { "$ref": "#/$defs/loginSession" } }
+      }
+    },
+    "loginSession": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["user"],
+      "properties": {
+        "user": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "tty": { "type": "string", "maxLength": 64 },
+        "remote_host": { "type": "string", "maxLength": 255 },
+        "service": { "type": "string", "maxLength": 64 },
+        "state": { "type": "string", "maxLength": 32 },
+        "started_at": { "$ref": "#/$defs/timestamp" },
+        "pid": { "type": "integer", "minimum": 1, "maximum": 2147483647 }
       }
     },
     "sshConfiguration": {
@@ -2026,7 +2101,36 @@
       "required": ["devices", "filesystems"],
       "properties": {
         "devices": { "type": "array", "maxItems": 1024, "items": { "$ref": "#/$defs/storageDeviceMetrics" } },
-        "filesystems": { "type": "array", "maxItems": 1024, "items": { "$ref": "#/$defs/filesystemMetrics" } }
+        "filesystems": { "type": "array", "maxItems": 1024, "items": { "$ref": "#/$defs/filesystemMetrics" } },
+        "raid": { "type": "array", "maxItems": 1024, "items": { "$ref": "#/$defs/raidMetrics" } }
+      }
+    },
+    "raidMetrics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["device_id", "level", "state", "disks", "degraded", "failed_members"],
+      "properties": {
+        "device_id": { "type": "string", "minLength": 1, "maxLength": 255 },
+        "level": { "type": "string", "maxLength": 64 },
+        "state": { "type": "string", "maxLength": 64 },
+        "disks": { "type": "integer", "minimum": 0 },
+        "degraded": { "type": "integer", "minimum": 0 },
+        "failed_members": { "type": "array", "maxItems": 1024, "items": { "type": "string", "maxLength": 64 } },
+        "sync_action": { "type": "string", "maxLength": 64 },
+        "sync_percent": { "type": "number", "minimum": 0, "maximum": 100 }
+      }
+    },
+    "sensorMetrics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sensor_id", "chip", "label", "type", "value"],
+      "properties": {
+        "sensor_id": { "type": "string", "minLength": 1, "maxLength": 255 },
+        "chip": { "type": "string", "maxLength": 64 },
+        "label": { "type": "string", "maxLength": 64 },
+        "type": { "enum": ["temperature", "fan"] },
+        "value": { "type": "number" },
+        "critical_celsius": { "type": "number" }
       }
     },
     "networkMetrics": {
@@ -2196,6 +2300,7 @@
         "network": { "type": "array", "maxItems": 256, "items": { "$ref": "#/$defs/networkMetrics" } },
         "tcp": { "$ref": "#/$defs/tcpMetrics" },
         "gpus": { "type": "array", "maxItems": 256, "items": { "$ref": "#/$defs/gpuMetrics" } },
+        "sensors": { "type": "array", "maxItems": 256, "items": { "$ref": "#/$defs/sensorMetrics" } },
         "processes": { "$ref": "#/$defs/processMetrics" }
       }
     },

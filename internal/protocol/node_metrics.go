@@ -58,13 +58,15 @@ type PluginMetricSet struct {
 
 // NodeMetrics contains dynamic resource usage visible to the agent.
 type NodeMetrics struct {
-	CPU       CPUMetrics       `json:"cpu"`
-	Memory    MemoryMetrics    `json:"memory"`
-	Storage   StorageMetrics   `json:"storage"`
-	Network   []NetworkMetrics `json:"network"`
-	TCP       *TCPMetrics      `json:"tcp,omitempty"`
-	GPUs      []GPUMetrics     `json:"gpus"`
-	Processes ProcessMetrics   `json:"processes"`
+	CPU     CPUMetrics       `json:"cpu"`
+	Memory  MemoryMetrics    `json:"memory"`
+	Storage StorageMetrics   `json:"storage"`
+	Network []NetworkMetrics `json:"network"`
+	TCP     *TCPMetrics      `json:"tcp,omitempty"`
+	GPUs    []GPUMetrics     `json:"gpus"`
+	// Sensors is left out when the node exposes no hardware monitoring.
+	Sensors   []SensorMetrics `json:"sensors,omitempty"`
+	Processes ProcessMetrics  `json:"processes"`
 }
 
 // CPUMetrics contains aggregate and per-logical-processor utilization.
@@ -121,6 +123,22 @@ type MemoryMetrics struct {
 type StorageMetrics struct {
 	Devices     []StorageDeviceMetrics `json:"devices"`
 	Filesystems []FilesystemMetrics    `json:"filesystems"`
+	// RAID is left out when the node has no software RAID.
+	RAID []RAIDMetrics `json:"raid,omitempty"`
+}
+
+// RAIDMetrics is the state of one Linux software RAID (md) array. Degraded
+// counts missing members; FailedMembers names members marked faulty.
+// SyncPercent is set while the array resyncs, recovers, or is checked.
+type RAIDMetrics struct {
+	DeviceID      string   `json:"device_id"`
+	Level         string   `json:"level"`
+	State         string   `json:"state"`
+	Disks         int      `json:"disks"`
+	Degraded      int      `json:"degraded"`
+	FailedMembers []string `json:"failed_members"`
+	SyncAction    string   `json:"sync_action,omitempty"`
+	SyncPercent   *float64 `json:"sync_percent,omitempty"`
 }
 
 // StorageDeviceMetrics contains rates for one device from specifications.
@@ -176,6 +194,18 @@ type TCPMetrics struct {
 	FailedAttemptsPerSecond        float64 `json:"failed_attempts_per_second"`
 	ResetsSentPerSecond            float64 `json:"resets_sent_per_second"`
 	RetransmittedSegmentsPerSecond float64 `json:"retransmitted_segments_per_second"`
+}
+
+// SensorMetrics is one hardware monitoring reading: a temperature in
+// degrees Celsius or a fan speed in revolutions per minute.
+type SensorMetrics struct {
+	SensorID string  `json:"sensor_id"`
+	Chip     string  `json:"chip"`
+	Label    string  `json:"label"`
+	Type     string  `json:"type"`
+	Value    float64 `json:"value"`
+	// CriticalCelsius is the chip's critical temperature, when it has one.
+	CriticalCelsius *float64 `json:"critical_celsius,omitempty"`
 }
 
 // GPUMetrics contains dynamic telemetry for one GPU from specifications.

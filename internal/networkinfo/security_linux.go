@@ -63,6 +63,13 @@ func collectSecurity(listeners []protocol.ListeningPort) (protocol.SecurityInfor
 		security.IntrusionPrevention = append(security.IntrusionPrevention, service)
 	}
 
+	sessions, err := collectSessions()
+	if err != nil {
+		issues = append(issues, networkIssue("security.sessions", err))
+		sessions = []protocol.LoginSession{}
+	}
+	security.Sessions = sessions
+
 	return security, issues
 }
 

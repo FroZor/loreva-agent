@@ -167,6 +167,7 @@ func (collector *Collector) Collect(ctx context.Context) (Snapshot, error) {
 		Storage:   collectStorage(ctx, collector.previous.disk, current.disk, interval, &issues),
 		Network:   collectNetwork(collector.previous.network, current.network, interval, &issues),
 		GPUs:      collector.collectGPUs(ctx, &issues),
+		Sensors:   collectSensors(),
 		Processes: collectProcesses(ctx, collector.previous.processes, interval, &current, &collector.users, &issues),
 	}
 	applyKernelRates(collector.previous.kernel, current.kernel, interval, &node.CPU, &node.Memory)
@@ -339,6 +340,7 @@ func collectStorage(
 	result := protocol.StorageMetrics{
 		Devices:     []protocol.StorageDeviceMetrics{},
 		Filesystems: []protocol.FilesystemMetrics{},
+		RAID:        collectRAID(),
 	}
 	seconds := interval.Seconds()
 	if seconds <= 0 {

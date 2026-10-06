@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net"
 	"os"
 	"os/exec"
@@ -33,6 +34,18 @@ const (
 func collectPlatformNetwork(ctx context.Context) platformNetwork {
 	routes, routeIssues := collectLinuxRoutes()
 	firewall, firewallIssues := collectLinuxFirewall(ctx)
+	if ufw, err := ufwConfiguration(); ufw != nil || !errors.Is(err, fs.ErrNotExist) {
+		firewall.UFW = ufw
+		if err != nil {
+			firewallIssues = append(firewallIssues, networkIssue("firewall.ufw", err))
+		}
+	}
+	if firewalld, err := firewalldConfiguration(); firewalld != nil || !errors.Is(err, fs.ErrNotExist) {
+		firewall.Firewalld = firewalld
+		if err != nil {
+			firewallIssues = append(firewallIssues, networkIssue("firewall.firewalld", err))
+		}
+	}
 	dns, dnsIssues := collectDNS()
 
 	issues := append(routeIssues, firewallIssues...)
@@ -191,7 +204,7 @@ func collectLinuxFirewall(ctx context.Context) (protocol.FirewallInformation, []
 		return protocol.FirewallInformation{
 			Status:    status,
 			Providers: providers,
-			Rules:     nil,
+			Rules:     []protocol.FirewallRule{},
 		}, []protocol.CollectionIssue{{Component: "firewall.rules", Code: "other_namespace"}}
 	}
 	issues := make([]protocol.CollectionIssue, 0)
@@ -261,7 +274,7 @@ func collectLinuxFirewall(ctx context.Context) (protocol.FirewallInformation, []
 	return protocol.FirewallInformation{
 		Status:    "partial",
 		Providers: providers,
-		Rules:     nil,
+		Rules:     []protocol.FirewallRule{},
 	}, issues
 }
 

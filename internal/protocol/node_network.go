@@ -78,6 +78,19 @@ type SecurityInformation struct {
 	SSH                    *SSHConfiguration `json:"ssh,omitempty"`
 	IntrusionPrevention    []SecurityService `json:"intrusion_prevention"`
 	MandatoryAccessControl []SecurityService `json:"mandatory_access_control"`
+	Sessions               []LoginSession    `json:"sessions"`
+}
+
+// LoginSession is one user logged in to the node, from systemd-logind or,
+// without it, utmp: what who and loginctl show.
+type LoginSession struct {
+	User       string     `json:"user"`
+	TTY        string     `json:"tty,omitempty"`
+	RemoteHost string     `json:"remote_host,omitempty"`
+	Service    string     `json:"service,omitempty"`
+	State      string     `json:"state,omitempty"`
+	StartedAt  *time.Time `json:"started_at,omitempty"`
+	PID        int32      `json:"pid,omitempty"`
 }
 
 // SSHConfiguration is the effective sshd setting for logins, read from its
@@ -146,6 +159,60 @@ type FirewallInformation struct {
 	Providers []FirewallProvider `json:"providers"`
 	Rules     []FirewallRule     `json:"rules"`
 	Truncated bool               `json:"truncated"`
+	// UFW and Firewalld are the saved configuration of these managers, as
+	// ufw status and firewall-cmd --permanent show it; Rules is what the
+	// kernel enforces.
+	UFW       *UFWConfiguration       `json:"ufw,omitempty"`
+	Firewalld *FirewalldConfiguration `json:"firewalld,omitempty"`
+}
+
+// UFWConfiguration is ufw's state from /etc/ufw.
+type UFWConfiguration struct {
+	Enabled         bool      `json:"enabled"`
+	DefaultIncoming string    `json:"default_incoming,omitempty"`
+	DefaultOutgoing string    `json:"default_outgoing,omitempty"`
+	DefaultRouted   string    `json:"default_routed,omitempty"`
+	Rules           []UFWRule `json:"rules"`
+}
+
+// UFWRule is one rule as ufw stores it. Addresses and ports are "any" when
+// the rule does not restrict them.
+type UFWRule struct {
+	Family       string `json:"family"`
+	Action       string `json:"action"`
+	Log          string `json:"log,omitempty"`
+	Direction    string `json:"direction"`
+	Route        bool   `json:"route"`
+	Protocol     string `json:"protocol"`
+	ToAddress    string `json:"to_address"`
+	ToPort       string `json:"to_port"`
+	FromAddress  string `json:"from_address"`
+	FromPort     string `json:"from_port"`
+	ToApp        string `json:"to_app,omitempty"`
+	FromApp      string `json:"from_app,omitempty"`
+	InterfaceIn  string `json:"interface_in,omitempty"`
+	InterfaceOut string `json:"interface_out,omitempty"`
+	Comment      string `json:"comment,omitempty"`
+}
+
+// FirewalldConfiguration is firewalld's permanent configuration. Zones are
+// the default zone and every zone bound to an interface or source in it;
+// interfaces that NetworkManager assigns to zones are not listed there.
+type FirewalldConfiguration struct {
+	DefaultZone string          `json:"default_zone"`
+	Zones       []FirewalldZone `json:"zones"`
+}
+
+// FirewalldZone is one firewalld zone. Ports are "port/protocol".
+type FirewalldZone struct {
+	Name       string   `json:"name"`
+	Target     string   `json:"target"`
+	Interfaces []string `json:"interfaces"`
+	Sources    []string `json:"sources"`
+	Services   []string `json:"services"`
+	Ports      []string `json:"ports"`
+	Masquerade bool     `json:"masquerade"`
+	RichRules  []string `json:"rich_rules"`
 }
 
 // FirewallProvider identifies a firewall manager or kernel filtering backend.

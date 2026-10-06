@@ -19,6 +19,11 @@ func Sys(elem ...string) string {
 	return join("HOST_SYS", "/sys", elem)
 }
 
+// Run returns a path below the host's /run.
+func Run(elem ...string) string {
+	return join("HOST_RUN", "/run", elem)
+}
+
 // Etc returns a path below the host's /etc.
 func Etc(elem ...string) string {
 	return join("HOST_ETC", "/etc", elem)

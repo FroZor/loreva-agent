@@ -415,6 +415,11 @@ func contractDTOs() map[string]reflect.Type {
 		"nodeProcessInspect":             reflect.TypeFor[NodeProcessInspect](),
 		"nodeProcessInspectResult":       reflect.TypeFor[NodeProcessInspectResult](),
 		"processDetails":                 reflect.TypeFor[ProcessDetails](),
+		"loginSession":                   reflect.TypeFor[LoginSession](),
+		"ufwConfiguration":               reflect.TypeFor[UFWConfiguration](),
+		"ufwRule":                        reflect.TypeFor[UFWRule](),
+		"firewalldConfiguration":         reflect.TypeFor[FirewalldConfiguration](),
+		"firewalldZone":                  reflect.TypeFor[FirewalldZone](),
 		"containersList":                 reflect.TypeFor[ContainersList](),
 		"containersListResult":           reflect.TypeFor[ContainersListResult](),
 		"containerEngine":                reflect.TypeFor[ContainerEngine](),
@@ -552,6 +557,8 @@ func contractDTOs() map[string]reflect.Type {
 		"storageMetrics":                 reflect.TypeFor[StorageMetrics](),
 		"networkMetrics":                 reflect.TypeFor[NetworkMetrics](),
 		"tcpMetrics":                     reflect.TypeFor[TCPMetrics](),
+		"raidMetrics":                    reflect.TypeFor[RAIDMetrics](),
+		"sensorMetrics":                  reflect.TypeFor[SensorMetrics](),
 		"gpuMetrics":                     reflect.TypeFor[GPUMetrics](),
 		"processMetric":                  reflect.TypeFor[ProcessMetric](),
 		"processMetrics":                 reflect.TypeFor[ProcessMetrics](),
@@ -584,16 +591,21 @@ func canonicalContractMessages() []any {
 	nodeID := "65a1876f-a715-45fc-9ac0-e4bc31067059"
 	portalID := "d1b181c1-52ec-4d55-b2c9-b1428305b294"
 	pin := base64.StdEncoding.EncodeToString(make([]byte, 32))
+	syncPercent, criticalCelsius := 25.0, 100.0
 	nodeMetrics := NodeMetrics{
 		CPU:    CPUMetrics{Total: CPUUtilizationMetrics{UsagePercent: 10, IdlePercent: 90}, Logical: []LogicalProcessorMetrics{}},
 		Memory: MemoryMetrics{TotalBytes: 1024, UsedBytes: 512, AvailableBytes: 512},
 		Storage: StorageMetrics{Devices: []StorageDeviceMetrics{}, Filesystems: []FilesystemMetrics{{
 			FilesystemID: "filesystem:dev-vda1", Mountpoint: "/", Device: "/dev/vda1", FilesystemType: "ext4",
 			TotalBytes: 100, UsedBytes: 40, AvailableBytes: 60, UsedPercent: 40,
+		}}, RAID: []RAIDMetrics{{
+			DeviceID: "storage:md0", Level: "raid1", State: "clean", Disks: 2, Degraded: 1, FailedMembers: []string{"sdb1"},
+			SyncAction: "recover", SyncPercent: &syncPercent,
 		}}},
 		Network:   []NetworkMetrics{{InterfaceID: "network:2", RXBytesTotal: 1000, TXBytesTotal: 2000}},
 		TCP:       &TCPMetrics{Established: 3, TimeWait: 1, InUse: 5, PassiveOpensPerSecond: 0.5},
 		GPUs:      []GPUMetrics{},
+		Sensors:   []SensorMetrics{{SensorID: "sensor:hwmon0:temp1", Chip: "coretemp", Label: "Package id 0", Type: "temperature", Value: 54, CriticalCelsius: &criticalCelsius}},
 		Processes: ProcessMetrics{Items: []ProcessMetric{}},
 	}
 	stopTimeout := 30
@@ -672,6 +684,14 @@ func canonicalContractMessages() []any {
 		ListeningPorts: []ListeningPort{},
 		Firewall: FirewallInformation{
 			Status: "inactive", Providers: []FirewallProvider{}, Rules: []FirewallRule{},
+			UFW: &UFWConfiguration{Enabled: true, DefaultIncoming: "deny", DefaultOutgoing: "allow", Rules: []UFWRule{{
+				Family: "ipv4", Action: "allow", Direction: "in", Protocol: "tcp", ToAddress: "0.0.0.0/0", ToPort: "22",
+				FromAddress: "203.0.113.0/24", FromPort: "any", Comment: "admin",
+			}}},
+			Firewalld: &FirewalldConfiguration{DefaultZone: "public", Zones: []FirewalldZone{{
+				Name: "public", Target: "default", Interfaces: []string{}, Sources: []string{}, Services: []string{"ssh"},
+				Ports: []string{"25565/tcp"}, RichRules: []string{},
+			}}},
 		},
 		PublicAddresses: []PublicAddress{{Family: "ipv4", Address: "198.51.100.7", Source: "external", BehindNAT: true}},
 		DNS:             &DNSConfiguration{Nameservers: []string{"127.0.0.53"}, SearchDomains: []string{}, Resolver: "systemd-resolved", Upstream: []string{"1.1.1.1"}},
@@ -682,6 +702,9 @@ func canonicalContractMessages() []any {
 			},
 			IntrusionPrevention:    []SecurityService{{Name: "fail2ban", Status: "running", Details: []string{"sshd"}}},
 			MandatoryAccessControl: []SecurityService{{Name: "apparmor", Status: "enabled"}},
+			Sessions: []LoginSession{{
+				User: "rick", TTY: "pts/0", RemoteHost: "203.0.113.5", Service: "sshd", State: "active", StartedAt: &now, PID: 1234,
+			}},
 		},
 	}
 
