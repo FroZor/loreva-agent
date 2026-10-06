@@ -21,6 +21,9 @@ type exchange struct {
 	metrics           *metricReporter
 	metricsReplyTimer *time.Timer
 	metricsRetryTimer *time.Timer
+	// inventorySlots bounds the container inventory calls a session runs
+	// at once.
+	inventorySlots chan struct{}
 }
 
 // identityRejection means the peer no longer recognizes this node.
@@ -40,6 +43,7 @@ func newExchange(ctx context.Context, collectors Collectors, reports *nodeReport
 		metrics:           newMetricReporter(collectors.Metrics, reader),
 		metricsReplyTimer: newStoppedTimer(),
 		metricsRetryTimer: newStoppedTimer(),
+		inventorySlots:    make(chan struct{}, maxInventoryCalls),
 	}
 }
 

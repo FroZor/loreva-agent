@@ -98,6 +98,9 @@ type Collectors struct {
 	// Files serves the file manager in container volumes; it may be nil
 	// when the node has no container runtime.
 	Files ContainerFiles
+	// Inventory lists and inspects containers; it may be nil when the
+	// node has no container runtime.
+	Inventory ContainerInventory
 	// Logger receives the audit log of console commands; nil discards it.
 	Logger *slog.Logger
 }

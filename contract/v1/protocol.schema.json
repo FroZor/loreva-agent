@@ -48,6 +48,10 @@
     { "$ref": "#/$defs/nodeNetworkRefresh" },
     { "$ref": "#/$defs/nodeProcessInspect" },
     { "$ref": "#/$defs/nodeProcessInspectResult" },
+    { "$ref": "#/$defs/containersList" },
+    { "$ref": "#/$defs/containersListResult" },
+    { "$ref": "#/$defs/containerInspect" },
+    { "$ref": "#/$defs/containerInspectResult" },
     { "$ref": "#/$defs/metricsQueryResult" },
     { "$ref": "#/$defs/containerLogsOpen" },
     { "$ref": "#/$defs/containerLogsOpened" },
@@ -1544,6 +1548,299 @@
         "name": { "type": "string", "minLength": 1, "maxLength": 64 },
         "status": { "enum": ["running", "stopped", "enabled", "disabled", "enforcing", "permissive"] },
         "details": { "type": "array", "maxItems": 128, "items": { "type": "string", "minLength": 1, "maxLength": 64 } }
+      }
+    },
+    "containersList": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "request_id"],
+      "properties": {
+        "type": { "const": "containers.list" },
+        "request_id": { "$ref": "#/$defs/uuid" }
+      }
+    },
+    "containersListResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "request_id", "engine", "items", "truncated"],
+      "properties": {
+        "type": { "const": "containers.list.result" },
+        "request_id": { "$ref": "#/$defs/uuid" },
+        "engine": { "$ref": "#/$defs/containerEngine" },
+        "items": { "type": "array", "maxItems": 1024, "items": { "$ref": "#/$defs/containerSummary" } },
+        "truncated": { "type": "boolean" }
+      }
+    },
+    "containerEngine": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["runtime", "version", "security_options", "containers", "containers_running", "containers_paused", "containers_stopped", "images", "warnings"],
+      "properties": {
+        "runtime": { "const": "docker" },
+        "version": { "type": "string", "maxLength": 32768 },
+        "operating_system": { "type": "string", "maxLength": 32768 },
+        "kernel_version": { "type": "string", "maxLength": 32768 },
+        "architecture": { "type": "string", "maxLength": 32768 },
+        "storage_driver": { "type": "string", "maxLength": 32768 },
+        "logging_driver": { "type": "string", "maxLength": 32768 },
+        "cgroup_driver": { "type": "string", "maxLength": 32768 },
+        "cgroup_version": { "type": "string", "maxLength": 32768 },
+        "default_runtime": { "type": "string", "maxLength": 32768 },
+        "root_directory": { "type": "string", "maxLength": 32768 },
+        "security_options": { "type": "array", "maxItems": 4096, "items": { "type": "string", "maxLength": 32768 } },
+        "containers": { "type": "integer", "minimum": 0 },
+        "containers_running": { "type": "integer", "minimum": 0 },
+        "containers_paused": { "type": "integer", "minimum": 0 },
+        "containers_stopped": { "type": "integer", "minimum": 0 },
+        "images": { "type": "integer", "minimum": 0 },
+        "warnings": { "type": "array", "maxItems": 4096, "items": { "type": "string", "maxLength": 32768 } }
+      }
+    },
+    "containerSummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["container_id", "name", "image", "image_id", "state", "status", "health", "created_at", "ports"],
+      "properties": {
+        "container_id": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "name": { "type": "string", "maxLength": 32768 },
+        "image": { "type": "string", "maxLength": 32768 },
+        "image_id": { "type": "string", "maxLength": 32768 },
+        "state": { "type": "string", "maxLength": 32768 },
+        "status": { "type": "string", "maxLength": 32768 },
+        "health": { "enum": ["none", "starting", "healthy", "unhealthy"] },
+        "created_at": { "$ref": "#/$defs/timestamp" },
+        "ports": { "type": "array", "maxItems": 65536, "items": { "$ref": "#/$defs/containerPort" } },
+        "compose_project": { "type": "string", "maxLength": 32768 },
+        "compose_service": { "type": "string", "maxLength": 32768 }
+      }
+    },
+    "containerPort": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["container_port", "protocol"],
+      "properties": {
+        "container_port": { "type": "integer", "minimum": 0, "maximum": 65535 },
+        "protocol": { "type": "string", "maxLength": 16 },
+        "host_ip": { "type": "string", "maxLength": 64 },
+        "host_port": { "type": "integer", "minimum": 1, "maximum": 65535 }
+      }
+    },
+    "containerInspect": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "request_id", "container_id", "size"],
+      "properties": {
+        "type": { "const": "container.inspect" },
+        "request_id": { "$ref": "#/$defs/uuid" },
+        "container_id": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "size": { "type": "boolean" }
+      }
+    },
+    "containerInspectResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "request_id", "container"],
+      "properties": {
+        "type": { "const": "container.inspect.result" },
+        "request_id": { "$ref": "#/$defs/uuid" },
+        "container": { "$ref": "#/$defs/containerDetails" }
+      }
+    },
+    "containerDetails": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["container_id", "name", "created_at", "image", "command", "env", "labels", "state", "restart_policy", "auto_remove", "ports", "network", "mounts", "limits", "security", "logging"],
+      "properties": {
+        "container_id": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "name": { "type": "string", "maxLength": 32768 },
+        "created_at": { "$ref": "#/$defs/timestamp" },
+        "platform": { "type": "string", "maxLength": 32768 },
+        "image": { "$ref": "#/$defs/containerImage" },
+        "command": { "$ref": "#/$defs/containerCommand" },
+        "env": { "type": "array", "maxItems": 4096, "items": { "type": "string", "maxLength": 32768 } },
+        "labels": { "type": "object", "maxProperties": 4096, "additionalProperties": { "type": "string", "maxLength": 32768 } },
+        "state": { "$ref": "#/$defs/containerStateDetails" },
+        "restart_policy": { "$ref": "#/$defs/containerRestartPolicy" },
+        "auto_remove": { "type": "boolean" },
+        "ports": { "type": "array", "maxItems": 65536, "items": { "$ref": "#/$defs/containerPort" } },
+        "network": { "$ref": "#/$defs/containerNetwork" },
+        "mounts": { "type": "array", "maxItems": 4096, "items": { "$ref": "#/$defs/containerMount" } },
+        "limits": { "$ref": "#/$defs/containerLimits" },
+        "security": { "$ref": "#/$defs/containerSecurity" },
+        "logging": { "$ref": "#/$defs/containerLogging" },
+        "compose": { "$ref": "#/$defs/containerCompose" },
+        "size_rw_bytes": { "type": "integer", "minimum": 0 },
+        "size_root_fs_bytes": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "containerImage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["reference", "id", "digests"],
+      "properties": {
+        "reference": { "type": "string", "maxLength": 32768 },
+        "id": { "type": "string", "maxLength": 32768 },
+        "digests": { "type": "array", "maxItems": 4096, "items": { "type": "string", "maxLength": 32768 } },
+        "created_at": { "$ref": "#/$defs/timestamp" },
+        "size_bytes": { "type": "integer", "minimum": 0 },
+        "source": { "type": "string", "maxLength": 32768 },
+        "revision": { "type": "string", "maxLength": 32768 }
+      }
+    },
+    "containerCommand": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "args", "entrypoint", "cmd", "tty", "open_stdin"],
+      "properties": {
+        "path": { "type": "string", "maxLength": 32768 },
+        "args": { "type": "array", "maxItems": 4096, "items": { "type": "string", "maxLength": 32768 } },
+        "entrypoint": { "type": "array", "maxItems": 4096, "items": { "type": "string", "maxLength": 32768 } },
+        "cmd": { "type": "array", "maxItems": 4096, "items": { "type": "string", "maxLength": 32768 } },
+        "working_dir": { "type": "string", "maxLength": 32768 },
+        "user": { "type": "string", "maxLength": 32768 },
+        "tty": { "type": "boolean" },
+        "open_stdin": { "type": "boolean" },
+        "stop_signal": { "type": "string", "maxLength": 32768 },
+        "stop_timeout_seconds": { "type": "integer" }
+      }
+    },
+    "containerStateDetails": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "running", "paused", "restarting", "oom_killed", "dead", "pid", "exit_code", "restart_count"],
+      "properties": {
+        "status": { "type": "string", "maxLength": 32768 },
+        "running": { "type": "boolean" },
+        "paused": { "type": "boolean" },
+        "restarting": { "type": "boolean" },
+        "oom_killed": { "type": "boolean" },
+        "dead": { "type": "boolean" },
+        "pid": { "type": "integer", "minimum": 0 },
+        "exit_code": { "type": "integer" },
+        "error": { "type": "string", "maxLength": 32768 },
+        "started_at": { "$ref": "#/$defs/timestamp" },
+        "finished_at": { "$ref": "#/$defs/timestamp" },
+        "restart_count": { "type": "integer", "minimum": 0 },
+        "health": { "$ref": "#/$defs/containerHealth" }
+      }
+    },
+    "containerHealth": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "failing_streak"],
+      "properties": {
+        "status": { "enum": ["none", "starting", "healthy", "unhealthy"] },
+        "failing_streak": { "type": "integer", "minimum": 0 },
+        "last_exit_code": { "type": "integer" },
+        "last_output": { "type": "string", "maxLength": 4096 }
+      }
+    },
+    "containerRestartPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "maximum_retry_count"],
+      "properties": {
+        "name": { "type": "string", "maxLength": 32768 },
+        "maximum_retry_count": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "containerNetwork": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode", "dns", "extra_hosts", "networks"],
+      "properties": {
+        "mode": { "type": "string", "maxLength": 32768 },
+        "hostname": { "type": "string", "maxLength": 32768 },
+        "dns": { "type": "array", "maxItems": 4096, "items": { "type": "string", "maxLength": 64 } },
+        "extra_hosts": { "type": "array", "maxItems": 4096, "items": { "type": "string", "maxLength": 32768 } },
+        "networks": { "type": "array", "maxItems": 4096, "items": { "$ref": "#/$defs/containerNetworkAttachment" } }
+      }
+    },
+    "containerNetworkAttachment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "network_id", "aliases"],
+      "properties": {
+        "name": { "type": "string", "maxLength": 32768 },
+        "network_id": { "type": "string", "maxLength": 32768 },
+        "ipv4_address": { "type": "string", "maxLength": 64 },
+        "ipv4_prefix_length": { "type": "integer", "minimum": 0, "maximum": 32 },
+        "ipv4_gateway": { "type": "string", "maxLength": 64 },
+        "ipv6_address": { "type": "string", "maxLength": 64 },
+        "ipv6_prefix_length": { "type": "integer", "minimum": 0, "maximum": 128 },
+        "ipv6_gateway": { "type": "string", "maxLength": 64 },
+        "mac_address": { "type": "string", "maxLength": 64 },
+        "aliases": { "type": "array", "maxItems": 4096, "items": { "type": "string", "maxLength": 32768 } }
+      }
+    },
+    "containerMount": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "destination", "read_write"],
+      "properties": {
+        "type": { "type": "string", "maxLength": 32768 },
+        "name": { "type": "string", "maxLength": 32768 },
+        "source": { "type": "string", "maxLength": 32768 },
+        "destination": { "type": "string", "maxLength": 32768 },
+        "driver": { "type": "string", "maxLength": 32768 },
+        "mode": { "type": "string", "maxLength": 32768 },
+        "read_write": { "type": "boolean" },
+        "propagation": { "type": "string", "maxLength": 32768 }
+      }
+    },
+    "containerLimits": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["memory_bytes", "memory_reservation_bytes", "memory_swap_bytes", "nano_cpus", "cpu_shares", "cpu_quota", "cpu_period", "shm_size_bytes"],
+      "properties": {
+        "memory_bytes": { "type": "integer" },
+        "memory_reservation_bytes": { "type": "integer" },
+        "memory_swap_bytes": { "type": "integer" },
+        "nano_cpus": { "type": "integer" },
+        "cpu_shares": { "type": "integer" },
+        "cpu_quota": { "type": "integer" },
+        "cpu_period": { "type": "integer" },
+        "cpuset_cpus": { "type": "string", "maxLength": 32768 },
+        "pids_limit": { "type": "integer" },
+        "shm_size_bytes": { "type": "integer" }
+      }
+    },
+    "containerSecurity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["privileged", "read_only_root_fs", "cap_add", "cap_drop", "security_options", "devices"],
+      "properties": {
+        "privileged": { "type": "boolean" },
+        "read_only_root_fs": { "type": "boolean" },
+        "cap_add": { "type": "array", "maxItems": 4096, "items": { "type": "string", "maxLength": 32768 } },
+        "cap_drop": { "type": "array", "maxItems": 4096, "items": { "type": "string", "maxLength": 32768 } },
+        "security_options": { "type": "array", "maxItems": 4096, "items": { "type": "string", "maxLength": 32768 } },
+        "pid_mode": { "type": "string", "maxLength": 32768 },
+        "ipc_mode": { "type": "string", "maxLength": 32768 },
+        "uts_mode": { "type": "string", "maxLength": 32768 },
+        "userns_mode": { "type": "string", "maxLength": 32768 },
+        "devices": { "type": "array", "maxItems": 4096, "items": { "type": "string", "maxLength": 32768 } },
+        "apparmor_profile": { "type": "string", "maxLength": 32768 }
+      }
+    },
+    "containerLogging": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["driver", "options"],
+      "properties": {
+        "driver": { "type": "string", "maxLength": 32768 },
+        "options": { "type": "object", "maxProperties": 4096, "additionalProperties": { "type": "string", "maxLength": 32768 } }
+      }
+    },
+    "containerCompose": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["project", "config_files"],
+      "properties": {
+        "project": { "type": "string", "maxLength": 32768 },
+        "service": { "type": "string", "maxLength": 32768 },
+        "working_dir": { "type": "string", "maxLength": 32768 },
+        "config_files": { "type": "array", "maxItems": 4096, "items": { "type": "string", "maxLength": 32768 } }
       }
     },
     "nodeProcessInspect": {

@@ -40,6 +40,24 @@ func (f *fakeContainers) SendCommand(_ context.Context, _ string, command string
 	return containerio.CommandResult{Adapter: containerio.AdapterRCON, Output: "ran " + command}, nil
 }
 
+// fakeInventory lists one container and describes it.
+type fakeInventory struct{}
+
+func (fakeInventory) List(context.Context) (protocol.ContainersListResult, error) {
+	return protocol.ContainersListResult{
+		Engine: protocol.ContainerEngine{Runtime: "docker", Version: "29.6.2", SecurityOptions: []string{}, Warnings: []string{}},
+		Items:  []protocol.ContainerSummary{{ContainerID: testContainerID, Name: "minecraft", State: "exited", Health: "none", Ports: []protocol.ContainerPort{}}},
+	}, nil
+}
+
+func (fakeInventory) Inspect(_ context.Context, containerID string, _ bool) (protocol.ContainerDetails, error) {
+	if containerID != testContainerID {
+		return protocol.ContainerDetails{}, containerio.ErrNotFound
+	}
+
+	return protocol.ContainerDetails{ContainerID: containerID, Name: "minecraft", Env: []string{"EULA=TRUE"}}, nil
+}
+
 // fakeLog emits more stdout than one stream window plus a stderr line.
 type fakeLog struct{}
 
@@ -218,5 +236,42 @@ func TestDeviceContainerConsole(t *testing.T) {
 	defer node.containers.mu.Unlock()
 	if len(node.containers.commands) != 1 {
 		t.Fatalf("container received %q", node.containers.commands)
+	}
+}
+
+func TestDeviceContainerInventory(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
+
+	node := startNode(t)
+	session, err := client.Connect(ctx, pairDevice(ctx, t, node))
+	if err != nil {
+		t.Fatalf("Connect() error = %v", err)
+	}
+	defer session.Close()
+
+	send(ctx, t, session, protocol.ContainersList{Type: protocol.ContainersListType, RequestID: "2ab9d734-7434-4cdf-bca4-6ce7a46cdd65"})
+	var list protocol.ContainersListResult
+	expect(ctx, t, session, protocol.ContainersListResultType, &list)
+	if list.RequestID != "2ab9d734-7434-4cdf-bca4-6ce7a46cdd65" || len(list.Items) != 1 || list.Items[0].State != "exited" {
+		t.Fatalf("list = %+v", list)
+	}
+
+	send(ctx, t, session, protocol.ContainerInspect{
+		Type: protocol.ContainerInspectType, RequestID: "6e0c1d91-5145-440f-bf97-d84db4f83644", ContainerID: testContainerID,
+	})
+	var inspected protocol.ContainerInspectResult
+	expect(ctx, t, session, protocol.ContainerInspectResultType, &inspected)
+	if inspected.Container.Name != "minecraft" || len(inspected.Container.Env) != 1 {
+		t.Fatalf("inspect = %+v", inspected)
+	}
+
+	send(ctx, t, session, protocol.ContainerInspect{
+		Type: protocol.ContainerInspectType, RequestID: "0d1b7f56-39b6-4b94-a3aa-c445a6a6ab59", ContainerID: string(bytes.Repeat([]byte("cd"), 32)),
+	})
+	var missing protocol.Error
+	expect(ctx, t, session, protocol.ErrorType, &missing)
+	if missing.Code != "container_not_found" || missing.RequestID != "0d1b7f56-39b6-4b94-a3aa-c445a6a6ab59" {
+		t.Fatalf("missing = %+v", missing)
 	}
 }

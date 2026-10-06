@@ -356,6 +356,10 @@ func contractMessageTypes() map[string]string {
 		"nodeNetworkRefresh":         NodeNetworkRefreshType,
 		"nodeProcessInspect":         NodeProcessInspectType,
 		"nodeProcessInspectResult":   NodeProcessInspectResultType,
+		"containersList":             ContainersListType,
+		"containersListResult":       ContainersListResultType,
+		"containerInspect":           ContainerInspectType,
+		"containerInspectResult":     ContainerInspectResultType,
 		"metricsQueryResult":         MetricsQueryResultType,
 		"containerLogsOpen":          ContainerLogsOpenType,
 		"containerLogsOpened":        ContainerLogsOpenedType,
@@ -411,6 +415,26 @@ func contractDTOs() map[string]reflect.Type {
 		"nodeProcessInspect":             reflect.TypeFor[NodeProcessInspect](),
 		"nodeProcessInspectResult":       reflect.TypeFor[NodeProcessInspectResult](),
 		"processDetails":                 reflect.TypeFor[ProcessDetails](),
+		"containersList":                 reflect.TypeFor[ContainersList](),
+		"containersListResult":           reflect.TypeFor[ContainersListResult](),
+		"containerEngine":                reflect.TypeFor[ContainerEngine](),
+		"containerSummary":               reflect.TypeFor[ContainerSummary](),
+		"containerPort":                  reflect.TypeFor[ContainerPort](),
+		"containerInspect":               reflect.TypeFor[ContainerInspect](),
+		"containerInspectResult":         reflect.TypeFor[ContainerInspectResult](),
+		"containerDetails":               reflect.TypeFor[ContainerDetails](),
+		"containerImage":                 reflect.TypeFor[ContainerImage](),
+		"containerCommand":               reflect.TypeFor[ContainerCommand](),
+		"containerStateDetails":          reflect.TypeFor[ContainerStateDetails](),
+		"containerHealth":                reflect.TypeFor[ContainerHealth](),
+		"containerRestartPolicy":         reflect.TypeFor[ContainerRestartPolicy](),
+		"containerNetwork":               reflect.TypeFor[ContainerNetwork](),
+		"containerNetworkAttachment":     reflect.TypeFor[ContainerNetworkAttachment](),
+		"containerMount":                 reflect.TypeFor[ContainerMount](),
+		"containerLimits":                reflect.TypeFor[ContainerLimits](),
+		"containerSecurity":              reflect.TypeFor[ContainerSecurity](),
+		"containerLogging":               reflect.TypeFor[ContainerLogging](),
+		"containerCompose":               reflect.TypeFor[ContainerCompose](),
 		"publicAddress":                  reflect.TypeFor[PublicAddress](),
 		"dnsConfiguration":               reflect.TypeFor[DNSConfiguration](),
 		"securityInformation":            reflect.TypeFor[SecurityInformation](),
@@ -571,6 +595,45 @@ func canonicalContractMessages() []any {
 		TCP:       &TCPMetrics{Established: 3, TimeWait: 1, InUse: 5, PassiveOpensPerSecond: 0.5},
 		GPUs:      []GPUMetrics{},
 		Processes: ProcessMetrics{Items: []ProcessMetric{}},
+	}
+	stopTimeout := 30
+	exitCode := 0
+	pidsLimit := int64(512)
+	sizeRW := int64(4096)
+	containerDetails := ContainerDetails{
+		ContainerID: containerID, Name: "minecraft", CreatedAt: now, Platform: "linux",
+		Image: ContainerImage{
+			Reference: "itzg/minecraft-server:java21", ID: "sha256:" + strings.Repeat("cd", 32),
+			Digests: []string{"itzg/minecraft-server@sha256:" + strings.Repeat("ef", 32)}, CreatedAt: &now,
+			Source: "https://github.com/itzg/docker-minecraft-server",
+		},
+		Command: ContainerCommand{
+			Path: "/start", Args: []string{}, Entrypoint: []string{"/start"}, Cmd: []string{}, WorkingDir: "/data",
+			TTY: true, OpenStdin: true, StopTimeout: &stopTimeout,
+		},
+		Env:    []string{"EULA=TRUE", "RCON_PASSWORD=secret"},
+		Labels: map[string]string{"com.docker.compose.project": "games"},
+		State: ContainerStateDetails{
+			Status: "running", Running: true, PID: 4242, StartedAt: &now, RestartCount: 1,
+			Health: &ContainerHealth{Status: "healthy", LastExitCode: &exitCode, LastOutput: "ok"},
+		},
+		RestartPolicy: ContainerRestartPolicy{Name: "unless-stopped"},
+		Ports:         []ContainerPort{{ContainerPort: 25565, Protocol: "tcp", HostIP: "0.0.0.0", HostPort: 25565}},
+		Network: ContainerNetwork{
+			Mode: "games_default", Hostname: "minecraft", DNS: []string{}, ExtraHosts: []string{},
+			Networks: []ContainerNetworkAttachment{{
+				Name: "games_default", NetworkID: strings.Repeat("ab", 32), IPv4Address: "172.18.0.2", IPv4Prefix: 16,
+				IPv4Gateway: "172.18.0.1", MACAddress: "02:42:ac:12:00:02", Aliases: []string{"minecraft"},
+			}},
+		},
+		Mounts: []ContainerMount{{Type: "volume", Name: "games_data", Source: "/var/lib/docker/volumes/games_data/_data", Destination: "/data", Driver: "local", ReadWrite: true}},
+		Limits: ContainerLimits{MemoryBytes: 4 << 30, NanoCPUs: 2e9, PIDsLimit: &pidsLimit, ShmSizeBytes: 64 << 20},
+		Security: ContainerSecurity{
+			CapAdd: []string{}, CapDrop: []string{"NET_RAW"}, SecurityOptions: []string{}, Devices: []string{}, AppArmorProfile: "docker-default",
+		},
+		Logging:     ContainerLogging{Driver: "json-file", Options: map[string]string{"max-size": "10m"}},
+		Compose:     &ContainerCompose{Project: "games", Service: "minecraft", ConfigFiles: []string{"/srv/games/compose.yaml"}},
+		SizeRWBytes: &sizeRW,
 	}
 	rollup := MetricRollup{
 		FirstSequence: 1, LastSequence: 60, Start: now, End: now.Add(time.Minute), Samples: 60,
@@ -745,6 +808,23 @@ func canonicalContractMessages() []any {
 		},
 		NodeNetworkRefresh{Type: NodeNetworkRefreshType, RequestID: requestID},
 		NodeProcessInspect{Type: NodeProcessInspectType, RequestID: requestID, PID: 812, StartedAt: now},
+		ContainersList{Type: ContainersListType, RequestID: requestID},
+		ContainersListResult{
+			Type: ContainersListResultType, RequestID: requestID,
+			Engine: ContainerEngine{
+				Runtime: "docker", Version: "29.6.2", StorageDriver: "overlayfs", CgroupVersion: "2",
+				SecurityOptions: []string{"name=seccomp,profile=builtin"}, Containers: 2, ContainersRunning: 1, ContainersStopped: 1, Images: 3,
+				Warnings: []string{},
+			},
+			Items: []ContainerSummary{{
+				ContainerID: containerID, Name: "minecraft", Image: "itzg/minecraft-server:java21", ImageID: "sha256:" + strings.Repeat("cd", 32),
+				State: "running", Status: "Up 3 hours", Health: "healthy", CreatedAt: now,
+				Ports:          []ContainerPort{{ContainerPort: 25565, Protocol: "tcp", HostIP: "0.0.0.0", HostPort: 25565}, {ContainerPort: 25575, Protocol: "tcp"}},
+				ComposeProject: "games", ComposeService: "minecraft",
+			}},
+		},
+		ContainerInspect{Type: ContainerInspectType, RequestID: requestID, ContainerID: containerID, Size: true},
+		ContainerInspectResult{Type: ContainerInspectResultType, RequestID: requestID, Container: containerDetails},
 		NodeProcessInspectResult{Type: NodeProcessInspectResultType, RequestID: requestID, Process: ProcessDetails{
 			PID: 812, ParentPID: 1, StartedAt: now, Name: "java", State: "sleeping", User: "minecraft",
 			CommandLine: []string{"java", "-Xmx4G", "-jar", "server.jar", "nogui"},

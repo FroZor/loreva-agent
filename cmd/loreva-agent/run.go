@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/FroZor/loreva-agent/internal/containerfiles"
+	"github.com/FroZor/loreva-agent/internal/containerinfo"
 	"github.com/FroZor/loreva-agent/internal/containerio"
 	"github.com/FroZor/loreva-agent/internal/direct"
 	"github.com/FroZor/loreva-agent/internal/dockerapi"
@@ -117,8 +118,8 @@ func runAgent(arguments []string, logger *slog.Logger) error {
 		}
 	}()
 
-	containers, files, closeContainers := openContainerServices(ctx, logger)
-	defer closeContainers()
+	containers := openContainerServices(ctx, logger)
+	defer containers.close()
 
 	collectors := session.Collectors{
 		Specifications: specifications.Collect,
@@ -126,8 +127,9 @@ func runAgent(arguments []string, logger *slog.Logger) error {
 		Metrics:        metricStore,
 		Processes:      metricCollector.InspectProcess,
 		Workloads:      workloadManager,
-		Containers:     containers,
-		Files:          files,
+		Containers:     containers.io,
+		Files:          containers.files,
+		Inventory:      containers.inventory,
 		Logger:         logger,
 	}
 
@@ -144,8 +146,9 @@ func runAgent(arguments []string, logger *slog.Logger) error {
 					Processes:      collectors.Processes,
 				},
 				Workloads:  workloadManager,
-				Containers: containers,
-				Files:      files,
+				Containers: containers.io,
+				Files:      containers.files,
+				Inventory:  containers.inventory,
 				Logger:     logger,
 			})
 		})
@@ -159,14 +162,23 @@ func runAgent(arguments []string, logger *slog.Logger) error {
 	return runServices(ctx, services)
 }
 
-// openContainerServices connects container logs, consoles, and the file
-// manager to Docker. Without Docker the node still runs; device requests
-// are then refused.
-func openContainerServices(ctx context.Context, logger *slog.Logger) (session.ContainerIO, session.ContainerFiles, func()) {
+// containerServices are the Docker-backed services of a session; they are
+// nil when the node has no Docker.
+type containerServices struct {
+	io        session.ContainerIO
+	files     session.ContainerFiles
+	inventory session.ContainerInventory
+	close     func()
+}
+
+// openContainerServices connects the container list, logs, consoles, and the
+// file manager to Docker. Without Docker the node still runs; container
+// requests are then refused.
+func openContainerServices(ctx context.Context, logger *slog.Logger) containerServices {
 	engine, err := dockerapi.Connect()
 	if err != nil {
-		logger.Warn("container logs, consoles, and files are unavailable", "error", err)
-		return nil, nil, func() {}
+		logger.Warn("containers, their logs, consoles, and files are unavailable", "error", err)
+		return containerServices{close: func() {}}
 	}
 
 	files := containerfiles.New(engine, logger)
@@ -176,11 +188,16 @@ func openContainerServices(ctx context.Context, logger *slog.Logger) (session.Co
 	}
 	cancel()
 
-	return containerio.New(engine), files, func() {
-		files.Close()
-		if err := engine.Close(); err != nil {
-			logger.Warn("close Docker client", "error", err)
-		}
+	return containerServices{
+		io:        containerio.New(engine),
+		files:     files,
+		inventory: containerinfo.New(engine),
+		close: func() {
+			files.Close()
+			if err := engine.Close(); err != nil {
+				logger.Warn("close Docker client", "error", err)
+			}
+		},
 	}
 }
 

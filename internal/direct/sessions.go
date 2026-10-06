@@ -260,6 +260,7 @@ func (s *sessions) serveDevice(ctx context.Context, conn *websocket.Conn, device
 	collectors := s.options.Collectors.session()
 	collectors.Containers = s.options.Containers
 	collectors.Files = s.options.Files
+	collectors.Inventory = s.options.Inventory
 	err := session.ServeDevice(sessionCtx, conn, session.DeviceConfig{
 		Hello:           s.hello(protocol.SessionPeerDevice, device.ID),
 		NodeID:          s.node.id,

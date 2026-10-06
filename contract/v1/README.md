@@ -32,7 +32,7 @@ agent  connect.proof
 portal connect.accepted | connect.rejected
 ```
 
-After `connect.accepted`, the agent can send `renew.request`, `node.specifications.report`, `node.network.report`, `metrics.report`, and `metrics.rollup` (see [Metrics store](#metrics-store)). A metrics frame contains `metric.type`: `node`, `container`, or a versioned `plugin:<name>` adapter namespace. The portal can send the correlated accepted/rejected responses, `sources.update`, `drain`, a signed `portal.command`, `metrics.query`, `node.network.refresh`, `node.process.inspect`, and the container log and console requests of [Container logs and consoles](#container-logs-and-consoles).
+After `connect.accepted`, the agent can send `renew.request`, `node.specifications.report`, `node.network.report`, `metrics.report`, and `metrics.rollup` (see [Metrics store](#metrics-store)). A metrics frame contains `metric.type`: `node`, `container`, or a versioned `plugin:<name>` adapter namespace. The portal can send the correlated accepted/rejected responses, `sources.update`, `drain`, a signed `portal.command`, `metrics.query`, `node.network.refresh`, `node.process.inspect`, `containers.list`, `container.inspect`, and the container log and console requests of [Container logs and consoles](#container-logs-and-consoles).
 
 ## Workload commands
 
@@ -239,6 +239,7 @@ A device sends requests at any time:
 | `device.remove` | `device.remove.result`; the removed device's sessions end |
 | `node.network.refresh` | a new `node.network.report`, see [Node network report](#node-network-report) |
 | `node.process.inspect` | `node.process.inspect.result`, see [Metric units](#metric-units) |
+| `containers.list`, `container.inspect` | `containers.list.result`, `container.inspect.result`, see [Containers](#containers) |
 | `container.logs.open` | `container.logs.opened`, then binary stream frames and a final `stream.close` |
 | `container.console.info` | `container.console.info.result` |
 | `container.console.send` | `container.console.send.result` |
@@ -250,6 +251,22 @@ A device workload request is the payload of a portal workload command without th
 The portal serves artifacts to the agent; a device uploads them before planning instead. `artifact.upload.request` announces the artifact (`artifact_id`, `sha256`, `size_bytes`, at most 32 MiB), then `artifact.upload.chunk` frames carry it in order: `offset` is the number of bytes sent so far and `data` is at most 32 KiB, standard Base64. After the last byte the node checks the size and the digest and answers `artifact.upload.result`. A session uploads one artifact at a time. A plan then references the artifact by the same `artifact_id`, `sha256`, and `size_bytes`.
 
 Every paired device may use every operation. Revoking a device ends its open sessions, and the node refuses its key in the TLS handshake from then on.
+
+### Containers
+
+`containers.list` returns every container of the node's Docker, stopped ones included, sorted by name, at most 1024 (`truncated` is set when there are more). Each item has its ID, name, image, state, Docker's status line, `health` (`none` without a health check), creation time, ports, and the Compose project and service. `engine` describes Docker itself: version, storage, logging and cgroup drivers, cgroup version, default runtime, root directory, security options, container and image counts, and Docker's warnings. Metrics samples keep listing only running containers, because only they have resource usage.
+
+`container.inspect` with a `container_id` returns what `docker inspect` shows an administrator:
+
+- `image`: the reference the container was created with, the image ID, its registry digests (empty for local builds), creation time and size, and the `org.opencontainers.image.source` and `revision` labels that name where the image was built from.
+- `command`: path and arguments of the main process, entrypoint, cmd, working directory, user, TTY and stdin settings, stop signal and timeout.
+- `env` and `labels` in full, secrets included; masking them is the client's job.
+- `state` with exit code, error, start and finish times, restart count, OOM kill, and the last health check result; `restart_policy` and `auto_remove`.
+- `ports` (exposed ports without a host side are listed too), `network` (mode, hostname, DNS, extra hosts, and each attached network with its addresses and MAC), and `mounts`.
+- `limits` (0 means not set), `security` (privileged, read-only root, added and dropped capabilities, security options, namespaces, devices, AppArmor profile), `logging`, and `compose` for containers created by Docker Compose.
+- With `size: true` the node also measures the writable layer (`size_rw_bytes`) and the whole file system (`size_root_fs_bytes`); this can take a while on large containers.
+
+Errors: `invalid_container_id`, `container_not_found`, `containers_unavailable` without Docker, `busy` when 4 container requests of the session are already running, and `too_large` when an answer would exceed 512 KiB. Strings longer than 32 KiB and lists or maps longer than 4096 entries are cut.
 
 ### Container logs and consoles
 

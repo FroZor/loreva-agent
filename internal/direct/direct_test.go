@@ -149,6 +149,7 @@ func startNode(t *testing.T) *testNode {
 			Workloads:  workloads,
 			Containers: containers,
 			Files:      files,
+			Inventory:  fakeInventory{},
 		})
 	}()
 	t.Cleanup(func() {

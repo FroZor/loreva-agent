@@ -80,8 +80,10 @@ type Options struct {
 	// Containers may be nil when the node has no container runtime.
 	Containers session.ContainerIO
 	// Files may be nil when the node has no container runtime.
-	Files  session.ContainerFiles
-	Logger *slog.Logger
+	Files session.ContainerFiles
+	// Inventory may be nil when the node has no container runtime.
+	Inventory session.ContainerInventory
+	Logger    *slog.Logger
 }
 
 // localNode is the validated form of state.Node.
