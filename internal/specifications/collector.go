@@ -10,9 +10,11 @@ import (
 	"net"
 	"os"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/shirou/gopsutil/v4/cpu"
@@ -58,7 +60,11 @@ func Collect(ctx context.Context) (Snapshot, error) {
 			cpuSpecifications.LogicalProcessors[index].NUMANodeID = numaNodeID
 		}
 	}
+	applyCPUDetails(&cpuSpecifications, platform.cpuDetails, platform.offlineProcessors)
 	cpuSpecifications.NUMANodes = platform.numaNodes
+	system.Platform = platform.platform
+	system.Timezone = platform.timezone
+	system.InitSystem = platform.initSystem
 	memorySpecifications.Modules = platform.memoryModules
 	if installedBytes := installedMemoryBytes(platform.memoryModules); installedBytes > memorySpecifications.TotalBytes {
 		memorySpecifications.TotalBytes = installedBytes
@@ -106,6 +112,15 @@ func installedMemoryBytes(modules []protocol.MemoryModuleSpecifications) uint64 
 func normalizeSpecificationCollections(specifications *protocol.NodeSpecifications) {
 	if specifications.CPU.Packages == nil {
 		specifications.CPU.Packages = []protocol.CPUPackageSpecifications{}
+	}
+	for index := range specifications.CPU.Packages {
+		cpuPackage := &specifications.CPU.Packages[index]
+		if cpuPackage.Caches == nil {
+			cpuPackage.Caches = []protocol.CPUCacheSpecifications{}
+		}
+		if cpuPackage.Flags == nil {
+			cpuPackage.Flags = []string{}
+		}
 	}
 	if specifications.CPU.NUMANodes == nil {
 		specifications.CPU.NUMANodes = []protocol.NUMANodeSpecifications{}
@@ -197,6 +212,11 @@ func collectSystem(ctx context.Context) (protocol.SystemSpecifications, string, 
 	} else {
 		system.OS.Name = sanitize(platform, 128)
 		system.OS.Version = sanitize(version, 128)
+	}
+
+	if bootSeconds, err := host.BootTimeWithContext(ctx); err == nil && bootSeconds > 0 {
+		bootTime := time.Unix(int64(bootSeconds), 0).UTC()
+		system.BootTime = &bootTime
 	}
 
 	kernelVersion, err := host.KernelVersionWithContext(ctx)
@@ -306,10 +326,16 @@ func normalizeCPU(information []cpu.InfoStat, logicalCount, physicalCount int) (
 			packageIndexes[key] = packageIndex
 			builders = append(builders, &packageBuilder{
 				packageSpecifications: protocol.CPUPackageSpecifications{
-					ID:     "package:" + strconv.Itoa(packageIndex),
-					Vendor: sanitize(info.VendorID, 128),
-					Model:  sanitize(info.ModelName, 256),
-					Socket: sanitize(info.PhysicalID, 64),
+					ID:              "package:" + strconv.Itoa(packageIndex),
+					Vendor:          sanitize(info.VendorID, 128),
+					Model:           sanitize(info.ModelName, 256),
+					Socket:          sanitize(info.PhysicalID, 64),
+					Family:          sanitize(info.Family, 32),
+					ModelID:         sanitize(info.Model, 32),
+					Stepping:        steppingText(info),
+					Microcode:       sanitize(info.Microcode, 64),
+					BaseFrequencyHz: nominalFrequencyHz(info.ModelName),
+					Flags:           cpuFlags(info.Flags),
 				},
 				coreIDs: make(map[string]struct{}),
 			})
@@ -385,6 +411,88 @@ func normalizeCPU(information []cpu.InfoStat, logicalCount, physicalCount int) (
 	})
 
 	return packages, logicalProcessors
+}
+
+// applyCPUDetails adds sysfs frequencies and caches to the packages they
+// belong to, and lists present processors that are offline.
+func applyCPUDetails(specifications *protocol.CPUSpecifications, details map[string]cpuPackageDetails, offline []int) {
+	for index := range specifications.Packages {
+		cpuPackage := &specifications.Packages[index]
+		socket := cpuPackage.Socket
+		if socket == "" {
+			socket = "0"
+		}
+		item, exists := details[socket]
+		if !exists {
+			continue
+		}
+		if item.baseFrequencyHz > 0 {
+			cpuPackage.BaseFrequencyHz = item.baseFrequencyHz
+		}
+		cpuPackage.MinFrequencyHz = item.minFrequencyHz
+		cpuPackage.MaxFrequencyHz = item.maxFrequencyHz
+		cpuPackage.Caches = item.caches
+	}
+
+	for _, processor := range offline {
+		specifications.LogicalProcessors = append(specifications.LogicalProcessors, protocol.LogicalProcessorSpecifications{
+			ID:     "cpu:" + strconv.Itoa(processor),
+			Online: false,
+		})
+	}
+	sort.Slice(specifications.LogicalProcessors, func(left, right int) bool {
+		return logicalProcessorNumber(specifications.LogicalProcessors[left].ID) <
+			logicalProcessorNumber(specifications.LogicalProcessors[right].ID)
+	})
+}
+
+// nominalFrequencyHz reads the rated clock that Intel puts in the model
+// name, such as "Intel(R) Xeon(R) Gold 6226R CPU @ 2.90GHz".
+func nominalFrequencyHz(modelName string) uint64 {
+	_, rated, found := strings.Cut(modelName, "@")
+	if !found {
+		return 0
+	}
+	rated = strings.TrimSpace(rated)
+	value, isGHz := strings.CutSuffix(rated, "GHz")
+	multiplier := 1e9
+	if !isGHz {
+		if value, found = strings.CutSuffix(rated, "MHz"); !found {
+			return 0
+		}
+		multiplier = 1e6
+	}
+	number, err := strconv.ParseFloat(strings.TrimSpace(value), 64)
+	if err != nil || number <= 0 || number > 100 && isGHz {
+		return 0
+	}
+
+	return uint64(math.Round(number * multiplier))
+}
+
+// cpuFlags returns the feature flags, such as avx2 or vmx, sorted and
+// bounded.
+func cpuFlags(flags []string) []string {
+	const maxFlags = 512
+	result := make([]string, 0, min(len(flags), maxFlags))
+	for _, flag := range flags {
+		if flag = sanitizeID(flag); flag != "" && len(result) < maxFlags {
+			result = append(result, flag)
+		}
+	}
+	sort.Strings(result)
+
+	return slices.Compact(result)
+}
+
+// steppingText reports the stepping only when the processor reports its
+// family, since stepping 0 is a real revision.
+func steppingText(info cpu.InfoStat) string {
+	if info.Family == "" || info.Stepping < 0 {
+		return ""
+	}
+
+	return strconv.Itoa(int(info.Stepping))
 }
 
 func collectMemory(ctx context.Context) (protocol.MemorySpecifications, []protocol.CollectionIssue) {

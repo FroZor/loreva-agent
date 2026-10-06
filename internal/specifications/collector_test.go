@@ -102,3 +102,16 @@ func TestIssueClassifiesTimeout(t *testing.T) {
 		t.Fatalf("issue code = %q", collectionIssue.Code)
 	}
 }
+
+func TestNominalFrequencyHz(t *testing.T) {
+	for model, want := range map[string]uint64{
+		"Intel(R) Xeon(R) Gold 6226R CPU @ 2.90GHz": 2_900_000_000,
+		"Intel(R) Atom(TM) CPU @ 800MHz":            800_000_000,
+		"AMD EPYC 7763 64-Core Processor":           0,
+		"Broken @ fastGHz":                          0,
+	} {
+		if got := nominalFrequencyHz(model); got != want {
+			t.Errorf("nominalFrequencyHz(%q) = %d, want %d", model, got, want)
+		}
+	}
+}

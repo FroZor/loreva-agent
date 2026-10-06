@@ -1143,21 +1143,61 @@
         "hostname": { "type": "string", "minLength": 1, "maxLength": 255 },
         "architecture": { "type": "string", "minLength": 1, "maxLength": 64 },
         "os": { "$ref": "#/$defs/osSpecifications" },
-        "virtualization": { "$ref": "#/$defs/virtualizationSpecifications" }
+        "virtualization": { "$ref": "#/$defs/virtualizationSpecifications" },
+        "platform": { "$ref": "#/$defs/platformSpecifications" },
+        "boot_time": { "$ref": "#/$defs/timestamp" },
+        "timezone": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "init_system": { "type": "string", "minLength": 1, "maxLength": 64 }
+      }
+    },
+    "platformSpecifications": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "system_vendor": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "system_product": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "system_version": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "board_vendor": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "board_product": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "bios_vendor": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "bios_version": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "bios_date": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "chassis_type": { "type": "string", "minLength": 1, "maxLength": 64 }
       }
     },
     "cpuPackageSpecifications": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["id"],
+      "required": ["id", "caches", "flags"],
       "properties": {
         "id": { "type": "string", "minLength": 1, "maxLength": 128 },
         "vendor": { "type": "string", "maxLength": 255 },
         "model": { "type": "string", "maxLength": 255 },
         "socket": { "type": "string", "maxLength": 128 },
+        "family": { "type": "string", "minLength": 1, "maxLength": 32 },
+        "model_id": { "type": "string", "minLength": 1, "maxLength": 32 },
+        "stepping": { "type": "string", "minLength": 1, "maxLength": 16 },
+        "microcode": { "type": "string", "minLength": 1, "maxLength": 64 },
         "physical_core_count": { "type": "integer", "minimum": 1 },
         "logical_processor_count": { "type": "integer", "minimum": 1 },
-        "frequency_hz": { "type": "integer", "minimum": 1 }
+        "frequency_hz": { "type": "integer", "minimum": 1 },
+        "base_frequency_hz": { "type": "integer", "minimum": 1 },
+        "min_frequency_hz": { "type": "integer", "minimum": 1 },
+        "max_frequency_hz": { "type": "integer", "minimum": 1 },
+        "caches": { "type": "array", "maxItems": 64, "items": { "$ref": "#/$defs/cpuCacheSpecifications" } },
+        "flags": { "type": "array", "maxItems": 512, "items": { "type": "string", "minLength": 1, "maxLength": 128 } }
+      }
+    },
+    "cpuCacheSpecifications": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["level", "type", "size_bytes", "instances", "shared_by_logical_processors"],
+      "properties": {
+        "level": { "type": "integer", "minimum": 1, "maximum": 8 },
+        "type": { "type": "string", "maxLength": 32 },
+        "size_bytes": { "type": "integer", "minimum": 0 },
+        "instances": { "type": "integer", "minimum": 0 },
+        "shared_by_logical_processors": { "type": "integer", "minimum": 1 }
       }
     },
     "numaNodeSpecifications": {
@@ -1245,7 +1285,19 @@
         "transport": { "type": "string", "maxLength": 64 },
         "capacity_bytes": { "type": "integer", "minimum": 1 },
         "block_size_bytes": { "type": "integer", "minimum": 1 },
-        "removable": { "type": "boolean" }
+        "removable": { "type": "boolean" },
+        "members": { "type": "array", "maxItems": 256, "items": { "type": "string", "minLength": 1, "maxLength": 255 } },
+        "partitions": { "type": "array", "maxItems": 256, "items": { "$ref": "#/$defs/storagePartitionSpecifications" } }
+      }
+    },
+    "storagePartitionSpecifications": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "start_bytes", "size_bytes"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1, "maxLength": 255 },
+        "start_bytes": { "type": "integer", "minimum": 0 },
+        "size_bytes": { "type": "integer", "minimum": 0 }
       }
     },
     "networkInterfaceSpecifications": {

@@ -33,6 +33,7 @@ func collectPlatform(ctx context.Context) platformSpecifications {
 	storageDevices, storageIssues := collectLinuxStorage(ctx)
 	numaNodes, logicalProcessorNUMA, numaIssues := collectLinuxNUMA(ctx)
 	networkInterfaces, networkIssues := collectLinuxNetworkInterfaces(ctx)
+	cpuDetails, offlineProcessors := collectCPUDetails()
 
 	issues := append(memoryIssues, gpuIssues...)
 	issues = append(issues, storageIssues...)
@@ -40,6 +41,11 @@ func collectPlatform(ctx context.Context) platformSpecifications {
 	issues = append(issues, networkIssues...)
 
 	return platformSpecifications{
+		cpuDetails:           cpuDetails,
+		offlineProcessors:    offlineProcessors,
+		platform:             collectPlatformIdentity(),
+		timezone:             hostTimezone(),
+		initSystem:           hostInitSystem(),
 		memoryModules:        memoryModules,
 		gpus:                 gpus,
 		storageDevices:       storageDevices,
@@ -122,13 +128,17 @@ func collectLinuxGPUs(ctx context.Context) ([]protocol.GPUSpecifications, []prot
 		deviceID, _ := readTrimmedFile(filepath.Join(devicePath, "device"), 32)
 		driver := symlinkBase(filepath.Join(devicePath, "driver"))
 
-		gpus = append(gpus, protocol.GPUSpecifications{
+		gpu := protocol.GPUSpecifications{
 			ID:       "gpu:" + sanitizeID(entry.Name()),
 			Vendor:   pciVendorName(vendorID),
 			VendorID: trimHexPrefix(vendorID),
 			DeviceID: trimHexPrefix(deviceID),
 			Driver:   sanitize(driver, 128),
-		})
+		}
+		if gpu.VendorID == "10de" {
+			gpu.Model, gpu.DriverVersion = nvidiaGPU(entry.Name())
+		}
+		gpus = append(gpus, gpu)
 	}
 
 	return gpus, nil
@@ -173,8 +183,17 @@ func collectLinuxStorage(ctx context.Context) (
 		}
 
 		transport := symlinkBase(filepath.Join(devicePath, "device/subsystem"))
-		if strings.HasPrefix(name, "nvme") {
+		model, _ := readTrimmedFile(filepath.Join(devicePath, "device/model"), 256)
+		switch {
+		case strings.HasPrefix(name, "nvme"):
 			transport = "nvme"
+		case strings.HasPrefix(name, "dm-"):
+			// Device-mapper volumes (LVM, LUKS) are named by their mapping.
+			transport = "device-mapper"
+			model, _ = readTrimmedFile(filepath.Join(devicePath, "dm/name"), 256)
+		case strings.HasPrefix(name, "md"):
+			level, _ := readTrimmedFile(filepath.Join(devicePath, "md/level"), 32)
+			transport = strings.TrimSuffix("md:"+level, ":")
 		}
 
 		removable := removableValue == 1
@@ -196,7 +215,6 @@ func collectLinuxStorage(ctx context.Context) (
 		if named, known := pciStorageVendors[strings.ToLower(vendor)]; known {
 			vendor = named
 		}
-		model, _ := readTrimmedFile(filepath.Join(devicePath, "device/model"), 256)
 
 		devices = append(devices, protocol.StorageDeviceSpecifications{
 			ID:             "storage:" + sanitizeID(name),
@@ -208,6 +226,8 @@ func collectLinuxStorage(ctx context.Context) (
 			CapacityBytes:  capacity,
 			BlockSizeBytes: blockSize,
 			Removable:      removable,
+			Members:        storageMembers(devicePath),
+			Partitions:     storagePartitions(devicePath, name),
 		})
 	}
 
@@ -224,6 +244,48 @@ var pciStorageVendors = map[string]string{
 	"0x15ad": "VMware",
 	"0x1414": "Microsoft Corporation",
 	"0x5853": "XenSource, Inc.",
+}
+
+// storageMembers lists the devices below a RAID or device-mapper volume.
+func storageMembers(devicePath string) []string {
+	entries, err := os.ReadDir(filepath.Join(devicePath, "slaves"))
+	if err != nil {
+		return nil
+	}
+	members := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		members = append(members, sanitize(entry.Name(), 255))
+	}
+
+	return members
+}
+
+// storagePartitions lists the partitions of a block device; sysfs gives
+// their start and size in 512-byte sectors.
+func storagePartitions(devicePath, name string) []protocol.StoragePartitionSpecifications {
+	entries, err := os.ReadDir(devicePath)
+	if err != nil {
+		return nil
+	}
+	var partitions []protocol.StoragePartitionSpecifications
+	for _, entry := range entries {
+		if !strings.HasPrefix(entry.Name(), name) {
+			continue
+		}
+		partitionPath := filepath.Join(devicePath, entry.Name())
+		if _, err := os.Stat(filepath.Join(partitionPath, "partition")); err != nil {
+			continue
+		}
+		start, _ := readUint(filepath.Join(partitionPath, "start"))
+		size, _ := readUint(filepath.Join(partitionPath, "size"))
+		partitions = append(partitions, protocol.StoragePartitionSpecifications{
+			Name:       sanitize(entry.Name(), 255),
+			StartBytes: start * 512,
+			SizeBytes:  size * 512,
+		})
+	}
+
+	return partitions
 }
 
 func collectLinuxNUMA(ctx context.Context) (
