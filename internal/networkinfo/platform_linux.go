@@ -33,11 +33,14 @@ const (
 func collectPlatformNetwork(ctx context.Context) platformNetwork {
 	routes, routeIssues := collectLinuxRoutes()
 	firewall, firewallIssues := collectLinuxFirewall(ctx)
+	dns, dnsIssues := collectDNS()
 
+	issues := append(routeIssues, firewallIssues...)
 	return platformNetwork{
 		routes:   routes,
 		firewall: firewall,
-		issues:   append(routeIssues, firewallIssues...),
+		dns:      dns,
+		issues:   append(issues, dnsIssues...),
 	}
 }
 
@@ -178,6 +181,19 @@ func parseIPv6Routes(path string, interfaceIDs map[string]string) ([]protocol.Ne
 
 func collectLinuxFirewall(ctx context.Context) (protocol.FirewallInformation, []protocol.CollectionIssue) {
 	providers := detectLinuxFirewallProviders()
+	if !hostnet.SameNamespace() {
+		// nft and iptables would list the rules of the agent's own
+		// container network, not the host's.
+		status := "inactive"
+		if len(providers) > 0 {
+			status = "partial"
+		}
+		return protocol.FirewallInformation{
+			Status:    status,
+			Providers: providers,
+			Rules:     nil,
+		}, []protocol.CollectionIssue{{Component: "firewall.rules", Code: "other_namespace"}}
+	}
 	issues := make([]protocol.CollectionIssue, 0)
 	rules := make([]protocol.FirewallRule, 0)
 	truncated := false

@@ -32,7 +32,7 @@ agent  connect.proof
 portal connect.accepted | connect.rejected
 ```
 
-After `connect.accepted`, the agent can send `renew.request`, `node.specifications.report`, `node.network.report`, `metrics.report`, and `metrics.rollup` (see [Metrics store](#metrics-store)). A metrics frame contains `metric.type`: `node`, `container`, or a versioned `plugin:<name>` adapter namespace. The portal can send the correlated accepted/rejected responses, `sources.update`, `drain`, a signed `portal.command`, and the container log and console requests of [Container logs and consoles](#container-logs-and-consoles).
+After `connect.accepted`, the agent can send `renew.request`, `node.specifications.report`, `node.network.report`, `metrics.report`, and `metrics.rollup` (see [Metrics store](#metrics-store)). A metrics frame contains `metric.type`: `node`, `container`, or a versioned `plugin:<name>` adapter namespace. The portal can send the correlated accepted/rejected responses, `sources.update`, `drain`, a signed `portal.command`, `metrics.query`, `node.network.refresh`, and the container log and console requests of [Container logs and consoles](#container-logs-and-consoles).
 
 ## Workload commands
 
@@ -227,7 +227,7 @@ node   metrics.rollup / metrics.report  stored history from the device's cursor,
 
 Node reports and metrics are the same frames as on the portal session and follow the same rules: one report is outstanding at a time, a report is retried with the same `request_id` until it is acknowledged, and metrics start after both node reports. A device that stops acknowledging stops receiving metrics.
 
-A device can also ask for stored history at any time with `metrics.query` (`from`, `to`, at most 8 days apart); the node answers `metrics.query.result` with the stored items in that range, oldest first, cut to one frame with `next_from` set when more remain.
+A device or the portal can also ask for stored history at any time with `metrics.query` (`from`, `to`, at most 8 days apart); the node answers `metrics.query.result` with the stored items in that range, oldest first, cut to one frame with `next_from` set when more remain.
 
 A device sends requests at any time:
 
@@ -237,6 +237,7 @@ A device sends requests at any time:
 | `artifact.upload.request` followed by `artifact.upload.chunk` frames | `artifact.upload.result` |
 | `devices.list` | `devices.list.result` |
 | `device.remove` | `device.remove.result`; the removed device's sessions end |
+| `node.network.refresh` | a new `node.network.report`, see [Node network report](#node-network-report) |
 | `container.logs.open` | `container.logs.opened`, then binary stream frames and a final `stream.close` |
 | `container.console.info` | `container.console.info.result` |
 | `container.console.send` | `container.console.send.result` |
@@ -311,6 +312,28 @@ The node itself has no access to Docker's data. For each container with the file
 **Upload and editing.** `fs.write.open` announces `size` and the lowercase hex SHA-256 of the whole file. `expected_version` makes the write fail with `version_conflict` unless the file still has that `version` (an opaque string that changes with the content, the modification and change times, and the inode); this is how an editor saves without overwriting a change made meanwhile (open the file, keep its `version`, save with it). `absent` requires that no file exists yet. `mode` (1 to 0777) applies to a new file; a replaced file keeps its mode and owner. After `fs.write.ready` the device sends the content from `offset` in binary frames on channel 3 of `stream_id`, 1 to 32768 bytes each; the device may have up to 2 MiB sent and not yet credited, and the node returns `stream.credit` as it stores data. The node writes into a partial file next to the target, checks the SHA-256, and renames it over the target, so the old file stays intact until the new one is complete; a mismatch fails with `checksum_mismatch`. If the connection breaks, the partial file stays, and the same upload (same path, size, and SHA-256) resumes at the `offset` `fs.write.ready` reports. Partial files older than 7 days are removed when another upload goes to the same folder. A device cancels an upload with `stream.close` `cancelled`; no data for 30 seconds fails it with `upload_timeout`.
 
 Errors carry the request's `request_id` and one of these codes, in addition to those of logs and consoles: `no_volumes`, `files_unavailable`, `invalid_request`, `invalid_path`, `outside_mounts`, `mount_root`, `not_found`, `already_exists`, `not_a_directory`, `is_a_directory`, `not_regular_file`, `not_empty`, `permission_denied`, `read_only`, `cross_device`, `version_conflict`, `checksum_mismatch`, `too_large`, `no_space`, `unsupported_format`, `upload_timeout`, `invalid_credit`, `invalid_frame`, `cancelled`, `failed`. A failed download ends with `stream.close` `failed` and one of these codes.
+
+## Node network report
+
+The node sends `node.specifications.report` (hardware, operating system, platform) once per session. Network and security settings change while the node runs, so they travel separately in `node.network.report`: once per session after the specifications, and again whenever a device or the portal sends `node.network.refresh` with a `request_id`. The refreshed report is an ordinary `node.network.report` with its own `request_id` and is acknowledged like the first one. Metrics keep flowing while it is collected; refreshes asked for while a report is in flight are merged into one that runs afterwards.
+
+The report carries everything an administrator usually checks over SSH, in full. Masking sensitive values is the client's job.
+
+- `interfaces`: addresses, MAC, MTU, flags, `oper_state`, `speed_bps`, and `duplex`.
+- `routes`, `listening_ports` (with `pid` and `process_name` of the owner), and `firewall`.
+- `dns`: `nameservers` and `search_domains` from `/etc/resolv.conf`, `resolver` (`systemd-resolved` when the stub 127.0.0.53 is used), and its `upstream` servers.
+- `public_addresses`: one entry per address with `family`, `address`, `source`, and `behind_nat` (the address is not on any interface of the node). Sources are tried in this order and the first that answers wins per family:
+  1. `configured`: the `LOREVA_PUBLIC_IP` environment variable, a comma-separated list. It replaces every lookup.
+  2. `interface`: a public address on one of the node's interfaces. Such a family is not looked up outside.
+  3. `cloud_metadata`: the metadata service of AWS (IMDSv2), Google Cloud, Azure, Hetzner, or DigitalOcean, asked only when the machine's DMI vendor names that provider.
+  4. `external`: the "what is my IP" services the Datadog Agent uses: icanhazip.com, ipinfo.io, checkip.amazonaws.com, api.ipify.org (api64.ipify.org for IPv6), and whatismyip.akamai.com. The node connects directly over the requested family, without a proxy or redirects, and accepts an address only when at least two operators return it. One answer is reported as `public_addresses.<family>` `unconfirmed`, disagreement as `inconsistent`, no answer as `not_available`.
+
+  `LOREVA_PUBLIC_IP_LOOKUP=off` disables metadata and outside lookups. Results of lookups are cached for 30 minutes.
+- `security.ssh`: whether sshd is `running`, its `configured_ports` and `listening_ports`, and `permit_root_login`, `password_authentication`, and `pubkey_authentication` from `sshd_config` (first value wins, `Include` is followed).
+- `security.intrusion_prevention`: fail2ban (with its enabled jails) and CrowdSec, each with `status` and `details`.
+- `security.mandatory_access_control`: AppArmor and SELinux.
+
+When the agent runs in a container without the host's network namespace, interfaces, routes, sockets, and counters are still read from the host's `/proc/1/net`, but firewall rules belong to the namespace: the report lists the firewall providers it found without rules and adds the issue `firewall.rules` `other_namespace`. Running the agent with the host network makes the rules visible.
 
 ## Metric units
 

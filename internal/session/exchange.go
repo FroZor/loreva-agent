@@ -14,6 +14,7 @@ import (
 // The portal session and direct device sessions run the same exchange; only
 // the loop around it and the way the peer authenticated differ.
 type exchange struct {
+	collectors        Collectors
 	reports           *nodeReporter
 	reportReplyTimer  *time.Timer
 	reportRetryTimer  *time.Timer
@@ -32,6 +33,7 @@ func (rejection *identityRejection) Unwrap() error { return rejection.err }
 // cursor in the metrics store.
 func newExchange(ctx context.Context, collectors Collectors, reports *nodeReportState, reader string) *exchange {
 	return &exchange{
+		collectors:        collectors,
 		reports:           newNodeReporter(ctx, collectors, reports),
 		reportReplyTimer:  newStoppedTimer(),
 		reportRetryTimer:  newStoppedTimer(),

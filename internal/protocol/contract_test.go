@@ -353,6 +353,7 @@ func contractMessageTypes() map[string]string {
 		"artifactUploadResult":       ArtifactUploadResultType,
 		"metricsRollup":              MetricsRollupType,
 		"metricsQuery":               MetricsQueryType,
+		"nodeNetworkRefresh":         NodeNetworkRefreshType,
 		"metricsQueryResult":         MetricsQueryResultType,
 		"containerLogsOpen":          ContainerLogsOpenType,
 		"containerLogsOpened":        ContainerLogsOpenedType,
@@ -404,6 +405,12 @@ func contractDTOs() map[string]reflect.Type {
 		"metricRollupSeries":             reflect.TypeFor[MetricRollupSeries](),
 		"metricsRollup":                  reflect.TypeFor[MetricsRollupReport](),
 		"metricsQuery":                   reflect.TypeFor[MetricsQuery](),
+		"nodeNetworkRefresh":             reflect.TypeFor[NodeNetworkRefresh](),
+		"publicAddress":                  reflect.TypeFor[PublicAddress](),
+		"dnsConfiguration":               reflect.TypeFor[DNSConfiguration](),
+		"securityInformation":            reflect.TypeFor[SecurityInformation](),
+		"sshConfiguration":               reflect.TypeFor[SSHConfiguration](),
+		"securityService":                reflect.TypeFor[SecurityService](),
 		"containerLogsOpen":              reflect.TypeFor[ContainerLogsOpen](),
 		"containerLogsOpened":            reflect.TypeFor[ContainerLogsOpened](),
 		"streamCredit":                   reflect.TypeFor[StreamCredit](),
@@ -592,6 +599,16 @@ func canonicalContractMessages() []any {
 		Firewall: FirewallInformation{
 			Status: "inactive", Providers: []FirewallProvider{}, Rules: []FirewallRule{},
 		},
+		PublicAddresses: []PublicAddress{{Family: "ipv4", Address: "198.51.100.7", Source: "external", BehindNAT: true}},
+		DNS:             &DNSConfiguration{Nameservers: []string{"127.0.0.53"}, SearchDomains: []string{}, Resolver: "systemd-resolved", Upstream: []string{"1.1.1.1"}},
+		Security: SecurityInformation{
+			SSH: &SSHConfiguration{
+				Running: true, ConfiguredPorts: []uint16{22}, ListeningPorts: []uint16{22},
+				PermitRootLogin: "prohibit-password", PasswordAuthentication: "no",
+			},
+			IntrusionPrevention:    []SecurityService{{Name: "fail2ban", Status: "running", Details: []string{"sshd"}}},
+			MandatoryAccessControl: []SecurityService{{Name: "apparmor", Status: "enabled"}},
+		},
 	}
 
 	return []any{
@@ -715,6 +732,7 @@ func canonicalContractMessages() []any {
 			Type: MetricsRollupType, SchemaVersion: MetricsSchemaVersion, RequestID: requestID, StreamID: portalID,
 			Metric: MetricRollupSeries{Type: MetricTypeNode, Points: []MetricRollup{rollup}},
 		},
+		NodeNetworkRefresh{Type: NodeNetworkRefreshType, RequestID: requestID},
 		MetricsQuery{Type: MetricsQueryType, RequestID: requestID, From: now.Add(-time.Hour), To: now},
 		MetricsQueryResult{
 			Type: MetricsQueryResultType, RequestID: requestID, StreamID: portalID,

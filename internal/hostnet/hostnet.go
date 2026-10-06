@@ -52,3 +52,10 @@ func standardInterfaces() ([]Interface, error) {
 
 	return result, nil
 }
+
+// Link is the state of an interface's link.
+type Link struct {
+	OperState string
+	SpeedMbps uint64
+	Duplex    string
+}

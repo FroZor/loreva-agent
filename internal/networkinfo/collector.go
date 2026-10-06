@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/netip"
 	"os"
 	"sort"
 	"strconv"
@@ -20,6 +21,7 @@ import (
 	"github.com/FroZor/loreva-agent/internal/observation"
 	"github.com/FroZor/loreva-agent/internal/procfs"
 	"github.com/FroZor/loreva-agent/internal/protocol"
+	"github.com/FroZor/loreva-agent/internal/publicip"
 )
 
 const (
@@ -35,20 +37,39 @@ type Snapshot struct {
 	Network          protocol.NodeNetwork
 }
 
+// Collector collects network snapshots. It keeps the public address
+// resolver, whose lookups are cached between snapshots.
+type Collector struct {
+	addresses *publicip.Resolver
+}
+
+// NewCollector returns a collector that finds public addresses with the
+// given resolver.
+func NewCollector(addresses *publicip.Resolver) *Collector {
+	return &Collector{addresses: addresses}
+}
+
 // Collect returns a bounded best-effort network and firewall snapshot.
-func Collect(ctx context.Context) (Snapshot, error) {
+func (c *Collector) Collect(ctx context.Context) (Snapshot, error) {
 	interfaces, interfaceIssues := collectInterfaces()
 	listeners, listenerIssues := collectListeningPorts(ctx)
 	platform := collectPlatformNetwork(ctx)
+	security, securityIssues := collectSecurity(listeners)
+	publicAddresses, publicIssues := c.publicAddresses(ctx, interfaces)
 
 	issues := append(interfaceIssues, listenerIssues...)
 	issues = append(issues, platform.issues...)
+	issues = append(issues, securityIssues...)
+	issues = append(issues, publicIssues...)
 
 	network := protocol.NodeNetwork{
 		Interfaces:       interfaces,
 		Routes:           platform.routes,
 		ListeningPorts:   listeners,
 		Firewall:         platform.firewall,
+		PublicAddresses:  publicAddresses,
+		DNS:              platform.dns,
+		Security:         security,
 		CollectionIssues: deduplicateIssues(issues),
 	}
 	if err := fitNetworkToBudget(&network); err != nil {
@@ -125,6 +146,45 @@ func truncateInterfaceAddresses(interfaces []protocol.NetworkInterfaceConfigurat
 	return true
 }
 
+func (c *Collector) publicAddresses(
+	ctx context.Context,
+	interfaces []protocol.NetworkInterfaceConfiguration,
+) ([]protocol.PublicAddress, []protocol.CollectionIssue) {
+	result := []protocol.PublicAddress{}
+	if c.addresses == nil {
+		return result, nil
+	}
+
+	var local []netip.Addr
+	for _, networkInterface := range interfaces {
+		for _, address := range networkInterface.Addresses {
+			if parsed, err := netip.ParseAddr(address.Address); err == nil {
+				local = append(local, parsed)
+			}
+		}
+	}
+
+	addresses, lookupIssues := c.addresses.Addresses(ctx, local)
+	for _, address := range addresses {
+		family := "ipv6"
+		if address.Addr.Is4() {
+			family = "ipv4"
+		}
+		result = append(result, protocol.PublicAddress{
+			Family:    family,
+			Address:   address.Addr.String(),
+			Source:    address.Source,
+			BehindNAT: address.BehindNAT,
+		})
+	}
+	issues := make([]protocol.CollectionIssue, 0, len(lookupIssues))
+	for _, issue := range lookupIssues {
+		issues = append(issues, protocol.CollectionIssue{Component: issue.Component, Code: issue.Code})
+	}
+
+	return result, issues
+}
+
 func collectInterfaces() ([]protocol.NetworkInterfaceConfiguration, []protocol.CollectionIssue) {
 	interfaces, err := hostnet.Interfaces()
 	if err != nil {
@@ -163,6 +223,7 @@ func collectInterfaces() ([]protocol.NetworkInterfaceConfiguration, []protocol.C
 			})
 		}
 
+		link := hostnet.LinkState(networkInterface.Name)
 		result = append(result, protocol.NetworkInterfaceConfiguration{
 			ID:              networkInterface.ID(),
 			Name:            sanitizeNetworkValue(networkInterface.Name, 255),
@@ -170,6 +231,9 @@ func collectInterfaces() ([]protocol.NetworkInterfaceConfiguration, []protocol.C
 			MTU:             networkInterface.MTU,
 			Flags:           interfaceFlags(networkInterface.Flags),
 			Addresses:       normalizedAddresses,
+			OperState:       sanitizeNetworkValue(link.OperState, 32),
+			SpeedBPS:        link.SpeedMbps * 1_000_000,
+			Duplex:          link.Duplex,
 		})
 	}
 

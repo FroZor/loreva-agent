@@ -7,7 +7,15 @@ const (
 	NodeNetworkReportType    = "node.network.report"
 	NodeNetworkAcceptedType  = "node.network.accepted"
 	NodeNetworkRejectedType  = "node.network.rejected"
+	NodeNetworkRefreshType   = "node.network.refresh"
 )
+
+// NodeNetworkRefresh asks the node to collect its network report again. The
+// node answers with a new node.network.report, or with error.
+type NodeNetworkRefresh struct {
+	Type      string `json:"type"`
+	RequestID string `json:"request_id"`
+}
 
 // NodeNetworkReport describes runtime network configuration and protection.
 type NodeNetworkReport struct {
@@ -39,7 +47,57 @@ type NodeNetwork struct {
 	Routes           []NetworkRoute                  `json:"routes"`
 	ListeningPorts   []ListeningPort                 `json:"listening_ports"`
 	Firewall         FirewallInformation             `json:"firewall"`
+	PublicAddresses  []PublicAddress                 `json:"public_addresses"`
+	DNS              *DNSConfiguration               `json:"dns,omitempty"`
+	Security         SecurityInformation             `json:"security"`
 	CollectionIssues []CollectionIssue               `json:"collection_issues,omitempty"`
+}
+
+// PublicAddress is an address under which the node is reachable from the
+// internet. Source is interface, configured, cloud_metadata, or external;
+// BehindNAT is set when the address is not on any interface of the node.
+type PublicAddress struct {
+	Family    string `json:"family"`
+	Address   string `json:"address"`
+	Source    string `json:"source"`
+	BehindNAT bool   `json:"behind_nat"`
+}
+
+// DNSConfiguration is the resolver configuration of the host. When the
+// host runs a local stub resolver, Upstream lists the servers it forwards
+// to.
+type DNSConfiguration struct {
+	Nameservers   []string `json:"nameservers"`
+	SearchDomains []string `json:"search_domains"`
+	Resolver      string   `json:"resolver,omitempty"`
+	Upstream      []string `json:"upstream,omitempty"`
+}
+
+// SecurityInformation describes host protection besides the firewall.
+type SecurityInformation struct {
+	SSH                    *SSHConfiguration `json:"ssh,omitempty"`
+	IntrusionPrevention    []SecurityService `json:"intrusion_prevention"`
+	MandatoryAccessControl []SecurityService `json:"mandatory_access_control"`
+}
+
+// SSHConfiguration is the effective sshd setting for logins, read from its
+// configuration files. ListeningPorts are the ports sshd listens on now.
+type SSHConfiguration struct {
+	Running                bool     `json:"running"`
+	ConfiguredPorts        []uint16 `json:"configured_ports"`
+	ListeningPorts         []uint16 `json:"listening_ports"`
+	PermitRootLogin        string   `json:"permit_root_login,omitempty"`
+	PasswordAuthentication string   `json:"password_authentication,omitempty"`
+	PubkeyAuthentication   string   `json:"pubkey_authentication,omitempty"`
+}
+
+// SecurityService is one protection tool. Status is running, stopped,
+// enabled, enforcing, permissive, or disabled; Details lists, for example,
+// the enabled fail2ban jails.
+type SecurityService struct {
+	Name    string   `json:"name"`
+	Status  string   `json:"status"`
+	Details []string `json:"details,omitempty"`
 }
 
 // NetworkInterfaceConfiguration describes configured addresses on an interface.
@@ -50,6 +108,11 @@ type NetworkInterfaceConfiguration struct {
 	MTU             int              `json:"mtu,omitempty"`
 	Flags           []string         `json:"flags"`
 	Addresses       []NetworkAddress `json:"addresses"`
+	// OperState is the kernel's RFC 2863 state, such as up or down.
+	OperState string `json:"oper_state,omitempty"`
+	// SpeedBPS and Duplex describe the negotiated link, when it has one.
+	SpeedBPS uint64 `json:"speed_bps,omitempty"`
+	Duplex   string `json:"duplex,omitempty"`
 }
 
 // NetworkAddress is one normalized interface address.

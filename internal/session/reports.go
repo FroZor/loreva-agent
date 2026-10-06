@@ -44,8 +44,14 @@ type activeNodeReport struct {
 }
 
 type nodeReportState struct {
-	next                  nodeReportKind
-	active                *activeNodeReport
+	next   nodeReportKind
+	active *activeNodeReport
+	// collecting is set while a report is being collected, before it
+	// becomes active.
+	collecting bool
+	// refreshNetwork asks for another network report once the one in
+	// flight is done.
+	refreshNetwork        bool
 	retryAttempt          int
 	lastAcceptedKind      nodeReportKind
 	lastAcceptedRequestID string
@@ -110,6 +116,7 @@ func (reporter *nodeReporter) startNext(ctx context.Context) {
 				continue
 			}
 
+			reporter.state.collecting = true
 			go reporter.collectSpecifications(ctx)
 			return
 		case nodeReportNetwork:
@@ -118,12 +125,33 @@ func (reporter *nodeReporter) startNext(ctx context.Context) {
 				continue
 			}
 
+			reporter.state.refreshNetwork = false
+			reporter.state.collecting = true
 			go reporter.collectNetwork(ctx)
 			return
 		}
 	}
 
 	reporter.state.complete = true
+	if reporter.state.refreshNetwork {
+		reporter.refreshNetwork(ctx)
+	}
+}
+
+// refreshNetwork collects the network report again. Metrics keep flowing
+// meanwhile; a refresh asked for while a report is in flight runs after it,
+// and refreshes asked for meanwhile are merged into one.
+func (reporter *nodeReporter) refreshNetwork(ctx context.Context) {
+	if reporter.collectors.Network == nil {
+		return
+	}
+	if !reporter.state.complete || reporter.state.collecting || reporter.state.active != nil {
+		reporter.state.refreshNetwork = true
+		return
+	}
+
+	reporter.state.next = nodeReportNetwork
+	reporter.startNext(ctx)
 }
 
 func (reporter *nodeReporter) collectSpecifications(ctx context.Context) {
@@ -169,6 +197,7 @@ func (reporter *nodeReporter) writeResult(
 	if result.retry {
 		return reporter.writeActive(ctx, conn, result.kind)
 	}
+	reporter.state.collecting = false
 	if reporter.state.active != nil {
 		return errors.New("node report collection completed while another report is pending")
 	}

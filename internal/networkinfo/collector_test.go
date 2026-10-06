@@ -15,7 +15,8 @@ func TestCollectReturnsNetworkState(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 45*time.Second)
 	defer cancel()
 
-	snapshot, err := Collect(ctx)
+	// No resolver: tests must not ask outside services.
+	snapshot, err := NewCollector(nil).Collect(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -134,7 +135,8 @@ func TestCollectFindsOwnTCPListener(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 45*time.Second)
 	defer cancel()
 
-	snapshot, err := Collect(ctx)
+	// No resolver: tests must not ask outside services.
+	snapshot, err := NewCollector(nil).Collect(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}

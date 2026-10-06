@@ -304,3 +304,29 @@ func readBounded(path string) ([]byte, error) {
 
 	return io.ReadAll(io.LimitReader(file, maxProcNetFile))
 }
+
+// LinkState reads the operational state, speed, and duplex of an interface.
+// Virtual interfaces report no speed; the kernel then returns -1 or an
+// error, which is left out.
+func LinkState(name string) Link {
+	directory := hostfs.Sys("class", "net", name)
+	var link Link
+
+	if state, err := readTrimmed(directory + "/operstate"); err == nil && state != "" {
+		link.OperState = state
+	}
+	if speed, err := readInt(directory + "/speed"); err == nil && speed > 0 {
+		link.SpeedMbps = uint64(speed)
+	}
+	if duplex, err := readTrimmed(directory + "/duplex"); err == nil && (duplex == "full" || duplex == "half") {
+		link.Duplex = duplex
+	}
+
+	return link
+}
+
+// SameNamespace reports whether the agent sees the host's network
+// namespace, so that tools it runs act on the host's network.
+func SameNamespace() bool {
+	return !hostfs.Containerized() || sameNamespace()
+}

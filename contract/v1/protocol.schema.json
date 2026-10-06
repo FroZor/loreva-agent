@@ -45,6 +45,7 @@
     { "$ref": "#/$defs/artifactUploadResult" },
     { "$ref": "#/$defs/metricsRollup" },
     { "$ref": "#/$defs/metricsQuery" },
+    { "$ref": "#/$defs/nodeNetworkRefresh" },
     { "$ref": "#/$defs/metricsQueryResult" },
     { "$ref": "#/$defs/containerLogsOpen" },
     { "$ref": "#/$defs/containerLogsOpened" },
@@ -1390,7 +1391,10 @@
           "type": "array",
           "maxItems": 64,
           "items": { "$ref": "#/$defs/networkAddress" }
-        }
+        },
+        "oper_state": { "type": "string", "minLength": 1, "maxLength": 32 },
+        "speed_bps": { "type": "integer", "minimum": 1 },
+        "duplex": { "enum": ["full", "half"] }
       }
     },
     "networkRoute": {
@@ -1473,13 +1477,80 @@
     "nodeNetwork": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["interfaces", "routes", "listening_ports", "firewall"],
+      "required": ["interfaces", "routes", "listening_ports", "firewall", "public_addresses", "security"],
       "properties": {
         "interfaces": { "type": "array", "maxItems": 256, "items": { "$ref": "#/$defs/networkInterfaceConfiguration" } },
         "routes": { "type": "array", "maxItems": 4096, "items": { "$ref": "#/$defs/networkRoute" } },
         "listening_ports": { "type": "array", "maxItems": 4096, "items": { "$ref": "#/$defs/listeningPort" } },
         "firewall": { "$ref": "#/$defs/firewallInformation" },
+        "public_addresses": { "type": "array", "maxItems": 64, "items": { "$ref": "#/$defs/publicAddress" } },
+        "dns": { "$ref": "#/$defs/dnsConfiguration" },
+        "security": { "$ref": "#/$defs/securityInformation" },
         "collection_issues": { "type": "array", "items": { "$ref": "#/$defs/collectionIssue" } }
+      }
+    },
+    "publicAddress": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["family", "address", "source", "behind_nat"],
+      "properties": {
+        "family": { "enum": ["ipv4", "ipv6"] },
+        "address": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "source": { "enum": ["interface", "configured", "cloud_metadata", "external"] },
+        "behind_nat": { "type": "boolean" }
+      }
+    },
+    "dnsConfiguration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["nameservers", "search_domains"],
+      "properties": {
+        "nameservers": { "type": "array", "maxItems": 16, "items": { "type": "string", "minLength": 1, "maxLength": 64 } },
+        "search_domains": { "type": "array", "maxItems": 16, "items": { "type": "string", "minLength": 1, "maxLength": 253 } },
+        "resolver": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "upstream": { "type": "array", "maxItems": 16, "items": { "type": "string", "minLength": 1, "maxLength": 64 } }
+      }
+    },
+    "securityInformation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["intrusion_prevention", "mandatory_access_control"],
+      "properties": {
+        "ssh": { "$ref": "#/$defs/sshConfiguration" },
+        "intrusion_prevention": { "type": "array", "maxItems": 16, "items": { "$ref": "#/$defs/securityService" } },
+        "mandatory_access_control": { "type": "array", "maxItems": 16, "items": { "$ref": "#/$defs/securityService" } }
+      }
+    },
+    "sshConfiguration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["running", "configured_ports", "listening_ports"],
+      "properties": {
+        "running": { "type": "boolean" },
+        "configured_ports": { "type": "array", "maxItems": 64, "items": { "type": "integer", "minimum": 1, "maximum": 65535 } },
+        "listening_ports": { "type": "array", "maxItems": 64, "items": { "type": "integer", "minimum": 1, "maximum": 65535 } },
+        "permit_root_login": { "type": "string", "minLength": 1, "maxLength": 32 },
+        "password_authentication": { "type": "string", "minLength": 1, "maxLength": 32 },
+        "pubkey_authentication": { "type": "string", "minLength": 1, "maxLength": 32 }
+      }
+    },
+    "securityService": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "status"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "status": { "enum": ["running", "stopped", "enabled", "disabled", "enforcing", "permissive"] },
+        "details": { "type": "array", "maxItems": 128, "items": { "type": "string", "minLength": 1, "maxLength": 64 } }
+      }
+    },
+    "nodeNetworkRefresh": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "request_id"],
+      "properties": {
+        "type": { "const": "node.network.refresh" },
+        "request_id": { "$ref": "#/$defs/uuid" }
       }
     },
     "nodeNetworkReport": {

@@ -20,6 +20,7 @@ import (
 	"github.com/FroZor/loreva-agent/internal/metrics"
 	"github.com/FroZor/loreva-agent/internal/metricstore"
 	"github.com/FroZor/loreva-agent/internal/networkinfo"
+	"github.com/FroZor/loreva-agent/internal/publicip"
 	"github.com/FroZor/loreva-agent/internal/session"
 	"github.com/FroZor/loreva-agent/internal/specifications"
 	"github.com/FroZor/loreva-agent/internal/state"
@@ -121,7 +122,7 @@ func runAgent(arguments []string, logger *slog.Logger) error {
 
 	collectors := session.Collectors{
 		Specifications: specifications.Collect,
-		Network:        networkinfo.Collect,
+		Network:        networkinfo.NewCollector(publicip.NewResolver(publicip.SettingsFromEnvironment())).Collect,
 		Metrics:        metricStore,
 		Workloads:      workloadManager,
 		Containers:     containers,

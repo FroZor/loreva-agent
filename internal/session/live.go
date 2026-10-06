@@ -220,6 +220,9 @@ func (r *Runner) handleWorkingMessage(
 		return err
 	}
 
+	if handled, err := live.handleRequest(ctx, conn, messageType, data, portalReject(conn)); handled {
+		return err
+	}
 	if handled, err := live.containers.handle(ctx, messageType, data, portalReject(conn)); handled {
 		return err
 	}
