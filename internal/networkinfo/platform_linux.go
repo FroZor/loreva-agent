@@ -14,11 +14,12 @@ import (
 	"net"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
 
+	"github.com/FroZor/loreva-agent/internal/hostfs"
+	"github.com/FroZor/loreva-agent/internal/hostnet"
 	"github.com/FroZor/loreva-agent/internal/protocol"
 )
 
@@ -41,27 +42,27 @@ func collectPlatformNetwork(ctx context.Context) platformNetwork {
 }
 
 func collectLinuxRoutes() ([]protocol.NetworkRoute, []protocol.CollectionIssue) {
-	interfaces, err := net.Interfaces()
+	interfaces, err := hostnet.Interfaces()
 	if err != nil {
 		return nil, []protocol.CollectionIssue{networkIssue("routes", err)}
 	}
 
 	interfaceIDs := make(map[string]string, len(interfaces))
 	for _, networkInterface := range interfaces {
-		interfaceIDs[networkInterface.Name] = "network:" + strconv.Itoa(networkInterface.Index)
+		interfaceIDs[networkInterface.Name] = networkInterface.ID()
 	}
 
 	routes := make([]protocol.NetworkRoute, 0)
 	issues := make([]protocol.CollectionIssue, 0, 2)
 
-	ipv4Routes, err := parseIPv4Routes("/proc/net/route", interfaceIDs)
+	ipv4Routes, err := parseIPv4Routes(hostnet.NetPath("route"), interfaceIDs)
 	if err != nil {
 		issues = append(issues, networkIssue("routes.ipv4", err))
 	} else {
 		routes = append(routes, ipv4Routes...)
 	}
 
-	ipv6Routes, err := parseIPv6Routes("/proc/net/ipv6_route", interfaceIDs)
+	ipv6Routes, err := parseIPv6Routes(hostnet.NetPath("ipv6_route"), interfaceIDs)
 	if err != nil {
 		issues = append(issues, networkIssue("routes.ipv6", err))
 	} else {
@@ -250,7 +251,7 @@ func collectLinuxFirewall(ctx context.Context) (protocol.FirewallInformation, []
 
 func detectLinuxFirewallProviders() []protocol.FirewallProvider {
 	providers := make([]protocol.FirewallProvider, 0, 4)
-	modules, _ := readNetworkFile("/proc/modules", maxRouteFileSize)
+	modules, _ := readNetworkFile(hostfs.Proc("modules"), maxRouteFileSize)
 	moduleText := string(modules)
 	if strings.Contains(moduleText, "nf_tables ") {
 		providers = append(providers, protocol.FirewallProvider{Name: "nftables", Role: "filter", Status: "detected"})
@@ -259,12 +260,12 @@ func detectLinuxFirewallProviders() []protocol.FirewallProvider {
 		providers = append(providers, protocol.FirewallProvider{Name: "iptables", Role: "filter", Status: "detected"})
 	}
 
-	if fileExists(hostPath("/run/firewalld/firewalld.pid")) || fileExists(hostPath("/var/run/firewalld/firewalld.pid")) {
+	if fileExists(hostfs.Root("/run/firewalld/firewalld.pid")) || fileExists(hostfs.Root("/var/run/firewalld/firewalld.pid")) {
 		providers = append(providers, protocol.FirewallProvider{
 			Name: "firewalld", Role: "manager", Status: "active", Backend: detectedFilterBackend(providers),
 		})
 	}
-	if configuration, err := readNetworkFile(hostPath("/etc/ufw/ufw.conf"), 64*1024); err == nil {
+	if configuration, err := readNetworkFile(hostfs.Root("/etc/ufw/ufw.conf"), 64*1024); err == nil {
 		status := "inactive"
 		if strings.Contains(strings.ToUpper(string(configuration)), "ENABLED=YES") {
 			status = "active"
@@ -760,16 +761,6 @@ func upsertProvider(providers []protocol.FirewallProvider, replacement protocol.
 	}
 
 	return append(providers, replacement)
-}
-
-// hostPath maps a host file into this process's file system when the agent
-// runs in a container with the host root mounted at HOST_ROOT.
-func hostPath(path string) string {
-	if root := os.Getenv("HOST_ROOT"); root != "" {
-		return filepath.Join(root, path)
-	}
-
-	return path
 }
 
 func fileExists(path string) bool {

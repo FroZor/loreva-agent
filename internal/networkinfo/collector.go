@@ -16,7 +16,9 @@ import (
 
 	gopsutilnet "github.com/shirou/gopsutil/v4/net"
 
+	"github.com/FroZor/loreva-agent/internal/hostnet"
 	"github.com/FroZor/loreva-agent/internal/observation"
+	"github.com/FroZor/loreva-agent/internal/procfs"
 	"github.com/FroZor/loreva-agent/internal/protocol"
 )
 
@@ -124,7 +126,7 @@ func truncateInterfaceAddresses(interfaces []protocol.NetworkInterfaceConfigurat
 }
 
 func collectInterfaces() ([]protocol.NetworkInterfaceConfiguration, []protocol.CollectionIssue) {
-	interfaces, err := net.Interfaces()
+	interfaces, err := hostnet.Interfaces()
 	if err != nil {
 		return nil, []protocol.CollectionIssue{networkIssue("interfaces", err)}
 	}
@@ -141,10 +143,7 @@ func collectInterfaces() ([]protocol.NetworkInterfaceConfiguration, []protocol.C
 
 	result := make([]protocol.NetworkInterfaceConfiguration, 0, len(interfaces))
 	for _, networkInterface := range interfaces {
-		addresses, err := networkInterface.Addrs()
-		if err != nil {
-			issues = append(issues, networkIssue("interfaces.addresses", err))
-		}
+		addresses := networkInterface.Addresses
 		if len(addresses) > maxInterfaceAddresses {
 			addresses = addresses[:maxInterfaceAddresses]
 			issues = append(issues, protocol.CollectionIssue{Component: "interfaces.addresses", Code: "truncated"})
@@ -152,26 +151,20 @@ func collectInterfaces() ([]protocol.NetworkInterfaceConfiguration, []protocol.C
 
 		normalizedAddresses := make([]protocol.NetworkAddress, 0, len(addresses))
 		for _, address := range addresses {
-			ip, network, err := net.ParseCIDR(address.String())
-			if err != nil {
-				continue
-			}
-
-			prefixLength, _ := network.Mask.Size()
 			family := "ipv6"
-			if ip.To4() != nil {
+			if address.Addr().Is4() {
 				family = "ipv4"
 			}
 
 			normalizedAddresses = append(normalizedAddresses, protocol.NetworkAddress{
 				Family:       family,
-				Address:      ip.String(),
-				PrefixLength: prefixLength,
+				Address:      address.Addr().String(),
+				PrefixLength: address.Bits(),
 			})
 		}
 
 		result = append(result, protocol.NetworkInterfaceConfiguration{
-			ID:              "network:" + strconv.Itoa(networkInterface.Index),
+			ID:              networkInterface.ID(),
 			Name:            sanitizeNetworkValue(networkInterface.Name, 255),
 			HardwareAddress: networkInterface.HardwareAddr.String(),
 			MTU:             networkInterface.MTU,
@@ -192,6 +185,7 @@ func collectListeningPorts(ctx context.Context) ([]protocol.ListeningPort, []pro
 	listeners := make([]protocol.ListeningPort, 0)
 	seen := make(map[string]struct{})
 	truncated := false
+	unowned := false
 
 	for _, connection := range connections {
 		protocolName, listening := listeningProtocol(connection)
@@ -215,12 +209,18 @@ func collectListeningPorts(ctx context.Context) ([]protocol.ListeningPort, []pro
 		}
 
 		seen[key] = struct{}{}
-		listeners = append(listeners, protocol.ListeningPort{
+		listener := protocol.ListeningPort{
 			Protocol:  protocolName,
 			Address:   address.String(),
 			Port:      uint16(connection.Laddr.Port),
 			ProcessID: connection.Pid,
-		})
+		}
+		if connection.Pid > 0 {
+			listener.ProcessName = sanitizeNetworkValue(procfs.Name(connection.Pid), 64)
+		} else {
+			unowned = true
+		}
+		listeners = append(listeners, listener)
 	}
 
 	sort.Slice(listeners, func(left, right int) bool {
@@ -233,11 +233,17 @@ func collectListeningPorts(ctx context.Context) ([]protocol.ListeningPort, []pro
 		return listeners[left].Address < listeners[right].Address
 	})
 
+	var issues []protocol.CollectionIssue
 	if truncated {
-		return listeners, []protocol.CollectionIssue{{Component: "listening_ports", Code: "truncated"}}
+		issues = append(issues, protocol.CollectionIssue{Component: "listening_ports", Code: "truncated"})
+	}
+	if unowned {
+		// Owners are found through other processes' file tables, which
+		// need root or CAP_SYS_PTRACE.
+		issues = append(issues, protocol.CollectionIssue{Component: "listening_ports.process", Code: "partial"})
 	}
 
-	return listeners, nil
+	return listeners, issues
 }
 
 func listeningProtocol(connection gopsutilnet.ConnectionStat) (string, bool) {

@@ -15,6 +15,9 @@ import (
 	"syscall"
 
 	gopsutilnet "github.com/shirou/gopsutil/v4/net"
+
+	"github.com/FroZor/loreva-agent/internal/hostnet"
+	"github.com/FroZor/loreva-agent/internal/procfs"
 )
 
 type procSocketTable struct {
@@ -26,12 +29,13 @@ type procSocketTable struct {
 
 func connectionStats(ctx context.Context, limit int) ([]gopsutilnet.ConnectionStat, error) {
 	tables := []procSocketTable{
-		{path: "/proc/net/tcp", family: syscall.AF_INET, socketType: syscall.SOCK_STREAM, tcp: true},
-		{path: "/proc/net/tcp6", family: syscall.AF_INET6, socketType: syscall.SOCK_STREAM, tcp: true},
-		{path: "/proc/net/udp", family: syscall.AF_INET, socketType: syscall.SOCK_DGRAM},
-		{path: "/proc/net/udp6", family: syscall.AF_INET6, socketType: syscall.SOCK_DGRAM},
+		{path: hostnet.NetPath("tcp"), family: syscall.AF_INET, socketType: syscall.SOCK_STREAM, tcp: true},
+		{path: hostnet.NetPath("tcp6"), family: syscall.AF_INET6, socketType: syscall.SOCK_STREAM, tcp: true},
+		{path: hostnet.NetPath("udp"), family: syscall.AF_INET, socketType: syscall.SOCK_DGRAM},
+		{path: hostnet.NetPath("udp6"), family: syscall.AF_INET6, socketType: syscall.SOCK_DGRAM},
 	}
 
+	owners, _ := procfs.SocketOwners()
 	connections := make([]gopsutilnet.ConnectionStat, 0, limit)
 	readTables := 0
 	var lastErr error
@@ -41,7 +45,7 @@ func connectionStats(ctx context.Context, limit int) ([]gopsutilnet.ConnectionSt
 			break
 		}
 
-		entries, err := readProcSocketTable(ctx, table, remaining)
+		entries, err := readProcSocketTable(ctx, table, remaining, owners)
 		if err != nil {
 			lastErr = err
 			continue
@@ -61,6 +65,7 @@ func readProcSocketTable(
 	ctx context.Context,
 	table procSocketTable,
 	limit int,
+	owners map[uint64]int32,
 ) (connections []gopsutilnet.ConnectionStat, resultErr error) {
 	file, err := os.Open(table.path)
 	if err != nil {
@@ -88,6 +93,7 @@ func readProcSocketTable(
 		if !include {
 			continue
 		}
+		connection.Pid = owners[socketInode(scanner.Text())]
 
 		connections = append(connections, connection)
 		if len(connections) == limit {
@@ -131,6 +137,17 @@ func parseProcSocketLine(line string, table procSocketTable) (gopsutilnet.Connec
 		Raddr:  remoteAddress,
 		Status: status,
 	}, true
+}
+
+// socketInode returns the inode column of a socket table line, or 0.
+func socketInode(line string) uint64 {
+	fields := strings.Fields(line)
+	if len(fields) < 10 {
+		return 0
+	}
+	inode, _ := strconv.ParseUint(fields[9], 10, 64)
+
+	return inode
 }
 
 func parseProcSocketAddress(value string, family uint32) (gopsutilnet.Addr, error) {

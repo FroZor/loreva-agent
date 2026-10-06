@@ -180,8 +180,12 @@ type ProcessMetrics struct {
 // ProcessMetric identifies a process by PID and start time to survive PID reuse.
 type ProcessMetric struct {
 	PID                 int32     `json:"pid"`
+	ParentPID           int32     `json:"parent_pid"`
 	StartedAt           time.Time `json:"started_at"`
 	Name                string    `json:"name"`
+	State               string    `json:"state,omitempty"`
+	UID                 *uint32   `json:"uid,omitempty"`
+	User                string    `json:"user,omitempty"`
 	CPUPercent          float64   `json:"cpu_percent"`
 	MemoryRSSBytes      uint64    `json:"memory_rss_bytes"`
 	MemoryVirtualBytes  uint64    `json:"memory_virtual_bytes"`

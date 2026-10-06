@@ -68,12 +68,13 @@ type NetworkRoute struct {
 	Metric      uint64 `json:"metric,omitempty"`
 }
 
-// ListeningPort describes a local listening socket without process command-line data.
+// ListeningPort describes a local listening socket and the process that owns it.
 type ListeningPort struct {
-	Protocol  string `json:"protocol"`
-	Address   string `json:"address"`
-	Port      uint16 `json:"port"`
-	ProcessID int32  `json:"process_id,omitempty"`
+	Protocol    string `json:"protocol"`
+	Address     string `json:"address"`
+	Port        uint16 `json:"port"`
+	ProcessID   int32  `json:"process_id,omitempty"`
+	ProcessName string `json:"process_name,omitempty"`
 }
 
 // FirewallInformation describes observed managers and loss-aware normalized rules.

@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/FroZor/loreva-agent/internal/hostfs"
 	"github.com/FroZor/loreva-agent/internal/protocol"
 )
 
@@ -53,7 +54,7 @@ func collectLinuxMemoryModules(ctx context.Context) (
 	[]protocol.MemoryModuleSpecifications,
 	[]protocol.CollectionIssue,
 ) {
-	dmiEntries := hostSysPath("firmware/dmi/entries")
+	dmiEntries := hostfs.Sys("firmware/dmi/entries")
 	entries, err := os.ReadDir(dmiEntries)
 	if err != nil {
 		return nil, []protocol.CollectionIssue{issue("memory.modules", err)}
@@ -93,7 +94,7 @@ func collectLinuxMemoryModules(ctx context.Context) (
 }
 
 func collectLinuxGPUs(ctx context.Context) ([]protocol.GPUSpecifications, []protocol.CollectionIssue) {
-	entries, err := os.ReadDir("/sys/bus/pci/devices")
+	entries, err := os.ReadDir(hostfs.Sys("bus/pci/devices"))
 	if err != nil {
 		return nil, []protocol.CollectionIssue{issue("gpus", err)}
 	}
@@ -108,7 +109,7 @@ func collectLinuxGPUs(ctx context.Context) ([]protocol.GPUSpecifications, []prot
 			return nil, []protocol.CollectionIssue{issue("gpus", err)}
 		}
 
-		devicePath := filepath.Join("/sys/bus/pci/devices", entry.Name())
+		devicePath := filepath.Join(hostfs.Sys("bus/pci/devices"), entry.Name())
 		class, err := readTrimmedFile(filepath.Join(devicePath, "class"), 32)
 		if err != nil || !isGPUClass(class) {
 			continue
@@ -137,7 +138,7 @@ func collectLinuxStorage(ctx context.Context) (
 	[]protocol.StorageDeviceSpecifications,
 	[]protocol.CollectionIssue,
 ) {
-	entries, err := os.ReadDir("/sys/block")
+	entries, err := os.ReadDir(hostfs.Sys("block"))
 	if err != nil {
 		return nil, []protocol.CollectionIssue{issue("storage_devices", err)}
 	}
@@ -160,7 +161,7 @@ func collectLinuxStorage(ctx context.Context) (
 			return devices, []protocol.CollectionIssue{{Component: "storage_devices", Code: issueTruncated}}
 		}
 
-		devicePath := filepath.Join("/sys/block", name)
+		devicePath := filepath.Join(hostfs.Sys("block"), name)
 		sectors, _ := readUint(filepath.Join(devicePath, "size"))
 		blockSize, _ := readUint(filepath.Join(devicePath, "queue/logical_block_size"))
 		removableValue, _ := readUint(filepath.Join(devicePath, "removable"))
@@ -171,11 +172,19 @@ func collectLinuxStorage(ctx context.Context) (
 			capacity = sectors * 512
 		}
 
+		transport := symlinkBase(filepath.Join(devicePath, "device/subsystem"))
+		if strings.HasPrefix(name, "nvme") {
+			transport = "nvme"
+		}
+
 		removable := removableValue == 1
 		mediaType := "ssd"
 		target, _ := filepath.EvalSymlinks(devicePath)
 		switch {
-		case strings.Contains(filepath.ToSlash(target), "/virtual/"):
+		case strings.Contains(filepath.ToSlash(target), "/virtual/"), paravirtualTransports[transport]:
+			// A paravirtual disk's rotational flag is whatever the
+			// hypervisor sets, often 1 for SSD-backed storage, so the
+			// medium behind it is not known.
 			mediaType = "virtual"
 		case removable:
 			mediaType = "removable"
@@ -183,12 +192,10 @@ func collectLinuxStorage(ctx context.Context) (
 			mediaType = "hdd"
 		}
 
-		transport := symlinkBase(filepath.Join(devicePath, "device/subsystem"))
-		if strings.HasPrefix(name, "nvme") {
-			transport = "nvme"
-		}
-
 		vendor, _ := readTrimmedFile(filepath.Join(devicePath, "device/vendor"), 128)
+		if named, known := pciStorageVendors[strings.ToLower(vendor)]; known {
+			vendor = named
+		}
 		model, _ := readTrimmedFile(filepath.Join(devicePath, "device/model"), 256)
 
 		devices = append(devices, protocol.StorageDeviceSpecifications{
@@ -207,12 +214,24 @@ func collectLinuxStorage(ctx context.Context) (
 	return devices, nil
 }
 
+// paravirtualTransports are bus subsystems of hypervisor-provided disks.
+var paravirtualTransports = map[string]bool{"virtio": true, "xen": true, "vmbus": true}
+
+// pciStorageVendors names the PCI vendor IDs that paravirtual disks report
+// in place of a vendor string.
+var pciStorageVendors = map[string]string{
+	"0x1af4": "Red Hat, Inc. (virtio)",
+	"0x15ad": "VMware",
+	"0x1414": "Microsoft Corporation",
+	"0x5853": "XenSource, Inc.",
+}
+
 func collectLinuxNUMA(ctx context.Context) (
 	[]protocol.NUMANodeSpecifications,
 	map[string]string,
 	[]protocol.CollectionIssue,
 ) {
-	entries, err := os.ReadDir("/sys/devices/system/node")
+	entries, err := os.ReadDir(hostfs.Sys("devices/system/node"))
 	if err != nil {
 		return nil, make(map[string]string), []protocol.CollectionIssue{issue("cpu.numa_nodes", err)}
 	}
@@ -238,7 +257,7 @@ func collectLinuxNUMA(ctx context.Context) (
 		}
 
 		nodeID := "numa:" + strings.TrimPrefix(entry.Name(), "node")
-		nodePath := filepath.Join("/sys/devices/system/node", entry.Name())
+		nodePath := filepath.Join(hostfs.Sys("devices/system/node"), entry.Name())
 		memoryBytes := readNUMAMemory(nodePath)
 		nodes = append(nodes, protocol.NUMANodeSpecifications{ID: nodeID, MemoryBytes: memoryBytes})
 
@@ -264,7 +283,7 @@ func collectLinuxNetworkInterfaces(ctx context.Context) (
 	map[string]networkInterfaceMetadata,
 	[]protocol.CollectionIssue,
 ) {
-	entries, err := os.ReadDir("/sys/class/net")
+	entries, err := os.ReadDir(hostfs.Sys("class/net"))
 	if err != nil {
 		return make(map[string]networkInterfaceMetadata), []protocol.CollectionIssue{issue("network_interfaces.metadata", err)}
 	}
@@ -275,10 +294,10 @@ func collectLinuxNetworkInterfaces(ctx context.Context) (
 			return make(map[string]networkInterfaceMetadata), []protocol.CollectionIssue{issue("network_interfaces.metadata", err)}
 		}
 
-		interfacePath := filepath.Join("/sys/class/net", entry.Name())
+		interfacePath := filepath.Join(hostfs.Sys("class/net"), entry.Name())
 		_, deviceErr := os.Stat(filepath.Join(interfacePath, "device"))
 		driver := symlinkBase(filepath.Join(interfacePath, "device/driver"))
-		driverVersion, _ := readTrimmedFile(filepath.Join("/sys/module", driver, "version"), 128)
+		driverVersion, _ := readTrimmedFile(filepath.Join(hostfs.Sys("module"), driver, "version"), 128)
 		speedMbps, _ := readUint(filepath.Join(interfacePath, "speed"))
 		speedBPS := uint64(0)
 		if speedMbps <= math.MaxUint64/1_000_000 {
@@ -494,16 +513,4 @@ func readBoundedFile(path string, limit int64) (data []byte, resultErr error) {
 	}
 
 	return data, nil
-}
-
-// hostSysPath resolves a path below the host's /sys. In a container with the
-// host root mounted read-only, HOST_SYS (the variable gopsutil also uses)
-// points at the host's sysfs, which container runtimes do not mask.
-func hostSysPath(path string) string {
-	root := os.Getenv("HOST_SYS")
-	if root == "" {
-		root = "/sys"
-	}
-
-	return filepath.Join(root, path)
 }

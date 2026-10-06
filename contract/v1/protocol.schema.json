@@ -1361,7 +1361,8 @@
         "protocol": { "enum": ["tcp", "udp"] },
         "address": { "type": "string", "minLength": 1, "maxLength": 64 },
         "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
-        "process_id": { "type": "integer", "minimum": 1, "maximum": 2147483647 }
+        "process_id": { "type": "integer", "minimum": 1, "maximum": 2147483647 },
+        "process_name": { "type": "string", "minLength": 1, "maxLength": 64 }
       }
     },
     "firewallProvider": {
@@ -1594,11 +1595,15 @@
     "processMetric": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["pid", "started_at", "name", "cpu_percent", "memory_rss_bytes", "memory_virtual_bytes", "read_bytes_per_second", "write_bytes_per_second", "threads"],
+      "required": ["pid", "parent_pid", "started_at", "name", "cpu_percent", "memory_rss_bytes", "memory_virtual_bytes", "read_bytes_per_second", "write_bytes_per_second", "threads"],
       "properties": {
         "pid": { "type": "integer", "minimum": 0, "maximum": 2147483647 },
+        "parent_pid": { "type": "integer", "minimum": 0, "maximum": 2147483647 },
         "started_at": { "$ref": "#/$defs/timestamp" },
         "name": { "type": "string", "maxLength": 256 },
+        "state": { "enum": ["running", "sleeping", "blocked", "stopped", "zombie", "idle"] },
+        "uid": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+        "user": { "type": "string", "minLength": 1, "maxLength": 64 },
         "cpu_percent": { "type": "number", "minimum": 0, "maximum": 409600 },
         "memory_rss_bytes": { "type": "integer", "minimum": 0 },
         "memory_virtual_bytes": { "type": "integer", "minimum": 0 },

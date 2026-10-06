@@ -19,6 +19,8 @@ import (
 	"github.com/shirou/gopsutil/v4/host"
 	"github.com/shirou/gopsutil/v4/mem"
 
+	"github.com/FroZor/loreva-agent/internal/hostfs"
+	"github.com/FroZor/loreva-agent/internal/hostnet"
 	"github.com/FroZor/loreva-agent/internal/observation"
 	"github.com/FroZor/loreva-agent/internal/protocol"
 )
@@ -175,7 +177,7 @@ func fitSpecificationsToBudget(specifications *protocol.NodeSpecifications) erro
 }
 
 func collectSystem(ctx context.Context) (protocol.SystemSpecifications, string, []protocol.CollectionIssue, error) {
-	hostname, err := os.Hostname()
+	hostname, err := hostHostname()
 	if err != nil {
 		return protocol.SystemSpecifications{}, "", nil, fmt.Errorf("read system hostname: %w", err)
 	}
@@ -225,6 +227,21 @@ func collectSystem(ctx context.Context) (protocol.SystemSpecifications, string, 
 	}
 
 	return system, environment.Scope, issues, nil
+}
+
+// hostHostname returns the host's name. In a container that does not share
+// the host's UTS namespace, os.Hostname is the container's ID, so the host's
+// /etc/hostname is preferred there.
+func hostHostname() (string, error) {
+	if hostfs.Containerized() {
+		if data, err := os.ReadFile(hostfs.Etc("hostname")); err == nil {
+			if name := strings.TrimSpace(string(data)); name != "" {
+				return name, nil
+			}
+		}
+	}
+
+	return os.Hostname()
 }
 
 func collectCPU(ctx context.Context) (protocol.CPUSpecifications, []protocol.CollectionIssue) {
@@ -383,7 +400,7 @@ func collectNetworkInterfaces(metadata map[string]networkInterfaceMetadata) (
 	[]protocol.NetworkInterfaceSpecifications,
 	[]protocol.CollectionIssue,
 ) {
-	interfaces, err := net.Interfaces()
+	interfaces, err := hostnet.Interfaces()
 	if err != nil {
 		return nil, []protocol.CollectionIssue{issue("network_interfaces", err)}
 	}
@@ -406,7 +423,7 @@ func collectNetworkInterfaces(metadata map[string]networkInterfaceMetadata) (
 		}
 
 		result = append(result, protocol.NetworkInterfaceSpecifications{
-			ID:            "network:" + strconv.Itoa(networkInterface.Index),
+			ID:            networkInterface.ID(),
 			Name:          sanitize(networkInterface.Name, 255),
 			Kind:          kind,
 			Physical:      physical,
