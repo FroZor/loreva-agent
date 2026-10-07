@@ -22,13 +22,13 @@ FROM scratch
 
 COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY --from=build /out/loreva-agent /loreva-agent
-COPY --from=build --chown=65532:65532 /out/state /var/lib/loreva-agent
+COPY --from=build --chown=0:0 /out/state /var/lib/loreva-agent
 COPY --from=dockercli /usr/local/bin/docker /usr/local/bin/docker
 COPY --from=dockercli /usr/local/libexec/docker/cli-plugins/docker-compose /usr/local/libexec/docker/cli-plugins/docker-compose
 
 ENV LOREVA_STATE_DIR=/var/lib/loreva-agent
 
-USER 65532:65532
+USER 0:0
 
 ENTRYPOINT ["/loreva-agent"]
 CMD ["start"]
