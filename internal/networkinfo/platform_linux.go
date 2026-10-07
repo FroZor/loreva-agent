@@ -611,9 +611,16 @@ func parsePortList(value string) []protocol.PortRange {
 	return result
 }
 
+// runBoundedCommand runs one of the host's own tools. In a container the
+// tool runs inside the host's root, so it uses the host's libraries and
+// configuration exactly as on a host install; that needs CAP_SYS_CHROOT.
 func runBoundedCommand(ctx context.Context, path string, arguments []string, limit int) ([]byte, error) {
 	command := exec.CommandContext(ctx, path, arguments...)
 	command.Env = []string{"LANG=C", "LC_ALL=C", "PATH=/usr/sbin:/usr/bin:/sbin:/bin"}
+	if root := hostfs.RootDir(); root != "" {
+		command.SysProcAttr = &syscall.SysProcAttr{Chroot: root}
+		command.Dir = "/"
+	}
 
 	var output boundedBuffer
 	output.limit = limit
@@ -655,9 +662,11 @@ func (b *boundedBuffer) Write(data []byte) (int, error) {
 	return b.Buffer.Write(data)
 }
 
+// trustedExecutable returns the first host path that is a root-owned
+// executable nobody else can write.
 func trustedExecutable(paths ...string) string {
 	for _, path := range paths {
-		info, err := os.Stat(path)
+		info, err := os.Stat(hostfs.Root(path))
 		if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o022 != 0 {
 			continue
 		}

@@ -20,7 +20,7 @@ curl -fsSL https://raw.githubusercontent.com/FroZor/loreva-agent/master/install.
 chmod +x install.sh && sudo ./install.sh
 ```
 
-The installer verifies the release checksum, creates the `loreva-agent` system user, initializes the node, starts the service, and prints a single-use connection key (`loreva://connect/...`). Paste the key into Loreva App. When the app shows a code such as `ABCD-EFGH`, check that the server shows the same code and answer `y`.
+The installer verifies the release checksum, initializes the node, starts the service, and prints a single-use connection key (`loreva://connect/...`). Paste the key into Loreva App. When the app shows a code such as `ABCD-EFGH`, check that the server shows the same code and answer `y`.
 
 If inbound traffic is filtered, allow the TCP port printed by the installer. The agent never changes the firewall.
 
@@ -88,10 +88,10 @@ sudo ./install.sh --portal
 
 On systemd hosts, the installer verifies and installs the latest binary, prompts for the portal bootstrap, enrolls the node, and starts `loreva-agent.service`. Without systemd, it installs only `/usr/local/bin/loreva-agent`.
 
-To add direct access to a node that is already enrolled, initialize it as the service user and restart the service:
+To add direct access to a node that is already enrolled, initialize it and restart the service:
 
 ```sh
-sudo -u loreva-agent loreva-agent init --state-dir /var/lib/loreva-agent
+sudo loreva-agent init --state-dir /var/lib/loreva-agent
 sudo systemctl restart loreva-agent
 ```
 

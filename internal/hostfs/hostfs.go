@@ -41,6 +41,12 @@ func Root(path string) string {
 	return filepath.Join(root, path)
 }
 
+// RootDir is the directory the host's root is mounted at, or "" when the
+// agent runs on the host itself.
+func RootDir() string {
+	return os.Getenv("HOST_ROOT")
+}
+
 // Containerized reports whether the agent reads the host through mounted
 // copies rather than its own /proc.
 func Containerized() bool {
