@@ -31,6 +31,9 @@ func runStart(arguments []string, logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
+	if err := store.Claim(); err != nil {
+		return err
+	}
 
 	_, err = store.LoadIdentity()
 	if err == nil {

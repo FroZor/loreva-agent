@@ -38,7 +38,7 @@ func runInit(arguments []string, _ *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	if err := store.CheckOwner(); err != nil {
+	if err := store.Claim(); err != nil {
 		return err
 	}
 

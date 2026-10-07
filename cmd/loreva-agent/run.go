@@ -54,6 +54,9 @@ func runAgent(arguments []string, logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
+	if err := store.Claim(); err != nil {
+		return err
+	}
 
 	processLock, err := store.TryLockProcess()
 	if err != nil {

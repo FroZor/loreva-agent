@@ -117,7 +117,15 @@ func connectionCommandStore(command string, arguments []string) (*state.Store, e
 		return nil, fmt.Errorf("%s does not accept positional arguments", command)
 	}
 
-	return state.New(*stateDir)
+	store, err := state.New(*stateDir)
+	if err != nil {
+		return nil, err
+	}
+	if err := store.Claim(); err != nil {
+		return nil, err
+	}
+
+	return store, nil
 }
 
 func waitForConnectionRelease(store *state.Store, timeout time.Duration) error {

@@ -97,9 +97,6 @@ install_systemd_service() {
 	fi
 
 	install -d -m 0700 -o root -g root "$state_dir"
-	# Earlier versions ran as the loreva-agent user. The service keeps no
-	# CAP_DAC_OVERRIDE, so root must own the state it reads and writes.
-	chown -R root:root "$state_dir"
 
 	unit_tmp="${unit_path}.tmp.$$"
 	(
@@ -120,7 +117,8 @@ StartLimitBurst=10
 Type=simple
 # The agent runs as root, the same as in its container, so both installs
 # see the same host. It keeps only CAP_NET_ADMIN, to read firewall rules,
-# and never sees password hashes or home directories.
+# and CAP_CHOWN, to take over state left by releases that ran as the
+# loreva-agent user, and never sees password hashes or home directories.
 ExecStart=${install_path} run --state-dir ${state_dir}
 Restart=on-failure
 RestartSec=5s
@@ -144,7 +142,7 @@ RestrictRealtime=true
 RestrictSUIDSGID=true
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 SystemCallArchitectures=native
-CapabilityBoundingSet=CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_CHOWN
 
 [Install]
 WantedBy=multi-user.target
