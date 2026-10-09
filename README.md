@@ -148,7 +148,6 @@ Unix:
 
 ```sh
 curl -fsSLO https://raw.githubusercontent.com/FroZor/loreva-agent/master/compose.yaml
-docker compose run --rm loreva-agent configure
 docker compose up -d
 ```
 
@@ -156,11 +155,16 @@ Windows PowerShell:
 
 ```powershell
 Invoke-WebRequest https://raw.githubusercontent.com/FroZor/loreva-agent/master/compose.yaml -OutFile .\compose.yaml
-docker compose run --rm loreva-agent configure
 docker compose up -d
 ```
 
-`configure` prompts for the portal-issued bootstrap. The Docker image currently supports portal mode only. Docker Desktop on Windows must use Linux containers. State is stored in the `loreva-agent-state` volume; no inbound port is published. The agent container includes the official Docker CLI and Compose plugin and receives the Docker socket required to manage node workloads. It reports on the host, not on its container: the bundled Compose file shares the host's process, hostname and network namespaces and mounts the host root read-only at `/host`, with `HOST_ROOT`, `HOST_ETC`, `HOST_PROC`, `HOST_SYS` and related variables pointing there. Without that, the hostname is the container ID, the OS name is unknown, and filesystem metrics are missing. The agent runs as root, like Portainer and Pterodactyl Wings, but with every capability dropped except `NET_ADMIN`, which reads the firewall rules, `SYS_CHROOT`, which runs the host's `nft` and `iptables-save` against the host root, and `CHOWN`; this matches the systemd service. On start the agent takes over state files that belong to another user, as the official PostgreSQL and Redis images do, so a volume written by an earlier release that ran as user 65532 needs no manual step. The Compose file changes only the agent's own container, never other containers or their networks. `/root`, `/home` and `/etc/shadow` of the host stay hidden behind empty mounts. Docker Desktop does not support the `rslave` mount propagation; remove that line there.
+On the first start the agent sets the node up for direct access by itself: it picks a free TCP port and creates the node key, and the log shows both. To connect a device, run the same command as on a native install inside the container:
+
+```sh
+docker compose exec loreva-agent /loreva-agent invite
+```
+
+For the portal mode, enroll once with `docker compose run --rm loreva-agent configure`, which prompts for the portal-issued bootstrap, or mount the bootstrap file at `/run/secrets/bootstrap.json` before the first start. Docker Desktop on Windows must use Linux containers. State is stored in the `loreva-agent-state` volume. The container uses the host network, so the direct access port listens on the host itself; nothing else is published. The agent container includes the official Docker CLI and Compose plugin and receives the Docker socket required to manage node workloads. It reports on the host, not on its container: the bundled Compose file shares the host's process, hostname and network namespaces and mounts the host root read-only at `/host`, with `HOST_ROOT`, `HOST_ETC`, `HOST_PROC`, `HOST_SYS` and related variables pointing there. Without that, the hostname is the container ID, the OS name is unknown, and filesystem metrics are missing. The agent runs as root, like Portainer and Pterodactyl Wings, but with every capability dropped except `NET_ADMIN`, which reads the firewall rules, `SYS_CHROOT`, which runs the host's `nft` and `iptables-save` against the host root, and `CHOWN`; this matches the systemd service. On start the agent takes over state files that belong to another user, as the official PostgreSQL and Redis images do, so a volume written by an earlier release that ran as user 65532 needs no manual step. The Compose file changes only the agent's own container, never other containers or their networks. `/root`, `/home` and `/etc/shadow` of the host stay hidden behind empty mounts. Docker Desktop does not support the `rslave` mount propagation; remove that line there.
 
 The bundled Compose file tracks `latest` and pulls it on every recreate. Pin the image tag in `compose.yaml` when upgrades must be controlled.
 
