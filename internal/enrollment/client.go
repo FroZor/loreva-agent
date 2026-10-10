@@ -62,6 +62,9 @@ func Enroll(ctx context.Context, options Options) (*state.Identity, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := store.Claim(); err != nil {
+		return nil, err
+	}
 
 	lock, err := store.TryLockEnrollment()
 	if err != nil {

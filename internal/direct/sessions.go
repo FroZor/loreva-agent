@@ -257,10 +257,14 @@ func (s *sessions) serveDevice(ctx context.Context, conn *websocket.Conn, device
 	}
 	defer s.untrack(device.ID, tracked)
 
+	collectors := s.options.Collectors.session()
+	collectors.Containers = s.options.Containers
+	collectors.Files = s.options.Files
+	collectors.Inventory = s.options.Inventory
 	err := session.ServeDevice(sessionCtx, conn, session.DeviceConfig{
 		Hello:           s.hello(protocol.SessionPeerDevice, device.ID),
 		NodeID:          s.node.id,
-		Collectors:      s.options.Collectors.session(),
+		Collectors:      collectors,
 		Workloads:       s.options.Workloads,
 		WorkloadResults: tracked.results,
 		Devices:         directory{sessions: s},
@@ -364,6 +368,9 @@ func (s *sessions) revoke(deviceID, callerID string) error {
 		time.AfterFunc(selfRevokeDelay, func() { s.closeDevice(removed.ID) })
 	} else {
 		go s.closeDevice(removed.ID)
+	}
+	if metrics := s.options.Collectors.Metrics; metrics != nil {
+		metrics.RemoveCursor("device:" + removed.ID)
 	}
 	s.logger.Info("device revoked", "device_id", removed.ID, "device_name", removed.Name)
 

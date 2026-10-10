@@ -5,8 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
-	"net/url"
-	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -19,6 +17,7 @@ import (
 	"github.com/moby/moby/api/types/network"
 	"github.com/moby/moby/client"
 
+	"github.com/FroZor/loreva-agent/internal/dockerapi"
 	"github.com/FroZor/loreva-agent/internal/protocol"
 )
 
@@ -47,7 +46,7 @@ func openDockerRuntime(ctx context.Context, stateRoot string) (*dockerRuntime, e
 	if err != nil {
 		return nil, fmt.Errorf("create Docker client: %w", err)
 	}
-	if err := validateDockerEndpoint(engine.DaemonHost()); err != nil {
+	if err := dockerapi.ValidateEndpoint(engine.DaemonHost()); err != nil {
 		_ = engine.Close()
 		return nil, err
 	}
@@ -444,24 +443,6 @@ func workloadLabels(plan *storedPlan) map[string]string {
 
 func workloadResourceName(workloadID string) string {
 	return "loreva-" + strings.ReplaceAll(workloadID, "-", "")
-}
-
-func validateDockerEndpoint(endpoint string) error {
-	parsed, err := url.Parse(endpoint)
-	if err != nil {
-		return err
-	}
-
-	switch strings.ToLower(parsed.Scheme) {
-	case "unix", "npipe", "ssh", "https":
-		return nil
-	case "tcp":
-		if os.Getenv(client.EnvTLSVerify) != "" {
-			return nil
-		}
-	}
-
-	return errors.New("Docker endpoint must use a local socket, SSH, or verified TLS")
 }
 
 // ensureSameController refuses to execute a plan when containers or volumes

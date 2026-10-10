@@ -9,12 +9,19 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
+	"github.com/FroZor/loreva-agent/internal/containerfiles"
+	"github.com/FroZor/loreva-agent/internal/containerinfo"
+	"github.com/FroZor/loreva-agent/internal/containerio"
 	"github.com/FroZor/loreva-agent/internal/direct"
+	"github.com/FroZor/loreva-agent/internal/dockerapi"
 	"github.com/FroZor/loreva-agent/internal/metrics"
+	"github.com/FroZor/loreva-agent/internal/metricstore"
 	"github.com/FroZor/loreva-agent/internal/networkinfo"
+	"github.com/FroZor/loreva-agent/internal/publicip"
 	"github.com/FroZor/loreva-agent/internal/session"
 	"github.com/FroZor/loreva-agent/internal/specifications"
 	"github.com/FroZor/loreva-agent/internal/state"
@@ -24,6 +31,8 @@ import (
 const (
 	metricsInterval       = time.Second
 	metricsCollectTimeout = 900 * time.Millisecond
+	// metricsMaintenanceInterval is how often the store compacts and writes.
+	metricsMaintenanceInterval = 30 * time.Second
 )
 
 // runAgent runs every mode the state directory is set up for: direct access
@@ -45,6 +54,9 @@ func runAgent(arguments []string, logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
+	if err := store.Claim(); err != nil {
+		return err
+	}
 
 	processLock, err := store.TryLockProcess()
 	if err != nil {
@@ -56,12 +68,9 @@ func runAgent(arguments []string, logger *slog.Logger) error {
 	if err != nil && !errors.Is(err, state.ErrNotFound) {
 		return fmt.Errorf("load enrolled identity: %w", err)
 	}
-	node, upgraded, err := direct.LoadNode(store)
+	node, err := store.LoadNode()
 	if err != nil && !errors.Is(err, state.ErrNotFound) {
 		return fmt.Errorf("load node identity: %w", err)
-	}
-	if upgraded {
-		logger.Warn("node identity upgraded from WireGuard to TLS; create a new connection key with `loreva-agent invite`", "tcp_port", node.ListenPort)
 	}
 	if identity == nil && node == nil {
 		return errors.New("agent is not set up; run `loreva-agent init` for direct access or enroll it with a portal")
@@ -70,7 +79,7 @@ func runAgent(arguments []string, logger *slog.Logger) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	// The portal and paired devices share one metrics stream and one workload
+	// The portal and paired devices share one metrics store and one workload
 	// manager, so they see the same samples and the same containers.
 	metricCollector := metrics.NewCollector(ctx)
 	defer func() {
@@ -79,8 +88,28 @@ func runAgent(arguments []string, logger *slog.Logger) error {
 		}
 	}()
 
-	metricStream := metrics.NewStream(metricCollector.Collect, metricsInterval, metricsCollectTimeout)
-	go metricStream.Run(ctx)
+	// Every sample goes into the store; each reader reads from its own cursor.
+	metricStore, err := metricstore.Open(filepath.Join(store.Dir(), "metrics"))
+	if err != nil {
+		return err
+	}
+	logMetricsError := func(err error) { logger.Warn("metrics store", "error", err) }
+	for _, warning := range metricStore.LoadWarnings() {
+		logMetricsError(warning)
+	}
+	go metricStore.Collect(ctx, metricCollector.Collect, metricsInterval, metricsCollectTimeout, logMetricsError)
+
+	// Stop maintenance before returning, so its final flush finishes first.
+	stopMaintenance := make(chan struct{})
+	maintenanceDone := make(chan struct{})
+	go func() {
+		defer close(maintenanceDone)
+		metricStore.Run(stopMaintenance, metricsMaintenanceInterval, logMetricsError)
+	}()
+	defer func() {
+		close(stopMaintenance)
+		<-maintenanceDone
+	}()
 
 	workloadManager, err := workload.New(ctx, workload.Config{StateDir: store.Dir()})
 	if err != nil {
@@ -92,11 +121,19 @@ func runAgent(arguments []string, logger *slog.Logger) error {
 		}
 	}()
 
+	containers := openContainerServices(ctx, logger)
+	defer containers.close()
+
 	collectors := session.Collectors{
 		Specifications: specifications.Collect,
-		Network:        networkinfo.Collect,
-		Metrics:        metricStream.Subscribe,
+		Network:        networkinfo.NewCollector(publicip.NewResolver(publicip.SettingsFromEnvironment())).Collect,
+		Metrics:        metricStore,
+		Processes:      metricCollector.InspectProcess,
 		Workloads:      workloadManager,
+		Containers:     containers.io,
+		Files:          containers.files,
+		Inventory:      containers.inventory,
+		Logger:         logger,
 	}
 
 	var services []func(context.Context) error
@@ -109,9 +146,13 @@ func runAgent(arguments []string, logger *slog.Logger) error {
 					Specifications: collectors.Specifications,
 					Network:        collectors.Network,
 					Metrics:        collectors.Metrics,
+					Processes:      collectors.Processes,
 				},
-				Workloads: workloadManager,
-				Logger:    logger,
+				Workloads:  workloadManager,
+				Containers: containers.io,
+				Files:      containers.files,
+				Inventory:  containers.inventory,
+				Logger:     logger,
 			})
 		})
 	}
@@ -122,6 +163,45 @@ func runAgent(arguments []string, logger *slog.Logger) error {
 	}
 
 	return runServices(ctx, services)
+}
+
+// containerServices are the Docker-backed services of a session; they are
+// nil when the node has no Docker.
+type containerServices struct {
+	io        session.ContainerIO
+	files     session.ContainerFiles
+	inventory session.ContainerInventory
+	close     func()
+}
+
+// openContainerServices connects the container list, logs, consoles, and the
+// file manager to Docker. Without Docker the node still runs; container
+// requests are then refused.
+func openContainerServices(ctx context.Context, logger *slog.Logger) containerServices {
+	engine, err := dockerapi.Connect()
+	if err != nil {
+		logger.Warn("containers, their logs, consoles, and files are unavailable", "error", err)
+		return containerServices{close: func() {}}
+	}
+
+	files := containerfiles.New(engine, logger)
+	cleanupCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	if err := files.RemoveStale(cleanupCtx); err != nil {
+		logger.Warn("remove stale file helpers", "error", err)
+	}
+	cancel()
+
+	return containerServices{
+		io:        containerio.New(engine),
+		files:     files,
+		inventory: containerinfo.New(engine),
+		close: func() {
+			files.Close()
+			if err := engine.Close(); err != nil {
+				logger.Warn("close Docker client", "error", err)
+			}
+		},
+	}
 }
 
 // runServices runs services until the first one returns, then stops the rest.

@@ -7,11 +7,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"time"
 
 	"github.com/FroZor/loreva-agent/internal/agentcrypto"
 	"github.com/FroZor/loreva-agent/internal/connectivity"
-	"github.com/FroZor/loreva-agent/internal/metrics"
 	"github.com/FroZor/loreva-agent/internal/networkinfo"
 	"github.com/FroZor/loreva-agent/internal/protocol"
 	"github.com/FroZor/loreva-agent/internal/specifications"
@@ -79,7 +79,6 @@ type Runner struct {
 	masterEndpoint    string
 	collectors        Collectors
 	reports           nodeReportState
-	metrics           metricState
 	workloads         WorkloadController
 	artifacts         workload.ArtifactSource
 }
@@ -88,8 +87,22 @@ type Runner struct {
 type Collectors struct {
 	Specifications func(context.Context) (specifications.Snapshot, error)
 	Network        func(context.Context) (networkinfo.Snapshot, error)
-	Metrics        func(context.Context) <-chan metrics.Sample
-	Workloads      WorkloadController
+	Metrics        MetricsSource
+	// Processes returns the details of one process; nil when the node
+	// cannot read its process table.
+	Processes func(pid int32, startedAt time.Time) (protocol.ProcessDetails, error)
+	Workloads WorkloadController
+	// Containers serves container logs and consoles; it may be nil when
+	// the node has no container runtime.
+	Containers ContainerIO
+	// Files serves the file manager in container volumes; it may be nil
+	// when the node has no container runtime.
+	Files ContainerFiles
+	// Inventory lists and inspects containers; it may be nil when the
+	// node has no container runtime.
+	Inventory ContainerInventory
+	// Logger receives the audit log of console commands; nil discards it.
+	Logger *slog.Logger
 }
 
 // WorkloadController accepts authenticated commands and returns asynchronous

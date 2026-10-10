@@ -155,7 +155,7 @@ func collectPlatformNetwork(ctx context.Context) platformNetwork {
 			firewall: protocol.FirewallInformation{
 				Status:    "unavailable",
 				Providers: []protocol.FirewallProvider{{Name: "windows_defender_firewall", Role: "filter", Status: "unknown"}},
-				Rules:     nil,
+				Rules:     []protocol.FirewallRule{},
 			},
 			issues: []protocol.CollectionIssue{issue},
 		}

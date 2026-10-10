@@ -42,9 +42,397 @@
     { "$ref": "#/$defs/deviceWorkloadCommand" },
     { "$ref": "#/$defs/artifactUploadRequest" },
     { "$ref": "#/$defs/artifactUploadChunk" },
-    { "$ref": "#/$defs/artifactUploadResult" }
+    { "$ref": "#/$defs/artifactUploadResult" },
+    { "$ref": "#/$defs/metricsRollup" },
+    { "$ref": "#/$defs/metricsQuery" },
+    { "$ref": "#/$defs/nodeNetworkRefresh" },
+    { "$ref": "#/$defs/nodeProcessInspect" },
+    { "$ref": "#/$defs/nodeProcessInspectResult" },
+    { "$ref": "#/$defs/containersList" },
+    { "$ref": "#/$defs/containersListResult" },
+    { "$ref": "#/$defs/containerInspect" },
+    { "$ref": "#/$defs/containerInspectResult" },
+    { "$ref": "#/$defs/metricsQueryResult" },
+    { "$ref": "#/$defs/containerLogsOpen" },
+    { "$ref": "#/$defs/containerLogsOpened" },
+    { "$ref": "#/$defs/streamCredit" },
+    { "$ref": "#/$defs/streamClose" },
+    { "$ref": "#/$defs/containerConsoleInfo" },
+    { "$ref": "#/$defs/containerConsoleInfoResult" },
+    { "$ref": "#/$defs/containerConsoleSend" },
+    { "$ref": "#/$defs/containerConsoleSendResult" },
+    { "$ref": "#/$defs/fsList" },
+    { "$ref": "#/$defs/fsListResult" },
+    { "$ref": "#/$defs/fsPathRequest" },
+    { "$ref": "#/$defs/fsStatResult" },
+    { "$ref": "#/$defs/fsChmod" },
+    { "$ref": "#/$defs/fsRename" },
+    { "$ref": "#/$defs/fsDelete" },
+    { "$ref": "#/$defs/fsCopy" },
+    { "$ref": "#/$defs/fsArchive" },
+    { "$ref": "#/$defs/fsExtract" },
+    { "$ref": "#/$defs/fsCancel" },
+    { "$ref": "#/$defs/fsProgress" },
+    { "$ref": "#/$defs/fsResult" },
+    { "$ref": "#/$defs/fsReadOpen" },
+    { "$ref": "#/$defs/fsReadOpened" },
+    { "$ref": "#/$defs/fsWriteOpen" },
+    { "$ref": "#/$defs/fsWriteReady" },
+    { "$ref": "#/$defs/fsWriteResult" }
   ],
   "$defs": {
+    "containerId": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "streamId": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 2147483647
+    },
+    "consoleAdapter": {
+      "enum": ["stdin", "rcon", "telnet", "none"]
+    },
+    "containerLogsOpen": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "request_id", "stream_id", "container_id", "tail", "follow", "timestamps"],
+      "properties": {
+        "type": { "const": "container.logs.open" },
+        "request_id": { "$ref": "#/$defs/uuid" },
+        "stream_id": { "$ref": "#/$defs/streamId" },
+        "container_id": { "$ref": "#/$defs/containerId" },
+        "tail": { "type": "integer", "minimum": 0, "maximum": 10000 },
+        "since": { "$ref": "#/$defs/timestamp" },
+        "follow": { "type": "boolean" },
+        "timestamps": { "type": "boolean" }
+      }
+    },
+    "containerLogsOpened": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "request_id", "stream_id", "tty"],
+      "properties": {
+        "type": { "const": "container.logs.opened" },
+        "request_id": { "$ref": "#/$defs/uuid" },
+        "stream_id": { "$ref": "#/$defs/streamId" },
+        "tty": { "type": "boolean" }
+      }
+    },
+    "streamCredit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "stream_id", "bytes"],
+      "properties": {
+        "type": { "const": "stream.credit" },
+        "stream_id": { "$ref": "#/$defs/streamId" },
+        "bytes": { "type": "integer", "minimum": 1, "maximum": 2097152 }
+      }
+    },
+    "streamClose": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "stream_id", "reason"],
+      "properties": {
+        "type": { "const": "stream.close" },
+        "stream_id": { "$ref": "#/$defs/streamId" },
+        "reason": { "enum": ["ended", "failed", "cancelled"] },
+        "code": { "$ref": "#/$defs/errorCode" }
+      }
+    },
+    "containerConsoleInfo": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "request_id", "container_id"],
+      "properties": {
+        "type": { "const": "container.console.info" },
+        "request_id": { "$ref": "#/$defs/uuid" },
+        "container_id": { "$ref": "#/$defs/containerId" }
+      }
+    },
+    "containerConsoleInfoResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "request_id", "container_id", "adapter"],
+      "properties": {
+        "type": { "const": "container.console.info.result" },
+        "request_id": { "$ref": "#/$defs/uuid" },
+        "container_id": { "$ref": "#/$defs/containerId" },
+        "adapter": { "$ref": "#/$defs/consoleAdapter" }
+      }
+    },
+    "containerConsoleSend": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "request_id", "container_id", "command"],
+      "properties": {
+        "type": { "const": "container.console.send" },
+        "request_id": { "$ref": "#/$defs/uuid" },
+        "container_id": { "$ref": "#/$defs/containerId" },
+        "command": { "type": "string", "minLength": 1, "maxLength": 1024 }
+      }
+    },
+    "containerConsoleSendResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "request_id", "container_id", "adapter", "output"],
+      "properties": {
+        "type": { "const": "container.console.send.result" },
+        "request_id": { "$ref": "#/$defs/uuid" },
+        "container_id": { "$ref": "#/$defs/containerId" },
+        "adapter": { "enum": ["stdin", "rcon", "telnet"] },
+        "output": { "type": "string", "maxLength": 8192 }
+      }
+    },
+    "fsPath": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096,
+      "pattern": "^/"
+    },
+    "fsPaths": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 1000,
+      "items": { "$ref": "#/$defs/fsPath" }
+    },
+    "fsEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "type", "size", "mode", "uid", "gid", "modified_at"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "type": { "enum": ["file", "directory", "symlink", "other"] },
+        "size": { "type": "integer", "minimum": 0 },
+        "mode": { "type": "integer", "minimum": 0, "maximum": 4095 },
+        "uid": { "type": "integer", "minimum": 0 },
+        "gid": { "type": "integer", "minimum": 0 },
+        "modified_at": { "$ref": "#/$defs/timestamp" },
+        "link_target": { "type": "string" },
+        "version": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "mount": { "type": "boolean" },
+        "virtual": { "type": "boolean" },
+        "read_only": { "type": "boolean" }
+      }
+    },
+    "fsList": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "request_id", "container_id", "path"],
+      "properties": {
+        "type": { "const": "fs.list" },
+        "request_id": { "$ref": "#/$defs/uuid" },
+        "container_id": { "$ref": "#/$defs/containerId" },
+        "path": { "$ref": "#/$defs/fsPath" },
+        "after": { "type": "string", "minLength": 1, "maxLength": 4096 }
+      }
+    },
+    "fsListResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "request_id", "container_id", "path", "entries", "more"],
+      "properties": {
+        "type": { "const": "fs.list.result" },
+        "request_id": { "$ref": "#/$defs/uuid" },
+        "container_id": { "$ref": "#/$defs/containerId" },
+        "path": { "$ref": "#/$defs/fsPath" },
+        "entries": { "type": "array", "maxItems": 500, "items": { "$ref": "#/$defs/fsEntry" } },
+        "more": { "type": "boolean" }
+      }
+    },
+    "fsPathRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "request_id", "container_id", "path"],
+      "properties": {
+        "type": { "enum": ["fs.stat", "fs.mkdir"] },
+        "request_id": { "$ref": "#/$defs/uuid" },
+        "container_id": { "$ref": "#/$defs/containerId" },
+        "path": { "$ref": "#/$defs/fsPath" }
+      }
+    },
+    "fsStatResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "request_id", "container_id", "entry"],
+      "properties": {
+        "type": { "const": "fs.stat.result" },
+        "request_id": { "$ref": "#/$defs/uuid" },
+        "container_id": { "$ref": "#/$defs/containerId" },
+        "entry": { "$ref": "#/$defs/fsEntry" }
+      }
+    },
+    "fsChmod": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "request_id", "container_id", "path", "mode"],
+      "properties": {
+        "type": { "const": "fs.chmod" },
+        "request_id": { "$ref": "#/$defs/uuid" },
+        "container_id": { "$ref": "#/$defs/containerId" },
+        "path": { "$ref": "#/$defs/fsPath" },
+        "mode": { "type": "integer", "minimum": 0, "maximum": 511 }
+      }
+    },
+    "fsRename": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "request_id", "container_id", "path", "to"],
+      "properties": {
+        "type": { "const": "fs.rename" },
+        "request_id": { "$ref": "#/$defs/uuid" },
+        "container_id": { "$ref": "#/$defs/containerId" },
+        "path": { "$ref": "#/$defs/fsPath" },
+        "to": { "$ref": "#/$defs/fsPath" }
+      }
+    },
+    "fsDelete": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "request_id", "container_id", "paths"],
+      "properties": {
+        "type": { "const": "fs.delete" },
+        "request_id": { "$ref": "#/$defs/uuid" },
+        "container_id": { "$ref": "#/$defs/containerId" },
+        "paths": { "$ref": "#/$defs/fsPaths" }
+      }
+    },
+    "fsCopy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "request_id", "container_id", "paths", "to"],
+      "properties": {
+        "type": { "const": "fs.copy" },
+        "request_id": { "$ref": "#/$defs/uuid" },
+        "container_id": { "$ref": "#/$defs/containerId" },
+        "paths": { "$ref": "#/$defs/fsPaths" },
+        "to": { "$ref": "#/$defs/fsPath" }
+      }
+    },
+    "fsArchive": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "request_id", "container_id", "paths", "to", "format"],
+      "properties": {
+        "type": { "const": "fs.archive" },
+        "request_id": { "$ref": "#/$defs/uuid" },
+        "container_id": { "$ref": "#/$defs/containerId" },
+        "paths": { "$ref": "#/$defs/fsPaths" },
+        "to": { "$ref": "#/$defs/fsPath" },
+        "format": { "enum": ["zip", "tar.gz"] }
+      }
+    },
+    "fsExtract": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "request_id", "container_id", "path", "to"],
+      "properties": {
+        "type": { "const": "fs.extract" },
+        "request_id": { "$ref": "#/$defs/uuid" },
+        "container_id": { "$ref": "#/$defs/containerId" },
+        "path": { "$ref": "#/$defs/fsPath" },
+        "to": { "$ref": "#/$defs/fsPath" }
+      }
+    },
+    "fsCancel": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "request_id"],
+      "properties": {
+        "type": { "const": "fs.cancel" },
+        "request_id": { "$ref": "#/$defs/uuid" }
+      }
+    },
+    "fsProgress": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "request_id", "items", "bytes"],
+      "properties": {
+        "type": { "const": "fs.progress" },
+        "request_id": { "$ref": "#/$defs/uuid" },
+        "items": { "type": "integer", "minimum": 0 },
+        "bytes": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "fsResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "request_id", "container_id", "items", "bytes", "skipped"],
+      "properties": {
+        "type": { "const": "fs.result" },
+        "request_id": { "$ref": "#/$defs/uuid" },
+        "container_id": { "$ref": "#/$defs/containerId" },
+        "entry": { "$ref": "#/$defs/fsEntry" },
+        "entries": { "type": "array", "maxItems": 1000, "items": { "$ref": "#/$defs/fsEntry" } },
+        "items": { "type": "integer", "minimum": 0 },
+        "bytes": { "type": "integer", "minimum": 0 },
+        "skipped": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "fsReadOpen": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "request_id", "stream_id", "container_id", "path", "offset"],
+      "properties": {
+        "type": { "const": "fs.read.open" },
+        "request_id": { "$ref": "#/$defs/uuid" },
+        "stream_id": { "$ref": "#/$defs/streamId" },
+        "container_id": { "$ref": "#/$defs/containerId" },
+        "path": { "$ref": "#/$defs/fsPath" },
+        "offset": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "fsReadOpened": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "request_id", "stream_id", "entry", "offset", "archive"],
+      "properties": {
+        "type": { "const": "fs.read.opened" },
+        "request_id": { "$ref": "#/$defs/uuid" },
+        "stream_id": { "$ref": "#/$defs/streamId" },
+        "entry": { "$ref": "#/$defs/fsEntry" },
+        "offset": { "type": "integer", "minimum": 0 },
+        "archive": { "type": "boolean" }
+      }
+    },
+    "fsWriteOpen": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "request_id", "stream_id", "container_id", "path", "size", "sha256"],
+      "properties": {
+        "type": { "const": "fs.write.open" },
+        "request_id": { "$ref": "#/$defs/uuid" },
+        "stream_id": { "$ref": "#/$defs/streamId" },
+        "container_id": { "$ref": "#/$defs/containerId" },
+        "path": { "$ref": "#/$defs/fsPath" },
+        "size": { "type": "integer", "minimum": 0 },
+        "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "expected_version": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "mode": { "type": "integer", "minimum": 1, "maximum": 511 }
+      }
+    },
+    "fsWriteReady": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "request_id", "stream_id", "offset"],
+      "properties": {
+        "type": { "const": "fs.write.ready" },
+        "request_id": { "$ref": "#/$defs/uuid" },
+        "stream_id": { "$ref": "#/$defs/streamId" },
+        "offset": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "fsWriteResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "request_id", "stream_id", "entry"],
+      "properties": {
+        "type": { "const": "fs.write.result" },
+        "request_id": { "$ref": "#/$defs/uuid" },
+        "stream_id": { "$ref": "#/$defs/streamId" },
+        "entry": { "$ref": "#/$defs/fsEntry" }
+      }
+    },
     "uuid": {
       "type": "string",
       "format": "uuid"
@@ -762,21 +1150,61 @@
         "hostname": { "type": "string", "minLength": 1, "maxLength": 255 },
         "architecture": { "type": "string", "minLength": 1, "maxLength": 64 },
         "os": { "$ref": "#/$defs/osSpecifications" },
-        "virtualization": { "$ref": "#/$defs/virtualizationSpecifications" }
+        "virtualization": { "$ref": "#/$defs/virtualizationSpecifications" },
+        "platform": { "$ref": "#/$defs/platformSpecifications" },
+        "boot_time": { "$ref": "#/$defs/timestamp" },
+        "timezone": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "init_system": { "type": "string", "minLength": 1, "maxLength": 64 }
+      }
+    },
+    "platformSpecifications": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "system_vendor": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "system_product": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "system_version": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "board_vendor": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "board_product": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "bios_vendor": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "bios_version": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "bios_date": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "chassis_type": { "type": "string", "minLength": 1, "maxLength": 64 }
       }
     },
     "cpuPackageSpecifications": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["id"],
+      "required": ["id", "caches", "flags"],
       "properties": {
         "id": { "type": "string", "minLength": 1, "maxLength": 128 },
         "vendor": { "type": "string", "maxLength": 255 },
         "model": { "type": "string", "maxLength": 255 },
         "socket": { "type": "string", "maxLength": 128 },
+        "family": { "type": "string", "minLength": 1, "maxLength": 32 },
+        "model_id": { "type": "string", "minLength": 1, "maxLength": 32 },
+        "stepping": { "type": "string", "minLength": 1, "maxLength": 16 },
+        "microcode": { "type": "string", "minLength": 1, "maxLength": 64 },
         "physical_core_count": { "type": "integer", "minimum": 1 },
         "logical_processor_count": { "type": "integer", "minimum": 1 },
-        "frequency_hz": { "type": "integer", "minimum": 1 }
+        "frequency_hz": { "type": "integer", "minimum": 1 },
+        "base_frequency_hz": { "type": "integer", "minimum": 1 },
+        "min_frequency_hz": { "type": "integer", "minimum": 1 },
+        "max_frequency_hz": { "type": "integer", "minimum": 1 },
+        "caches": { "type": "array", "maxItems": 64, "items": { "$ref": "#/$defs/cpuCacheSpecifications" } },
+        "flags": { "type": "array", "maxItems": 512, "items": { "type": "string", "minLength": 1, "maxLength": 128 } }
+      }
+    },
+    "cpuCacheSpecifications": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["level", "type", "size_bytes", "instances", "shared_by_logical_processors"],
+      "properties": {
+        "level": { "type": "integer", "minimum": 1, "maximum": 8 },
+        "type": { "type": "string", "maxLength": 32 },
+        "size_bytes": { "type": "integer", "minimum": 0 },
+        "instances": { "type": "integer", "minimum": 0 },
+        "shared_by_logical_processors": { "type": "integer", "minimum": 1 }
       }
     },
     "numaNodeSpecifications": {
@@ -864,7 +1292,19 @@
         "transport": { "type": "string", "maxLength": 64 },
         "capacity_bytes": { "type": "integer", "minimum": 1 },
         "block_size_bytes": { "type": "integer", "minimum": 1 },
-        "removable": { "type": "boolean" }
+        "removable": { "type": "boolean" },
+        "members": { "type": "array", "maxItems": 256, "items": { "type": "string", "minLength": 1, "maxLength": 255 } },
+        "partitions": { "type": "array", "maxItems": 256, "items": { "$ref": "#/$defs/storagePartitionSpecifications" } }
+      }
+    },
+    "storagePartitionSpecifications": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "start_bytes", "size_bytes"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1, "maxLength": 255 },
+        "start_bytes": { "type": "integer", "minimum": 0 },
+        "size_bytes": { "type": "integer", "minimum": 0 }
       }
     },
     "networkInterfaceSpecifications": {
@@ -957,7 +1397,10 @@
           "type": "array",
           "maxItems": 64,
           "items": { "$ref": "#/$defs/networkAddress" }
-        }
+        },
+        "oper_state": { "type": "string", "minLength": 1, "maxLength": 32 },
+        "speed_bps": { "type": "integer", "minimum": 1 },
+        "duplex": { "enum": ["full", "half"] }
       }
     },
     "networkRoute": {
@@ -980,7 +1423,8 @@
         "protocol": { "enum": ["tcp", "udp"] },
         "address": { "type": "string", "minLength": 1, "maxLength": 64 },
         "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
-        "process_id": { "type": "integer", "minimum": 1, "maximum": 2147483647 }
+        "process_id": { "type": "integer", "minimum": 1, "maximum": 2147483647 },
+        "process_name": { "type": "string", "minLength": 1, "maxLength": 64 }
       }
     },
     "firewallProvider": {
@@ -1033,19 +1477,492 @@
         "status": { "type": "string", "minLength": 1, "maxLength": 64 },
         "providers": { "type": "array", "items": { "$ref": "#/$defs/firewallProvider" } },
         "rules": { "type": "array", "maxItems": 4096, "items": { "$ref": "#/$defs/firewallRule" } },
-        "truncated": { "type": "boolean" }
+        "truncated": { "type": "boolean" },
+        "ufw": { "$ref": "#/$defs/ufwConfiguration" },
+        "firewalld": { "$ref": "#/$defs/firewalldConfiguration" }
+      }
+    },
+    "ufwConfiguration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "rules"],
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "default_incoming": { "enum": ["allow", "deny", "reject"] },
+        "default_outgoing": { "enum": ["allow", "deny", "reject"] },
+        "default_routed": { "enum": ["allow", "deny", "reject"] },
+        "rules": { "type": "array", "maxItems": 1024, "items": { "$ref": "#/$defs/ufwRule" } }
+      }
+    },
+    "ufwRule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["family", "action", "direction", "route", "protocol", "to_address", "to_port", "from_address", "from_port"],
+      "properties": {
+        "family": { "enum": ["ipv4", "ipv6"] },
+        "action": { "type": "string", "maxLength": 16 },
+        "log": { "type": "string", "maxLength": 16 },
+        "direction": { "type": "string", "maxLength": 8 },
+        "route": { "type": "boolean" },
+        "protocol": { "type": "string", "maxLength": 16 },
+        "to_address": { "type": "string", "maxLength": 255 },
+        "to_port": { "type": "string", "maxLength": 255 },
+        "from_address": { "type": "string", "maxLength": 255 },
+        "from_port": { "type": "string", "maxLength": 255 },
+        "to_app": { "type": "string", "maxLength": 255 },
+        "from_app": { "type": "string", "maxLength": 255 },
+        "interface_in": { "type": "string", "maxLength": 64 },
+        "interface_out": { "type": "string", "maxLength": 64 },
+        "comment": { "type": "string", "maxLength": 255 }
+      }
+    },
+    "firewalldConfiguration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["default_zone", "zones"],
+      "properties": {
+        "default_zone": { "type": "string", "maxLength": 64 },
+        "zones": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/firewalldZone" } }
+      }
+    },
+    "firewalldZone": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "target", "interfaces", "sources", "services", "ports", "masquerade", "rich_rules"],
+      "properties": {
+        "name": { "type": "string", "maxLength": 64 },
+        "target": { "type": "string", "maxLength": 32 },
+        "interfaces": { "type": "array", "maxItems": 1024, "items": { "type": "string", "maxLength": 1024 } },
+        "sources": { "type": "array", "maxItems": 1024, "items": { "type": "string", "maxLength": 1024 } },
+        "services": { "type": "array", "maxItems": 1024, "items": { "type": "string", "maxLength": 1024 } },
+        "ports": { "type": "array", "maxItems": 1024, "items": { "type": "string", "maxLength": 1024 } },
+        "masquerade": { "type": "boolean" },
+        "rich_rules": { "type": "array", "maxItems": 1024, "items": { "type": "string", "maxLength": 1024 } }
       }
     },
     "nodeNetwork": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["interfaces", "routes", "listening_ports", "firewall"],
+      "required": ["interfaces", "routes", "listening_ports", "firewall", "public_addresses", "security"],
       "properties": {
         "interfaces": { "type": "array", "maxItems": 256, "items": { "$ref": "#/$defs/networkInterfaceConfiguration" } },
         "routes": { "type": "array", "maxItems": 4096, "items": { "$ref": "#/$defs/networkRoute" } },
         "listening_ports": { "type": "array", "maxItems": 4096, "items": { "$ref": "#/$defs/listeningPort" } },
         "firewall": { "$ref": "#/$defs/firewallInformation" },
+        "public_addresses": { "type": "array", "maxItems": 64, "items": { "$ref": "#/$defs/publicAddress" } },
+        "dns": { "$ref": "#/$defs/dnsConfiguration" },
+        "security": { "$ref": "#/$defs/securityInformation" },
         "collection_issues": { "type": "array", "items": { "$ref": "#/$defs/collectionIssue" } }
+      }
+    },
+    "publicAddress": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["family", "address", "source", "behind_nat"],
+      "properties": {
+        "family": { "enum": ["ipv4", "ipv6"] },
+        "address": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "source": { "enum": ["interface", "configured", "cloud_metadata", "external"] },
+        "behind_nat": { "type": "boolean" }
+      }
+    },
+    "dnsConfiguration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["nameservers", "search_domains"],
+      "properties": {
+        "nameservers": { "type": "array", "maxItems": 16, "items": { "type": "string", "minLength": 1, "maxLength": 64 } },
+        "search_domains": { "type": "array", "maxItems": 16, "items": { "type": "string", "minLength": 1, "maxLength": 253 } },
+        "resolver": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "upstream": { "type": "array", "maxItems": 16, "items": { "type": "string", "minLength": 1, "maxLength": 64 } }
+      }
+    },
+    "securityInformation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["intrusion_prevention", "mandatory_access_control", "sessions"],
+      "properties": {
+        "ssh": { "$ref": "#/$defs/sshConfiguration" },
+        "intrusion_prevention": { "type": "array", "maxItems": 16, "items": { "$ref": "#/$defs/securityService" } },
+        "mandatory_access_control": { "type": "array", "maxItems": 16, "items": { "$ref": "#/$defs/securityService" } },
+        "sessions": { "type": "array", "maxItems": 256, "items": { "$ref": "#/$defs/loginSession" } }
+      }
+    },
+    "loginSession": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["user"],
+      "properties": {
+        "user": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "tty": { "type": "string", "maxLength": 64 },
+        "remote_host": { "type": "string", "maxLength": 255 },
+        "service": { "type": "string", "maxLength": 64 },
+        "state": { "type": "string", "maxLength": 32 },
+        "started_at": { "$ref": "#/$defs/timestamp" },
+        "pid": { "type": "integer", "minimum": 1, "maximum": 2147483647 }
+      }
+    },
+    "sshConfiguration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["running", "configured_ports", "listening_ports"],
+      "properties": {
+        "running": { "type": "boolean" },
+        "configured_ports": { "type": "array", "maxItems": 64, "items": { "type": "integer", "minimum": 1, "maximum": 65535 } },
+        "listening_ports": { "type": "array", "maxItems": 64, "items": { "type": "integer", "minimum": 1, "maximum": 65535 } },
+        "permit_root_login": { "type": "string", "minLength": 1, "maxLength": 32 },
+        "password_authentication": { "type": "string", "minLength": 1, "maxLength": 32 },
+        "pubkey_authentication": { "type": "string", "minLength": 1, "maxLength": 32 }
+      }
+    },
+    "securityService": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "status"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "status": { "enum": ["running", "stopped", "enabled", "disabled", "enforcing", "permissive"] },
+        "details": { "type": "array", "maxItems": 128, "items": { "type": "string", "minLength": 1, "maxLength": 64 } }
+      }
+    },
+    "containersList": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "request_id"],
+      "properties": {
+        "type": { "const": "containers.list" },
+        "request_id": { "$ref": "#/$defs/uuid" }
+      }
+    },
+    "containersListResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "request_id", "engine", "items", "truncated"],
+      "properties": {
+        "type": { "const": "containers.list.result" },
+        "request_id": { "$ref": "#/$defs/uuid" },
+        "engine": { "$ref": "#/$defs/containerEngine" },
+        "items": { "type": "array", "maxItems": 1024, "items": { "$ref": "#/$defs/containerSummary" } },
+        "truncated": { "type": "boolean" }
+      }
+    },
+    "containerEngine": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["runtime", "version", "security_options", "containers", "containers_running", "containers_paused", "containers_stopped", "images", "warnings"],
+      "properties": {
+        "runtime": { "const": "docker" },
+        "version": { "type": "string", "maxLength": 32768 },
+        "operating_system": { "type": "string", "maxLength": 32768 },
+        "kernel_version": { "type": "string", "maxLength": 32768 },
+        "architecture": { "type": "string", "maxLength": 32768 },
+        "storage_driver": { "type": "string", "maxLength": 32768 },
+        "logging_driver": { "type": "string", "maxLength": 32768 },
+        "cgroup_driver": { "type": "string", "maxLength": 32768 },
+        "cgroup_version": { "type": "string", "maxLength": 32768 },
+        "default_runtime": { "type": "string", "maxLength": 32768 },
+        "root_directory": { "type": "string", "maxLength": 32768 },
+        "security_options": { "type": "array", "maxItems": 4096, "items": { "type": "string", "maxLength": 32768 } },
+        "containers": { "type": "integer", "minimum": 0 },
+        "containers_running": { "type": "integer", "minimum": 0 },
+        "containers_paused": { "type": "integer", "minimum": 0 },
+        "containers_stopped": { "type": "integer", "minimum": 0 },
+        "images": { "type": "integer", "minimum": 0 },
+        "warnings": { "type": "array", "maxItems": 4096, "items": { "type": "string", "maxLength": 32768 } }
+      }
+    },
+    "containerSummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["container_id", "name", "image", "image_id", "state", "status", "health", "created_at", "ports"],
+      "properties": {
+        "container_id": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "name": { "type": "string", "maxLength": 32768 },
+        "image": { "type": "string", "maxLength": 32768 },
+        "image_id": { "type": "string", "maxLength": 32768 },
+        "state": { "type": "string", "maxLength": 32768 },
+        "status": { "type": "string", "maxLength": 32768 },
+        "health": { "enum": ["none", "starting", "healthy", "unhealthy"] },
+        "created_at": { "$ref": "#/$defs/timestamp" },
+        "ports": { "type": "array", "maxItems": 65536, "items": { "$ref": "#/$defs/containerPort" } },
+        "compose_project": { "type": "string", "maxLength": 32768 },
+        "compose_service": { "type": "string", "maxLength": 32768 }
+      }
+    },
+    "containerPort": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["container_port", "protocol"],
+      "properties": {
+        "container_port": { "type": "integer", "minimum": 0, "maximum": 65535 },
+        "protocol": { "type": "string", "maxLength": 16 },
+        "host_ip": { "type": "string", "maxLength": 64 },
+        "host_port": { "type": "integer", "minimum": 1, "maximum": 65535 }
+      }
+    },
+    "containerInspect": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "request_id", "container_id", "size"],
+      "properties": {
+        "type": { "const": "container.inspect" },
+        "request_id": { "$ref": "#/$defs/uuid" },
+        "container_id": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "size": { "type": "boolean" }
+      }
+    },
+    "containerInspectResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "request_id", "container"],
+      "properties": {
+        "type": { "const": "container.inspect.result" },
+        "request_id": { "$ref": "#/$defs/uuid" },
+        "container": { "$ref": "#/$defs/containerDetails" }
+      }
+    },
+    "containerDetails": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["container_id", "name", "created_at", "image", "command", "env", "labels", "state", "restart_policy", "auto_remove", "ports", "network", "mounts", "limits", "security", "logging"],
+      "properties": {
+        "container_id": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "name": { "type": "string", "maxLength": 32768 },
+        "created_at": { "$ref": "#/$defs/timestamp" },
+        "platform": { "type": "string", "maxLength": 32768 },
+        "image": { "$ref": "#/$defs/containerImage" },
+        "command": { "$ref": "#/$defs/containerCommand" },
+        "env": { "type": "array", "maxItems": 4096, "items": { "type": "string", "maxLength": 32768 } },
+        "labels": { "type": "object", "maxProperties": 4096, "additionalProperties": { "type": "string", "maxLength": 32768 } },
+        "state": { "$ref": "#/$defs/containerStateDetails" },
+        "restart_policy": { "$ref": "#/$defs/containerRestartPolicy" },
+        "auto_remove": { "type": "boolean" },
+        "ports": { "type": "array", "maxItems": 65536, "items": { "$ref": "#/$defs/containerPort" } },
+        "network": { "$ref": "#/$defs/containerNetwork" },
+        "mounts": { "type": "array", "maxItems": 4096, "items": { "$ref": "#/$defs/containerMount" } },
+        "limits": { "$ref": "#/$defs/containerLimits" },
+        "security": { "$ref": "#/$defs/containerSecurity" },
+        "logging": { "$ref": "#/$defs/containerLogging" },
+        "compose": { "$ref": "#/$defs/containerCompose" },
+        "size_rw_bytes": { "type": "integer", "minimum": 0 },
+        "size_root_fs_bytes": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "containerImage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["reference", "id", "digests"],
+      "properties": {
+        "reference": { "type": "string", "maxLength": 32768 },
+        "id": { "type": "string", "maxLength": 32768 },
+        "digests": { "type": "array", "maxItems": 4096, "items": { "type": "string", "maxLength": 32768 } },
+        "created_at": { "$ref": "#/$defs/timestamp" },
+        "size_bytes": { "type": "integer", "minimum": 0 },
+        "source": { "type": "string", "maxLength": 32768 },
+        "revision": { "type": "string", "maxLength": 32768 }
+      }
+    },
+    "containerCommand": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "args", "entrypoint", "cmd", "tty", "open_stdin"],
+      "properties": {
+        "path": { "type": "string", "maxLength": 32768 },
+        "args": { "type": "array", "maxItems": 4096, "items": { "type": "string", "maxLength": 32768 } },
+        "entrypoint": { "type": "array", "maxItems": 4096, "items": { "type": "string", "maxLength": 32768 } },
+        "cmd": { "type": "array", "maxItems": 4096, "items": { "type": "string", "maxLength": 32768 } },
+        "working_dir": { "type": "string", "maxLength": 32768 },
+        "user": { "type": "string", "maxLength": 32768 },
+        "tty": { "type": "boolean" },
+        "open_stdin": { "type": "boolean" },
+        "stop_signal": { "type": "string", "maxLength": 32768 },
+        "stop_timeout_seconds": { "type": "integer" }
+      }
+    },
+    "containerStateDetails": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "running", "paused", "restarting", "oom_killed", "dead", "pid", "exit_code", "restart_count"],
+      "properties": {
+        "status": { "type": "string", "maxLength": 32768 },
+        "running": { "type": "boolean" },
+        "paused": { "type": "boolean" },
+        "restarting": { "type": "boolean" },
+        "oom_killed": { "type": "boolean" },
+        "dead": { "type": "boolean" },
+        "pid": { "type": "integer", "minimum": 0 },
+        "exit_code": { "type": "integer" },
+        "error": { "type": "string", "maxLength": 32768 },
+        "started_at": { "$ref": "#/$defs/timestamp" },
+        "finished_at": { "$ref": "#/$defs/timestamp" },
+        "restart_count": { "type": "integer", "minimum": 0 },
+        "health": { "$ref": "#/$defs/containerHealth" }
+      }
+    },
+    "containerHealth": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "failing_streak"],
+      "properties": {
+        "status": { "enum": ["none", "starting", "healthy", "unhealthy"] },
+        "failing_streak": { "type": "integer", "minimum": 0 },
+        "last_exit_code": { "type": "integer" },
+        "last_output": { "type": "string", "maxLength": 4096 }
+      }
+    },
+    "containerRestartPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "maximum_retry_count"],
+      "properties": {
+        "name": { "type": "string", "maxLength": 32768 },
+        "maximum_retry_count": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "containerNetwork": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode", "dns", "extra_hosts", "networks"],
+      "properties": {
+        "mode": { "type": "string", "maxLength": 32768 },
+        "hostname": { "type": "string", "maxLength": 32768 },
+        "dns": { "type": "array", "maxItems": 4096, "items": { "type": "string", "maxLength": 64 } },
+        "extra_hosts": { "type": "array", "maxItems": 4096, "items": { "type": "string", "maxLength": 32768 } },
+        "networks": { "type": "array", "maxItems": 4096, "items": { "$ref": "#/$defs/containerNetworkAttachment" } }
+      }
+    },
+    "containerNetworkAttachment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "network_id", "aliases"],
+      "properties": {
+        "name": { "type": "string", "maxLength": 32768 },
+        "network_id": { "type": "string", "maxLength": 32768 },
+        "ipv4_address": { "type": "string", "maxLength": 64 },
+        "ipv4_prefix_length": { "type": "integer", "minimum": 0, "maximum": 32 },
+        "ipv4_gateway": { "type": "string", "maxLength": 64 },
+        "ipv6_address": { "type": "string", "maxLength": 64 },
+        "ipv6_prefix_length": { "type": "integer", "minimum": 0, "maximum": 128 },
+        "ipv6_gateway": { "type": "string", "maxLength": 64 },
+        "mac_address": { "type": "string", "maxLength": 64 },
+        "aliases": { "type": "array", "maxItems": 4096, "items": { "type": "string", "maxLength": 32768 } }
+      }
+    },
+    "containerMount": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "destination", "read_write"],
+      "properties": {
+        "type": { "type": "string", "maxLength": 32768 },
+        "name": { "type": "string", "maxLength": 32768 },
+        "source": { "type": "string", "maxLength": 32768 },
+        "destination": { "type": "string", "maxLength": 32768 },
+        "driver": { "type": "string", "maxLength": 32768 },
+        "mode": { "type": "string", "maxLength": 32768 },
+        "read_write": { "type": "boolean" },
+        "propagation": { "type": "string", "maxLength": 32768 }
+      }
+    },
+    "containerLimits": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["memory_bytes", "memory_reservation_bytes", "memory_swap_bytes", "nano_cpus", "cpu_shares", "cpu_quota", "cpu_period", "shm_size_bytes"],
+      "properties": {
+        "memory_bytes": { "type": "integer" },
+        "memory_reservation_bytes": { "type": "integer" },
+        "memory_swap_bytes": { "type": "integer" },
+        "nano_cpus": { "type": "integer" },
+        "cpu_shares": { "type": "integer" },
+        "cpu_quota": { "type": "integer" },
+        "cpu_period": { "type": "integer" },
+        "cpuset_cpus": { "type": "string", "maxLength": 32768 },
+        "pids_limit": { "type": "integer" },
+        "shm_size_bytes": { "type": "integer" }
+      }
+    },
+    "containerSecurity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["privileged", "read_only_root_fs", "cap_add", "cap_drop", "security_options", "devices"],
+      "properties": {
+        "privileged": { "type": "boolean" },
+        "read_only_root_fs": { "type": "boolean" },
+        "cap_add": { "type": "array", "maxItems": 4096, "items": { "type": "string", "maxLength": 32768 } },
+        "cap_drop": { "type": "array", "maxItems": 4096, "items": { "type": "string", "maxLength": 32768 } },
+        "security_options": { "type": "array", "maxItems": 4096, "items": { "type": "string", "maxLength": 32768 } },
+        "pid_mode": { "type": "string", "maxLength": 32768 },
+        "ipc_mode": { "type": "string", "maxLength": 32768 },
+        "uts_mode": { "type": "string", "maxLength": 32768 },
+        "userns_mode": { "type": "string", "maxLength": 32768 },
+        "devices": { "type": "array", "maxItems": 4096, "items": { "type": "string", "maxLength": 32768 } },
+        "apparmor_profile": { "type": "string", "maxLength": 32768 }
+      }
+    },
+    "containerLogging": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["driver", "options"],
+      "properties": {
+        "driver": { "type": "string", "maxLength": 32768 },
+        "options": { "type": "object", "maxProperties": 4096, "additionalProperties": { "type": "string", "maxLength": 32768 } }
+      }
+    },
+    "containerCompose": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["project", "config_files"],
+      "properties": {
+        "project": { "type": "string", "maxLength": 32768 },
+        "service": { "type": "string", "maxLength": 32768 },
+        "working_dir": { "type": "string", "maxLength": 32768 },
+        "config_files": { "type": "array", "maxItems": 4096, "items": { "type": "string", "maxLength": 32768 } }
+      }
+    },
+    "nodeProcessInspect": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "request_id", "pid", "started_at"],
+      "properties": {
+        "type": { "const": "node.process.inspect" },
+        "request_id": { "$ref": "#/$defs/uuid" },
+        "pid": { "type": "integer", "minimum": 1, "maximum": 2147483647 },
+        "started_at": { "$ref": "#/$defs/timestamp" }
+      }
+    },
+    "nodeProcessInspectResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "request_id", "process"],
+      "properties": {
+        "type": { "const": "node.process.inspect.result" },
+        "request_id": { "$ref": "#/$defs/uuid" },
+        "process": { "$ref": "#/$defs/processDetails" }
+      }
+    },
+    "processDetails": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pid", "parent_pid", "started_at", "name", "command_line", "command_line_truncated"],
+      "properties": {
+        "pid": { "type": "integer", "minimum": 1, "maximum": 2147483647 },
+        "parent_pid": { "type": "integer", "minimum": 0, "maximum": 2147483647 },
+        "started_at": { "$ref": "#/$defs/timestamp" },
+        "name": { "type": "string", "maxLength": 256 },
+        "state": { "enum": ["running", "sleeping", "blocked", "stopped", "zombie", "idle"] },
+        "uid": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+        "user": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "container_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "command_line": { "type": "array", "maxItems": 32768, "items": { "type": "string", "maxLength": 32768 } },
+        "command_line_truncated": { "type": "boolean" }
+      }
+    },
+    "nodeNetworkRefresh": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "request_id"],
+      "properties": {
+        "type": { "const": "node.network.refresh" },
+        "request_id": { "$ref": "#/$defs/uuid" }
       }
     },
     "nodeNetworkReport": {
@@ -1133,12 +2050,14 @@
     "memoryMetrics": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["used_bytes", "available_bytes", "cached_bytes", "buffers_bytes", "swap_used_bytes"],
+      "required": ["total_bytes", "used_bytes", "available_bytes", "cached_bytes", "buffers_bytes", "swap_total_bytes", "swap_used_bytes"],
       "properties": {
+        "total_bytes": { "type": "integer", "minimum": 0 },
         "used_bytes": { "type": "integer", "minimum": 0 },
         "available_bytes": { "type": "integer", "minimum": 0 },
         "cached_bytes": { "type": "integer", "minimum": 0 },
         "buffers_bytes": { "type": "integer", "minimum": 0 },
+        "swap_total_bytes": { "type": "integer", "minimum": 0 },
         "swap_used_bytes": { "type": "integer", "minimum": 0 },
         "page_faults_per_second": { "type": "number", "minimum": 0 },
         "major_page_faults_per_second": { "type": "number", "minimum": 0 }
@@ -1147,7 +2066,7 @@
     "storageDeviceMetrics": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["device_id", "read_bytes_per_second", "write_bytes_per_second", "read_operations_per_second", "write_operations_per_second", "io_utilization_percent", "queue_depth"],
+      "required": ["device_id", "read_bytes_per_second", "write_bytes_per_second", "read_operations_per_second", "write_operations_per_second", "io_utilization_percent", "queue_depth", "read_bytes_total", "write_bytes_total"],
       "properties": {
         "device_id": { "type": "string", "minLength": 1, "maxLength": 255 },
         "read_bytes_per_second": { "type": "number", "minimum": 0 },
@@ -1155,16 +2074,21 @@
         "read_operations_per_second": { "type": "number", "minimum": 0 },
         "write_operations_per_second": { "type": "number", "minimum": 0 },
         "io_utilization_percent": { "type": "number", "minimum": 0, "maximum": 100 },
-        "queue_depth": { "type": "number", "minimum": 0 }
+        "queue_depth": { "type": "number", "minimum": 0 },
+        "read_bytes_total": { "type": "integer", "minimum": 0 },
+        "write_bytes_total": { "type": "integer", "minimum": 0 }
       }
     },
     "filesystemMetrics": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["filesystem_id", "mountpoint", "used_bytes", "available_bytes", "used_percent"],
+      "required": ["filesystem_id", "mountpoint", "device", "filesystem_type", "total_bytes", "used_bytes", "available_bytes", "used_percent"],
       "properties": {
         "filesystem_id": { "type": "string", "minLength": 1, "maxLength": 255 },
         "mountpoint": { "type": "string", "minLength": 1, "maxLength": 1024 },
+        "device": { "type": "string", "maxLength": 1024 },
+        "filesystem_type": { "type": "string", "maxLength": 64 },
+        "total_bytes": { "type": "integer", "minimum": 0 },
         "used_bytes": { "type": "integer", "minimum": 0 },
         "available_bytes": { "type": "integer", "minimum": 0 },
         "used_percent": { "type": "number", "minimum": 0, "maximum": 100 },
@@ -1177,13 +2101,42 @@
       "required": ["devices", "filesystems"],
       "properties": {
         "devices": { "type": "array", "maxItems": 1024, "items": { "$ref": "#/$defs/storageDeviceMetrics" } },
-        "filesystems": { "type": "array", "maxItems": 1024, "items": { "$ref": "#/$defs/filesystemMetrics" } }
+        "filesystems": { "type": "array", "maxItems": 1024, "items": { "$ref": "#/$defs/filesystemMetrics" } },
+        "raid": { "type": "array", "maxItems": 1024, "items": { "$ref": "#/$defs/raidMetrics" } }
+      }
+    },
+    "raidMetrics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["device_id", "level", "state", "disks", "degraded", "failed_members"],
+      "properties": {
+        "device_id": { "type": "string", "minLength": 1, "maxLength": 255 },
+        "level": { "type": "string", "maxLength": 64 },
+        "state": { "type": "string", "maxLength": 64 },
+        "disks": { "type": "integer", "minimum": 0 },
+        "degraded": { "type": "integer", "minimum": 0 },
+        "failed_members": { "type": "array", "maxItems": 1024, "items": { "type": "string", "maxLength": 64 } },
+        "sync_action": { "type": "string", "maxLength": 64 },
+        "sync_percent": { "type": "number", "minimum": 0, "maximum": 100 }
+      }
+    },
+    "sensorMetrics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sensor_id", "chip", "label", "type", "value"],
+      "properties": {
+        "sensor_id": { "type": "string", "minLength": 1, "maxLength": 255 },
+        "chip": { "type": "string", "maxLength": 64 },
+        "label": { "type": "string", "maxLength": 64 },
+        "type": { "enum": ["temperature", "fan"] },
+        "value": { "type": "number" },
+        "critical_celsius": { "type": "number" }
       }
     },
     "networkMetrics": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["interface_id", "rx_bytes_per_second", "tx_bytes_per_second", "rx_packets_per_second", "tx_packets_per_second", "rx_errors_per_second", "tx_errors_per_second", "rx_drops_per_second", "tx_drops_per_second"],
+      "required": ["interface_id", "rx_bytes_per_second", "tx_bytes_per_second", "rx_packets_per_second", "tx_packets_per_second", "rx_errors_per_second", "tx_errors_per_second", "rx_drops_per_second", "tx_drops_per_second", "rx_bytes_total", "tx_bytes_total"],
       "properties": {
         "interface_id": { "type": "string", "minLength": 1, "maxLength": 255 },
         "rx_bytes_per_second": { "type": "number", "minimum": 0 },
@@ -1193,7 +2146,25 @@
         "rx_errors_per_second": { "type": "number", "minimum": 0 },
         "tx_errors_per_second": { "type": "number", "minimum": 0 },
         "rx_drops_per_second": { "type": "number", "minimum": 0 },
-        "tx_drops_per_second": { "type": "number", "minimum": 0 }
+        "tx_drops_per_second": { "type": "number", "minimum": 0 },
+        "rx_bytes_total": { "type": "integer", "minimum": 0 },
+        "tx_bytes_total": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "tcpMetrics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["established", "time_wait", "orphaned", "in_use", "active_opens_per_second", "passive_opens_per_second", "failed_attempts_per_second", "resets_sent_per_second", "retransmitted_segments_per_second"],
+      "properties": {
+        "established": { "type": "integer", "minimum": 0 },
+        "time_wait": { "type": "integer", "minimum": 0 },
+        "orphaned": { "type": "integer", "minimum": 0 },
+        "in_use": { "type": "integer", "minimum": 0 },
+        "active_opens_per_second": { "type": "number", "minimum": 0 },
+        "passive_opens_per_second": { "type": "number", "minimum": 0 },
+        "failed_attempts_per_second": { "type": "number", "minimum": 0 },
+        "resets_sent_per_second": { "type": "number", "minimum": 0 },
+        "retransmitted_segments_per_second": { "type": "number", "minimum": 0 }
       }
     },
     "gpuMetrics": {
@@ -1213,11 +2184,15 @@
     "processMetric": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["pid", "started_at", "name", "cpu_percent", "memory_rss_bytes", "memory_virtual_bytes", "read_bytes_per_second", "write_bytes_per_second", "threads"],
+      "required": ["pid", "parent_pid", "started_at", "name", "cpu_percent", "memory_rss_bytes", "memory_virtual_bytes", "read_bytes_per_second", "write_bytes_per_second", "threads"],
       "properties": {
         "pid": { "type": "integer", "minimum": 0, "maximum": 2147483647 },
+        "parent_pid": { "type": "integer", "minimum": 0, "maximum": 2147483647 },
         "started_at": { "$ref": "#/$defs/timestamp" },
         "name": { "type": "string", "maxLength": 256 },
+        "state": { "enum": ["running", "sleeping", "blocked", "stopped", "zombie", "idle"] },
+        "uid": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+        "user": { "type": "string", "minLength": 1, "maxLength": 64 },
         "cpu_percent": { "type": "number", "minimum": 0, "maximum": 409600 },
         "memory_rss_bytes": { "type": "integer", "minimum": 0 },
         "memory_virtual_bytes": { "type": "integer", "minimum": 0 },
@@ -1246,9 +2221,11 @@
     "containerCPUMetrics": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["usage_percent", "throttled_seconds_total", "throttled_periods_total"],
+      "required": ["usage_percent", "online_cpus", "throttled_seconds_total", "throttled_periods_total"],
       "properties": {
         "usage_percent": { "type": "number", "minimum": 0, "maximum": 409600 },
+        "online_cpus": { "type": "integer", "minimum": 1, "maximum": 4096 },
+        "limit_cores": { "type": "number", "exclusiveMinimum": 0, "maximum": 4096 },
         "throttled_seconds_total": { "type": "number", "minimum": 0 },
         "throttled_periods_total": { "type": "integer", "minimum": 0 }
       }
@@ -1321,7 +2298,9 @@
         "memory": { "$ref": "#/$defs/memoryMetrics" },
         "storage": { "$ref": "#/$defs/storageMetrics" },
         "network": { "type": "array", "maxItems": 256, "items": { "$ref": "#/$defs/networkMetrics" } },
+        "tcp": { "$ref": "#/$defs/tcpMetrics" },
         "gpus": { "type": "array", "maxItems": 256, "items": { "$ref": "#/$defs/gpuMetrics" } },
+        "sensors": { "type": "array", "maxItems": 256, "items": { "$ref": "#/$defs/sensorMetrics" } },
         "processes": { "$ref": "#/$defs/processMetrics" }
       }
     },
@@ -1632,6 +2611,106 @@
       "minLength": 44,
       "maxLength": 44,
       "pattern": "^[A-Za-z0-9+/]{43}=$"
+    },
+    "metricAggregate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["min", "avg", "max", "max_at"],
+      "properties": {
+        "min": { "type": "number" },
+        "avg": { "type": "number" },
+        "max": { "type": "number" },
+        "max_at": { "$ref": "#/$defs/timestamp" }
+      }
+    },
+    "metricRollup": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["first_sequence", "last_sequence", "start", "end", "samples", "series"],
+      "properties": {
+        "first_sequence": { "type": "integer", "minimum": 0 },
+        "last_sequence": { "type": "integer", "minimum": 0 },
+        "start": { "$ref": "#/$defs/timestamp" },
+        "end": { "$ref": "#/$defs/timestamp" },
+        "samples": { "type": "integer", "minimum": 0 },
+        "series": {
+          "type": "object",
+          "maxProperties": 4096,
+          "propertyNames": { "minLength": 1, "maxLength": 512 },
+          "additionalProperties": { "$ref": "#/$defs/metricAggregate" }
+        }
+      }
+    },
+    "metricRollupSeries": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "points"],
+      "properties": {
+        "type": { "enum": ["node", "container"] },
+        "points": { "type": "array", "minItems": 1, "maxItems": 60, "items": { "$ref": "#/$defs/metricRollup" } }
+      }
+    },
+    "metricsRollup": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "schema_version", "request_id", "stream_id", "metric"],
+      "properties": {
+        "type": { "const": "metrics.rollup" },
+        "schema_version": { "const": 1 },
+        "request_id": { "$ref": "#/$defs/uuid" },
+        "stream_id": { "$ref": "#/$defs/uuid" },
+        "metric": { "$ref": "#/$defs/metricRollupSeries" }
+      }
+    },
+    "metricsQuery": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "request_id", "from", "to"],
+      "properties": {
+        "type": { "const": "metrics.query" },
+        "request_id": { "$ref": "#/$defs/uuid" },
+        "from": { "$ref": "#/$defs/timestamp" },
+        "to": { "$ref": "#/$defs/timestamp" }
+      }
+    },
+    "metricsSampleRecord": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sequence", "observed_at", "interval_ms", "observation_scope", "node", "containers"],
+      "properties": {
+        "sequence": { "type": "integer", "minimum": 1 },
+        "observed_at": { "$ref": "#/$defs/timestamp" },
+        "interval_ms": { "type": "integer", "minimum": 1 },
+        "observation_scope": { "type": "string", "maxLength": 32 },
+        "node": { "$ref": "#/$defs/nodeMetrics" },
+        "containers": { "type": ["array", "null"], "items": { "$ref": "#/$defs/containerMetrics" } },
+        "collection_issues": { "type": "array", "items": { "$ref": "#/$defs/collectionIssue" } }
+      }
+    },
+    "metricsItem": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "sample": { "$ref": "#/$defs/metricsSampleRecord" },
+        "node": { "$ref": "#/$defs/metricRollup" },
+        "container": { "$ref": "#/$defs/metricRollup" }
+      },
+      "oneOf": [
+        { "required": ["sample"], "not": { "anyOf": [{ "required": ["node"] }, { "required": ["container"] }] } },
+        { "required": ["node", "container"], "not": { "required": ["sample"] } }
+      ]
+    },
+    "metricsQueryResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "request_id", "stream_id", "items"],
+      "properties": {
+        "type": { "const": "metrics.query.result" },
+        "request_id": { "$ref": "#/$defs/uuid" },
+        "stream_id": { "$ref": "#/$defs/uuid" },
+        "items": { "type": "array", "items": { "$ref": "#/$defs/metricsItem" } },
+        "next_from": { "$ref": "#/$defs/timestamp" }
+      }
     }
   }
 }

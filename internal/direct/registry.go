@@ -24,35 +24,22 @@ type registry struct {
 	saved   bool
 }
 
-// loadRegistry loads devices.json. Devices paired over WireGuard cannot
-// connect any more, so their registry starts empty and is replaced on the
-// next pairing; legacy reports that case.
-func loadRegistry(store *state.Store) (devices *registry, legacy bool, err error) {
+func loadRegistry(store *state.Store) (*registry, error) {
 	document, err := store.LoadDevices()
 	if errors.Is(err, state.ErrNotFound) {
-		return &registry{store: store}, false, nil
-	}
-	if errors.Is(err, state.ErrLegacyDirect) {
-		// Replace the old registry at once, so WireGuard keys and PSKs of
-		// devices that can no longer connect do not stay on disk.
-		devices := &registry{store: store, saved: true}
-		if err := devices.persist(nil); err != nil {
-			return nil, false, err
-		}
-
-		return devices, true, nil
+		return &registry{store: store}, nil
 	}
 	if err != nil {
-		return nil, false, fmt.Errorf("load paired devices: %w", err)
+		return nil, fmt.Errorf("load paired devices: %w", err)
 	}
 
 	for _, device := range document.Items {
 		if err := certpin.Validate(device.CertificatePin); err != nil {
-			return nil, false, fmt.Errorf("paired device %s: %w", device.ID, err)
+			return nil, fmt.Errorf("paired device %s: %w", device.ID, err)
 		}
 	}
 
-	return &registry{store: store, devices: document.Items, saved: true}, false, nil
+	return &registry{store: store, devices: document.Items, saved: true}, nil
 }
 
 func (r *registry) list() []state.Device {

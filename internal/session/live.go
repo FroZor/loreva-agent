@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/coder/websocket"
@@ -28,11 +29,14 @@ var (
 
 type readResult struct {
 	data []byte
-	err  error
+	// binary marks a binary stream frame; every other frame is JSON text.
+	binary bool
+	err    error
 }
 
 type liveState struct {
 	*exchange
+	containers        *containerStreams
 	renewal           *activeRenewal
 	renewReplyTimer   *time.Timer
 	sourceExpiryTimer *time.Timer
@@ -70,14 +74,19 @@ func (r *Runner) maintain(
 		defer sourceExpiryTimer.Stop()
 	}
 
-	data, err := newExchange(readCtx, r.collectors, &r.reports, &r.metrics)
-	if err != nil {
-		return &permanentError{Err: err}
-	}
+	data := newExchange(readCtx, r.collectors, &r.reports, "portal:"+r.identity.PortalID)
 	defer data.stop()
+
+	logger := r.collectors.Logger
+	if logger == nil {
+		logger = slog.New(slog.DiscardHandler)
+	}
+	containers := newContainerStreams(readCtx, r.collectors.Containers, r.collectors.Files, conn, logger.With("portal_id", r.identity.PortalID))
+	defer containers.close()
 
 	live := liveState{
 		exchange:          data,
+		containers:        containers,
 		renewReplyTimer:   renewReplyTimer,
 		sourceExpiryTimer: sourceExpiryTimer,
 	}
@@ -96,6 +105,12 @@ func (r *Runner) maintain(
 				return result.err
 			}
 
+			if result.binary {
+				if err := live.containers.handleBinary(readCtx, result.data, portalReject(conn)); err != nil {
+					return err
+				}
+				continue
+			}
 			if err := r.handleWorkingMessage(readCtx, conn, sessionNonce, endpoint, result.data, &live, events); err != nil {
 				return err
 			}
@@ -106,6 +121,8 @@ func (r *Runner) maintain(
 			if err != nil {
 				return fmt.Errorf("write workload response: %w", err)
 			}
+		case id := <-live.containers.finished:
+			live.containers.streamFinished(id)
 		case report := <-live.reports.results:
 			if err := live.reportCollected(readCtx, conn, report); err != nil {
 				return err
@@ -116,8 +133,8 @@ func (r *Runner) maintain(
 			if err := live.retryReport(readCtx, conn); err != nil {
 				return err
 			}
-		case sample := <-live.metrics.results:
-			if err := live.metricCollected(readCtx, conn, sample); err != nil {
+		case <-live.metrics.wake:
+			if err := live.metricsStored(readCtx, conn); err != nil {
 				return err
 			}
 		case <-live.metricsReplyTimer.C:
@@ -163,11 +180,7 @@ func startFrameReader(ctx context.Context, conn *websocket.Conn) <-chan readResu
 				sendReadResult(ctx, results, readResult{err: err})
 				return
 			}
-			if messageType != websocket.MessageText {
-				sendReadResult(ctx, results, readResult{err: errors.New("peer sent a non-text protocol message")})
-				return
-			}
-			if !sendReadResult(ctx, results, readResult{data: data}) {
+			if !sendReadResult(ctx, results, readResult{data: data, binary: messageType == websocket.MessageBinary}) {
 				return
 			}
 		}
@@ -204,6 +217,13 @@ func (r *Runner) handleWorkingMessage(
 		return r.endpointFailure(endpoint, rejection.err)
 	}
 	if handled {
+		return err
+	}
+
+	if handled, err := live.handleRequest(ctx, conn, messageType, data, portalReject(conn)); handled {
+		return err
+	}
+	if handled, err := live.containers.handle(ctx, messageType, data, portalReject(conn)); handled {
 		return err
 	}
 
@@ -413,4 +433,24 @@ func ping(ctx context.Context, conn *websocket.Conn) error {
 
 func nextPingDelay() time.Duration {
 	return pingInterval - pingJitter + randomDuration(2*pingJitter+1)
+}
+
+// portalReject answers a portal request the node cannot accept with the
+// same error frame a device gets.
+func portalReject(conn *websocket.Conn) rejectFunc {
+	return func(ctx context.Context, requestID, code, message string) error {
+		if !agentcrypto.ValidUUID(requestID) {
+			requestID = ""
+		}
+
+		writeCtx, cancel := context.WithTimeout(ctx, workloadWriteTimeout)
+		defer cancel()
+
+		return wsframe.WriteJSON(writeCtx, conn, protocol.Error{
+			Type:      protocol.ErrorType,
+			RequestID: requestID,
+			Code:      code,
+			Message:   boundedMessage(message),
+		})
+	}
 }

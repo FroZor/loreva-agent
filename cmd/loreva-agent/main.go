@@ -27,10 +27,14 @@ var commands = map[string]command{
 	"connect":    runConnect,
 	"disconnect": runDisconnect,
 	"status":     runStatus,
+	// files-helper runs inside the file helper container.
+	"files-helper": runFilesHelper,
 }
 
-// setupCommands print human-readable errors instead of JSON service logs.
-var setupCommands = []string{"configure", "enroll", "init", "invite", "devices", "device", "connect", "disconnect", "status"}
+// setupCommands print human-readable errors to stderr instead of JSON
+// service logs on stdout. files-helper is one of them because its stdout
+// carries the helper protocol.
+var setupCommands = []string{"configure", "enroll", "init", "invite", "devices", "device", "connect", "disconnect", "status", "files-helper"}
 
 func main() {
 	arguments := os.Args[1:]

@@ -15,8 +15,8 @@ import (
 
 	"github.com/FroZor/loreva-agent/internal/certpin"
 	"github.com/FroZor/loreva-agent/internal/control"
-	"github.com/FroZor/loreva-agent/internal/metrics"
 	"github.com/FroZor/loreva-agent/internal/networkinfo"
+	"github.com/FroZor/loreva-agent/internal/protocol"
 	"github.com/FroZor/loreva-agent/internal/session"
 	"github.com/FroZor/loreva-agent/internal/specifications"
 	"github.com/FroZor/loreva-agent/internal/state"
@@ -40,11 +40,12 @@ const (
 type Collectors struct {
 	Specifications func(context.Context) (specifications.Snapshot, error)
 	Network        func(context.Context) (networkinfo.Snapshot, error)
-	Metrics        func(context.Context) <-chan metrics.Sample
+	Metrics        session.MetricsSource
+	Processes      func(pid int32, startedAt time.Time) (protocol.ProcessDetails, error)
 }
 
 func (c Collectors) session() session.Collectors {
-	return session.Collectors{Specifications: c.Specifications, Network: c.Network, Metrics: c.Metrics}
+	return session.Collectors{Specifications: c.Specifications, Network: c.Network, Metrics: c.Metrics, Processes: c.Processes}
 }
 
 // serialized runs each snapshot collector at most once at a time, so devices
@@ -76,6 +77,12 @@ type Options struct {
 	Collectors     Collectors
 	// Workloads may be nil when the node has no workload runtime.
 	Workloads session.WorkloadController
+	// Containers may be nil when the node has no container runtime.
+	Containers session.ContainerIO
+	// Files may be nil when the node has no container runtime.
+	Files session.ContainerFiles
+	// Inventory may be nil when the node has no container runtime.
+	Inventory session.ContainerInventory
 	Logger    *slog.Logger
 }
 
@@ -122,12 +129,9 @@ func Run(ctx context.Context, store *state.Store, node *state.Node, options Opti
 	if err != nil {
 		return fmt.Errorf("load node identity: %w", err)
 	}
-	devices, legacy, err := loadRegistry(store)
+	devices, err := loadRegistry(store)
 	if err != nil {
 		return err
-	}
-	if legacy {
-		options.Logger.Warn("devices paired over WireGuard can no longer connect; pair them again with `loreva-agent invite`")
 	}
 
 	pending := newPairings(local, devices, options.Logger)

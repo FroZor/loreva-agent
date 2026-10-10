@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/netip"
 	"os"
 	"sort"
 	"strconv"
@@ -16,8 +17,11 @@ import (
 
 	gopsutilnet "github.com/shirou/gopsutil/v4/net"
 
+	"github.com/FroZor/loreva-agent/internal/hostnet"
 	"github.com/FroZor/loreva-agent/internal/observation"
+	"github.com/FroZor/loreva-agent/internal/procfs"
 	"github.com/FroZor/loreva-agent/internal/protocol"
+	"github.com/FroZor/loreva-agent/internal/publicip"
 )
 
 const (
@@ -33,20 +37,39 @@ type Snapshot struct {
 	Network          protocol.NodeNetwork
 }
 
+// Collector collects network snapshots. It keeps the public address
+// resolver, whose lookups are cached between snapshots.
+type Collector struct {
+	addresses *publicip.Resolver
+}
+
+// NewCollector returns a collector that finds public addresses with the
+// given resolver.
+func NewCollector(addresses *publicip.Resolver) *Collector {
+	return &Collector{addresses: addresses}
+}
+
 // Collect returns a bounded best-effort network and firewall snapshot.
-func Collect(ctx context.Context) (Snapshot, error) {
+func (c *Collector) Collect(ctx context.Context) (Snapshot, error) {
 	interfaces, interfaceIssues := collectInterfaces()
 	listeners, listenerIssues := collectListeningPorts(ctx)
 	platform := collectPlatformNetwork(ctx)
+	security, securityIssues := collectSecurity(listeners)
+	publicAddresses, publicIssues := c.publicAddresses(ctx, interfaces)
 
 	issues := append(interfaceIssues, listenerIssues...)
 	issues = append(issues, platform.issues...)
+	issues = append(issues, securityIssues...)
+	issues = append(issues, publicIssues...)
 
 	network := protocol.NodeNetwork{
 		Interfaces:       interfaces,
 		Routes:           platform.routes,
 		ListeningPorts:   listeners,
 		Firewall:         platform.firewall,
+		PublicAddresses:  publicAddresses,
+		DNS:              platform.dns,
+		Security:         security,
 		CollectionIssues: deduplicateIssues(issues),
 	}
 	if err := fitNetworkToBudget(&network); err != nil {
@@ -123,8 +146,47 @@ func truncateInterfaceAddresses(interfaces []protocol.NetworkInterfaceConfigurat
 	return true
 }
 
+func (c *Collector) publicAddresses(
+	ctx context.Context,
+	interfaces []protocol.NetworkInterfaceConfiguration,
+) ([]protocol.PublicAddress, []protocol.CollectionIssue) {
+	result := []protocol.PublicAddress{}
+	if c.addresses == nil {
+		return result, nil
+	}
+
+	var local []netip.Addr
+	for _, networkInterface := range interfaces {
+		for _, address := range networkInterface.Addresses {
+			if parsed, err := netip.ParseAddr(address.Address); err == nil {
+				local = append(local, parsed)
+			}
+		}
+	}
+
+	addresses, lookupIssues := c.addresses.Addresses(ctx, local)
+	for _, address := range addresses {
+		family := "ipv6"
+		if address.Addr.Is4() {
+			family = "ipv4"
+		}
+		result = append(result, protocol.PublicAddress{
+			Family:    family,
+			Address:   address.Addr.String(),
+			Source:    address.Source,
+			BehindNAT: address.BehindNAT,
+		})
+	}
+	issues := make([]protocol.CollectionIssue, 0, len(lookupIssues))
+	for _, issue := range lookupIssues {
+		issues = append(issues, protocol.CollectionIssue{Component: issue.Component, Code: issue.Code})
+	}
+
+	return result, issues
+}
+
 func collectInterfaces() ([]protocol.NetworkInterfaceConfiguration, []protocol.CollectionIssue) {
-	interfaces, err := net.Interfaces()
+	interfaces, err := hostnet.Interfaces()
 	if err != nil {
 		return nil, []protocol.CollectionIssue{networkIssue("interfaces", err)}
 	}
@@ -141,10 +203,7 @@ func collectInterfaces() ([]protocol.NetworkInterfaceConfiguration, []protocol.C
 
 	result := make([]protocol.NetworkInterfaceConfiguration, 0, len(interfaces))
 	for _, networkInterface := range interfaces {
-		addresses, err := networkInterface.Addrs()
-		if err != nil {
-			issues = append(issues, networkIssue("interfaces.addresses", err))
-		}
+		addresses := networkInterface.Addresses
 		if len(addresses) > maxInterfaceAddresses {
 			addresses = addresses[:maxInterfaceAddresses]
 			issues = append(issues, protocol.CollectionIssue{Component: "interfaces.addresses", Code: "truncated"})
@@ -152,31 +211,29 @@ func collectInterfaces() ([]protocol.NetworkInterfaceConfiguration, []protocol.C
 
 		normalizedAddresses := make([]protocol.NetworkAddress, 0, len(addresses))
 		for _, address := range addresses {
-			ip, network, err := net.ParseCIDR(address.String())
-			if err != nil {
-				continue
-			}
-
-			prefixLength, _ := network.Mask.Size()
 			family := "ipv6"
-			if ip.To4() != nil {
+			if address.Addr().Is4() {
 				family = "ipv4"
 			}
 
 			normalizedAddresses = append(normalizedAddresses, protocol.NetworkAddress{
 				Family:       family,
-				Address:      ip.String(),
-				PrefixLength: prefixLength,
+				Address:      address.Addr().String(),
+				PrefixLength: address.Bits(),
 			})
 		}
 
+		link := hostnet.LinkState(networkInterface.Name)
 		result = append(result, protocol.NetworkInterfaceConfiguration{
-			ID:              "network:" + strconv.Itoa(networkInterface.Index),
+			ID:              networkInterface.ID(),
 			Name:            sanitizeNetworkValue(networkInterface.Name, 255),
 			HardwareAddress: networkInterface.HardwareAddr.String(),
 			MTU:             networkInterface.MTU,
 			Flags:           interfaceFlags(networkInterface.Flags),
 			Addresses:       normalizedAddresses,
+			OperState:       sanitizeNetworkValue(link.OperState, 32),
+			SpeedBPS:        link.SpeedMbps * 1_000_000,
+			Duplex:          link.Duplex,
 		})
 	}
 
@@ -192,6 +249,7 @@ func collectListeningPorts(ctx context.Context) ([]protocol.ListeningPort, []pro
 	listeners := make([]protocol.ListeningPort, 0)
 	seen := make(map[string]struct{})
 	truncated := false
+	unowned := false
 
 	for _, connection := range connections {
 		protocolName, listening := listeningProtocol(connection)
@@ -215,12 +273,18 @@ func collectListeningPorts(ctx context.Context) ([]protocol.ListeningPort, []pro
 		}
 
 		seen[key] = struct{}{}
-		listeners = append(listeners, protocol.ListeningPort{
+		listener := protocol.ListeningPort{
 			Protocol:  protocolName,
 			Address:   address.String(),
 			Port:      uint16(connection.Laddr.Port),
 			ProcessID: connection.Pid,
-		})
+		}
+		if connection.Pid > 0 {
+			listener.ProcessName = sanitizeNetworkValue(procfs.Name(connection.Pid), 64)
+		} else {
+			unowned = true
+		}
+		listeners = append(listeners, listener)
 	}
 
 	sort.Slice(listeners, func(left, right int) bool {
@@ -233,11 +297,17 @@ func collectListeningPorts(ctx context.Context) ([]protocol.ListeningPort, []pro
 		return listeners[left].Address < listeners[right].Address
 	})
 
+	var issues []protocol.CollectionIssue
 	if truncated {
-		return listeners, []protocol.CollectionIssue{{Component: "listening_ports", Code: "truncated"}}
+		issues = append(issues, protocol.CollectionIssue{Component: "listening_ports", Code: "truncated"})
+	}
+	if unowned {
+		// Owners are found through other processes' file tables, which
+		// need root or CAP_SYS_PTRACE.
+		issues = append(issues, protocol.CollectionIssue{Component: "listening_ports.process", Code: "partial"})
 	}
 
-	return listeners, nil
+	return listeners, issues
 }
 
 func listeningProtocol(connection gopsutilnet.ConnectionStat) (string, bool) {

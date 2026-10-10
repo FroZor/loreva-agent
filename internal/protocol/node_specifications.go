@@ -44,6 +44,24 @@ type SystemSpecifications struct {
 	Architecture   string                        `json:"architecture"`
 	OS             OSSpecifications              `json:"os"`
 	Virtualization *VirtualizationSpecifications `json:"virtualization,omitempty"`
+	Platform       *PlatformSpecifications       `json:"platform,omitempty"`
+	BootTime       *time.Time                    `json:"boot_time,omitempty"`
+	Timezone       string                        `json:"timezone,omitempty"`
+	InitSystem     string                        `json:"init_system,omitempty"`
+}
+
+// PlatformSpecifications names the machine, board, and firmware from SMBIOS.
+// Serial numbers and UUIDs are left out.
+type PlatformSpecifications struct {
+	SystemVendor  string `json:"system_vendor,omitempty"`
+	SystemProduct string `json:"system_product,omitempty"`
+	SystemVersion string `json:"system_version,omitempty"`
+	BoardVendor   string `json:"board_vendor,omitempty"`
+	BoardProduct  string `json:"board_product,omitempty"`
+	BIOSVendor    string `json:"bios_vendor,omitempty"`
+	BIOSVersion   string `json:"bios_version,omitempty"`
+	BIOSDate      string `json:"bios_date,omitempty"`
+	ChassisType   string `json:"chassis_type,omitempty"`
 }
 
 // OSSpecifications identifies the operating system without a host-unique identifier.
@@ -70,15 +88,37 @@ type CPUSpecifications struct {
 	LogicalProcessors     []LogicalProcessorSpecifications `json:"logical_processors"`
 }
 
-// CPUPackageSpecifications describes one physical CPU package.
+// CPUPackageSpecifications describes one physical CPU package. FrequencyHz
+// is the highest clock the kernel reports: the cpufreq maximum when the
+// kernel scales frequency, otherwise the current clock from /proc/cpuinfo.
 type CPUPackageSpecifications struct {
-	ID                    string `json:"id"`
-	Vendor                string `json:"vendor,omitempty"`
-	Model                 string `json:"model,omitempty"`
-	Socket                string `json:"socket,omitempty"`
-	PhysicalCoreCount     int    `json:"physical_core_count,omitempty"`
-	LogicalProcessorCount int    `json:"logical_processor_count,omitempty"`
-	FrequencyHz           uint64 `json:"frequency_hz,omitempty"`
+	ID                    string                   `json:"id"`
+	Vendor                string                   `json:"vendor,omitempty"`
+	Model                 string                   `json:"model,omitempty"`
+	Socket                string                   `json:"socket,omitempty"`
+	Family                string                   `json:"family,omitempty"`
+	ModelID               string                   `json:"model_id,omitempty"`
+	Stepping              string                   `json:"stepping,omitempty"`
+	Microcode             string                   `json:"microcode,omitempty"`
+	PhysicalCoreCount     int                      `json:"physical_core_count,omitempty"`
+	LogicalProcessorCount int                      `json:"logical_processor_count,omitempty"`
+	FrequencyHz           uint64                   `json:"frequency_hz,omitempty"`
+	BaseFrequencyHz       uint64                   `json:"base_frequency_hz,omitempty"`
+	MinFrequencyHz        uint64                   `json:"min_frequency_hz,omitempty"`
+	MaxFrequencyHz        uint64                   `json:"max_frequency_hz,omitempty"`
+	Caches                []CPUCacheSpecifications `json:"caches"`
+	Flags                 []string                 `json:"flags"`
+}
+
+// CPUCacheSpecifications describes one cache level of a package. SizeBytes
+// is one instance; Instances is how many the package has, each shared by
+// SharedByLogicalProcessors logical processors.
+type CPUCacheSpecifications struct {
+	Level                     int    `json:"level"`
+	Type                      string `json:"type"`
+	SizeBytes                 uint64 `json:"size_bytes"`
+	Instances                 int    `json:"instances"`
+	SharedByLogicalProcessors int    `json:"shared_by_logical_processors"`
 }
 
 // NUMANodeSpecifications describes memory assigned to one NUMA node.
@@ -136,6 +176,16 @@ type StorageDeviceSpecifications struct {
 	CapacityBytes  uint64 `json:"capacity_bytes,omitempty"`
 	BlockSizeBytes uint64 `json:"block_size_bytes,omitempty"`
 	Removable      bool   `json:"removable"`
+	// Members lists the devices a RAID or device-mapper volume is built on.
+	Members    []string                         `json:"members,omitempty"`
+	Partitions []StoragePartitionSpecifications `json:"partitions,omitempty"`
+}
+
+// StoragePartitionSpecifications describes one partition of a block device.
+type StoragePartitionSpecifications struct {
+	Name       string `json:"name"`
+	StartBytes uint64 `json:"start_bytes"`
+	SizeBytes  uint64 `json:"size_bytes"`
 }
 
 // NetworkInterfaceSpecifications describes NIC hardware without addresses.

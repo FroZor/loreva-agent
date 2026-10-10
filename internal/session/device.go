@@ -67,10 +67,7 @@ func ServeDevice(ctx context.Context, conn *websocket.Conn, config DeviceConfig)
 
 	reads := startFrameReader(readCtx, conn)
 
-	data, err := newExchange(readCtx, config.Collectors, &nodeReportState{}, &metricState{})
-	if err != nil {
-		return err
-	}
+	data := newExchange(readCtx, config.Collectors, &nodeReportState{}, "device:"+config.Hello.DeviceID)
 	defer data.stop()
 
 	pingTimer := time.NewTimer(nextPingDelay())
@@ -79,8 +76,15 @@ func ServeDevice(ctx context.Context, conn *websocket.Conn, config DeviceConfig)
 	uploadTimer := newStoppedTimer()
 	defer uploadTimer.Stop()
 
-	session := &deviceSession{config: config, conn: conn, exchange: data, uploadTimer: uploadTimer}
+	session := &deviceSession{
+		config:      config,
+		conn:        conn,
+		exchange:    data,
+		uploadTimer: uploadTimer,
+		containers:  newContainerStreams(readCtx, config.Collectors.Containers, config.Collectors.Files, conn, config.Logger),
+	}
 	defer session.cancelUpload()
+	defer session.containers.close()
 
 	events := Events{ReportRejected: func(rejection NodeReportRejection) {
 		config.Logger.Warn("device rejected a node report", "type", rejection.Type, "code", rejection.Code)
@@ -96,9 +100,17 @@ func ServeDevice(ctx context.Context, conn *websocket.Conn, config DeviceConfig)
 				return result.err
 			}
 
+			if result.binary {
+				if err := session.containers.handleBinary(readCtx, result.data, session.reject); err != nil {
+					return err
+				}
+				continue
+			}
 			if err := session.handle(readCtx, result.data, events); err != nil {
 				return err
 			}
+		case id := <-session.containers.finished:
+			session.containers.streamFinished(id)
 		case response := <-config.WorkloadResults:
 			if err := writeDeviceFrame(readCtx, conn, response); err != nil {
 				return fmt.Errorf("write workload response: %w", err)
@@ -113,8 +125,8 @@ func ServeDevice(ctx context.Context, conn *websocket.Conn, config DeviceConfig)
 			if err := data.retryReport(readCtx, conn); err != nil {
 				return err
 			}
-		case sample := <-data.metrics.results:
-			if err := data.metricCollected(readCtx, conn, sample); err != nil {
+		case <-data.metrics.wake:
+			if err := data.metricsStored(readCtx, conn); err != nil {
 				return err
 			}
 		case <-data.metricsReplyTimer.C:
@@ -145,6 +157,7 @@ type deviceSession struct {
 	exchange    *exchange
 	upload      *artifactUpload
 	uploadTimer *time.Timer
+	containers  *containerStreams
 }
 
 // artifactUpload streams announced chunks into the workload artifact cache.
@@ -166,6 +179,13 @@ func (s *deviceSession) handle(ctx context.Context, data []byte, events Events) 
 
 	handled, err := s.exchange.handleAcknowledgement(ctx, s.conn, messageType, data, events)
 	if handled {
+		return err
+	}
+
+	if handled, err := s.exchange.handleRequest(ctx, s.conn, messageType, data, s.reject); handled {
+		return err
+	}
+	if handled, err := s.containers.handle(ctx, messageType, data, s.reject); handled {
 		return err
 	}
 

@@ -5,8 +5,6 @@ import (
 	"context"
 	"errors"
 	"math"
-	"net"
-	"net/url"
 	"os"
 	"sort"
 	"strconv"
@@ -21,16 +19,18 @@ import (
 	"github.com/shirou/gopsutil/v4/load"
 	"github.com/shirou/gopsutil/v4/mem"
 	gnet "github.com/shirou/gopsutil/v4/net"
-	"github.com/shirou/gopsutil/v4/process"
 
+	"github.com/FroZor/loreva-agent/internal/dockerapi"
+	"github.com/FroZor/loreva-agent/internal/hostfs"
+	"github.com/FroZor/loreva-agent/internal/hostnet"
 	"github.com/FroZor/loreva-agent/internal/observation"
+	"github.com/FroZor/loreva-agent/internal/procfs"
 	"github.com/FroZor/loreva-agent/internal/protocol"
 	"github.com/FroZor/loreva-agent/internal/specifications"
 )
 
 const (
-	maxProcessCandidates = 1024
-	maxProcessItems      = 256
+	maxProcessItems = 256
 )
 
 // Snapshot contains one measured interval and the scope visible to the agent.
@@ -50,6 +50,7 @@ type rawCounters struct {
 	disk      map[string]disk.IOCountersStat
 	network   map[string]gnet.IOCountersStat
 	swap      *mem.SwapMemoryStat
+	kernel    *kernelCounters
 	processes map[processKey]rawProcess
 	issues    []protocol.CollectionIssue
 }
@@ -63,6 +64,8 @@ type rawProcess struct {
 	cpuSeconds float64
 	readBytes  uint64
 	writeBytes uint64
+	hasIO      bool
+	identity   *procfs.Identity
 }
 
 type rawContainer struct {
@@ -71,6 +74,8 @@ type rawContainer struct {
 	systemCPU       uint64
 	onlineCPUs      uint32
 	cpuUnitNanos    uint64
+	cpuLimitCores   float64
+	limitsReadAt    time.Time
 	readBytes       uint64
 	writeBytes      uint64
 	readOperations  uint64
@@ -79,13 +84,6 @@ type rawContainer struct {
 	txBytes         uint64
 	rxPackets       uint64
 	txPackets       uint64
-}
-
-type processObservation struct {
-	metric  protocol.ProcessMetric
-	raw     rawProcess
-	status  string
-	partial bool
 }
 
 type gpuDevice struct {
@@ -104,6 +102,7 @@ type Collector struct {
 	containers       map[string]rawContainer
 	nextDockerProbe  time.Time
 	startupIssues    []protocol.CollectionIssue
+	users            userCache
 }
 
 // NewCollector primes counter baselines without delaying the caller.
@@ -114,7 +113,7 @@ func NewCollector(ctx context.Context) *Collector {
 	dockerClient, err := client.New(client.FromEnv)
 	if err != nil {
 		collector.startupIssues = append(collector.startupIssues, issue("containers.docker", classifyError(err)))
-	} else if err := validateDockerEndpoint(dockerClient.DaemonHost()); err != nil {
+	} else if err := dockerapi.ValidateEndpoint(dockerClient.DaemonHost()); err != nil {
 		collector.startupIssues = append(collector.startupIssues, issue("containers.docker", "insecure_endpoint"))
 		if closeErr := dockerClient.Close(); closeErr != nil {
 			collector.startupIssues = append(collector.startupIssues, issue("containers.docker", "cleanup_failed"))
@@ -136,24 +135,6 @@ func NewCollector(ctx context.Context) *Collector {
 	collector.previous = collectRawCounters(ctx, time.Now().UTC(), nil)
 
 	return collector
-}
-
-func validateDockerEndpoint(endpoint string) error {
-	parsed, err := url.Parse(endpoint)
-	if err != nil {
-		return err
-	}
-
-	switch strings.ToLower(parsed.Scheme) {
-	case "unix", "npipe", "ssh", "https":
-		return nil
-	case "tcp":
-		if os.Getenv(client.EnvTLSVerify) != "" {
-			return nil
-		}
-	}
-
-	return errors.New("Docker endpoint must use a local socket, SSH, or verified TLS")
 }
 
 // Close releases idle runtime-client resources.
@@ -182,12 +163,15 @@ func (collector *Collector) Collect(ctx context.Context) (Snapshot, error) {
 	issues = append(issues, current.issues...)
 	node := protocol.NodeMetrics{
 		CPU:       collectCPU(ctx, collector.previous, current, &issues),
-		Memory:    collectMemory(collector.previous.swap, current.swap, interval, &issues),
+		Memory:    collectMemory(current.swap, &issues),
 		Storage:   collectStorage(ctx, collector.previous.disk, current.disk, interval, &issues),
 		Network:   collectNetwork(collector.previous.network, current.network, interval, &issues),
 		GPUs:      collector.collectGPUs(ctx, &issues),
-		Processes: collectProcesses(ctx, collector.previous.processes, interval, &current, &issues),
+		Sensors:   collectSensors(),
+		Processes: collectProcesses(ctx, collector.previous.processes, interval, &current, &collector.users, &issues),
 	}
+	applyKernelRates(collector.previous.kernel, current.kernel, interval, &node.CPU, &node.Memory)
+	node.TCP = tcpMetrics(collector.previous.kernel, current.kernel, interval)
 	containers := collector.collectContainers(ctx, &issues)
 
 	collector.previous = current
@@ -224,7 +208,12 @@ func collectRawCounters(ctx context.Context, observedAt time.Time, previousProce
 		counters.issues = append(counters.issues, issue("storage.devices", classifyError(err)))
 	}
 
-	networkCounters, err := gnet.IOCountersWithContext(ctx, true)
+	var networkCounters []gnet.IOCountersStat
+	if path := hostnet.NetPath("dev"); path != "" {
+		networkCounters, err = gnet.IOCountersByFileWithContext(ctx, true, path)
+	} else {
+		networkCounters, err = gnet.IOCountersWithContext(ctx, true)
+	}
 	if err != nil {
 		counters.issues = append(counters.issues, issue("network", classifyError(err)))
 	} else {
@@ -236,6 +225,10 @@ func collectRawCounters(ctx context.Context, observedAt time.Time, previousProce
 	counters.swap, err = mem.SwapMemoryWithContext(ctx)
 	if err != nil {
 		counters.issues = append(counters.issues, issue("memory.swap", classifyError(err)))
+	}
+
+	if kernel, ok := readKernelCounters(); ok {
+		counters.kernel = &kernel
 	}
 
 	return counters
@@ -314,45 +307,26 @@ func cpuTotal(value cpu.TimesStat) float64 {
 	return value.User + value.Nice + value.System + value.Idle + value.Iowait + value.Irq + value.Softirq + value.Steal
 }
 
-func collectMemory(
-	previousSwap, currentSwap *mem.SwapMemoryStat,
-	interval time.Duration,
-	issues *[]protocol.CollectionIssue,
-) protocol.MemoryMetrics {
+func collectMemory(swap *mem.SwapMemoryStat, issues *[]protocol.CollectionIssue) protocol.MemoryMetrics {
 	result := protocol.MemoryMetrics{}
 
 	memory, err := mem.VirtualMemory()
 	if err != nil {
 		*issues = append(*issues, issue("memory", classifyError(err)))
 	} else {
+		result.TotalBytes = memory.Total
 		result.UsedBytes = memory.Used
 		result.AvailableBytes = memory.Available
 		result.CachedBytes = memory.Cached
 		result.BuffersBytes = memory.Buffers
 	}
 
-	if currentSwap == nil {
+	if swap == nil {
 		*issues = append(*issues, issue("memory.swap", "collection_failed"))
 		return result
 	}
-
-	result.SwapUsedBytes = currentSwap.Used
-	if previousSwap == nil {
-		return result
-	}
-
-	seconds := interval.Seconds()
-	if seconds <= 0 {
-		return result
-	}
-	if previousSwap.PgFault != 0 || currentSwap.PgFault != 0 {
-		value := float64(counterDeltaUint(previousSwap.PgFault, currentSwap.PgFault)) / seconds
-		result.PageFaultsPerSecond = &value
-	}
-	if previousSwap.PgMajFault != 0 || currentSwap.PgMajFault != 0 {
-		value := float64(counterDeltaUint(previousSwap.PgMajFault, currentSwap.PgMajFault)) / seconds
-		result.MajorPageFaultsPerSecond = &value
-	}
+	result.SwapTotalBytes = swap.Total
+	result.SwapUsedBytes = swap.Used
 
 	return result
 }
@@ -366,6 +340,7 @@ func collectStorage(
 	result := protocol.StorageMetrics{
 		Devices:     []protocol.StorageDeviceMetrics{},
 		Filesystems: []protocol.FilesystemMetrics{},
+		RAID:        collectRAID(),
 	}
 	seconds := interval.Seconds()
 	if seconds <= 0 {
@@ -393,6 +368,8 @@ func collectStorage(
 			WriteOperationsPerSecond: rate(previousDevice.WriteCount, currentDevice.WriteCount, seconds),
 			IOUtilizationPercent:     percent(float64(counterDeltaUint(previousDevice.IoTime, currentDevice.IoTime)) / interval.Seconds() / 10),
 			QueueDepth:               float64(currentDevice.IopsInProgress),
+			ReadBytesTotal:           currentDevice.ReadBytes,
+			WriteBytesTotal:          currentDevice.WriteBytes,
 		})
 	}
 
@@ -403,20 +380,25 @@ func collectStorage(
 	}
 
 	seen := make(map[string]struct{}, len(partitions))
+	unreadable := 0
 	for _, partition := range partitions {
 		if _, exists := seen[partition.Mountpoint]; exists {
 			continue
 		}
 		seen[partition.Mountpoint] = struct{}{}
 
-		usage, err := disk.UsageWithContext(ctx, partition.Mountpoint)
+		usage, err := disk.UsageWithContext(ctx, hostfs.Root(partition.Mountpoint))
 		if err != nil {
+			unreadable++
 			continue
 		}
 
 		filesystem := protocol.FilesystemMetrics{
 			FilesystemID:   "filesystem:" + sanitizeID(partition.Device),
 			Mountpoint:     sanitize(partition.Mountpoint, 1024),
+			Device:         sanitize(partition.Device, 1024),
+			FilesystemType: sanitize(partition.Fstype, 64),
+			TotalBytes:     usage.Total,
 			UsedBytes:      usage.Used,
 			AvailableBytes: usage.Free,
 			UsedPercent:    percent(usage.UsedPercent),
@@ -427,6 +409,13 @@ func collectStorage(
 		}
 
 		result.Filesystems = append(result.Filesystems, filesystem)
+	}
+
+	switch {
+	case len(result.Filesystems) == 0:
+		*issues = append(*issues, issue("storage.filesystems", "not_available"))
+	case unreadable > 0:
+		*issues = append(*issues, issue("storage.filesystems", "partial"))
 	}
 
 	return result
@@ -442,13 +431,13 @@ func collectNetwork(
 		return []protocol.NetworkMetrics{}
 	}
 
-	interfaces, err := net.Interfaces()
+	interfaces, err := hostnet.Interfaces()
 	if err != nil {
 		*issues = append(*issues, issue("network", classifyError(err)))
 	}
 	interfaceIDs := make(map[string]string, len(interfaces))
 	for _, networkInterface := range interfaces {
-		interfaceIDs[networkInterface.Name] = "network:" + strconv.Itoa(networkInterface.Index)
+		interfaceIDs[networkInterface.Name] = networkInterface.ID()
 	}
 
 	names := make([]string, 0, len(current))
@@ -480,177 +469,12 @@ func collectNetwork(
 			TXErrorsPerSecond:  rate(previousInterface.Errout, currentInterface.Errout, seconds),
 			RXDropsPerSecond:   rate(previousInterface.Dropin, currentInterface.Dropin, seconds),
 			TXDropsPerSecond:   rate(previousInterface.Dropout, currentInterface.Dropout, seconds),
+			RXBytesTotal:       currentInterface.BytesRecv,
+			TXBytesTotal:       currentInterface.BytesSent,
 		})
 	}
 
 	return result
-}
-
-func collectProcesses(
-	ctx context.Context,
-	previous map[processKey]rawProcess,
-	interval time.Duration,
-	current *rawCounters,
-	issues *[]protocol.CollectionIssue,
-) protocol.ProcessMetrics {
-	result := protocol.ProcessMetrics{Items: []protocol.ProcessMetric{}}
-	processes, err := process.ProcessesWithContext(ctx)
-	if err != nil {
-		*issues = append(*issues, issue("processes", classifyError(err)))
-		return result
-	}
-
-	result.Total = len(processes)
-	sort.Slice(processes, func(left, right int) bool {
-		return processes[left].Pid < processes[right].Pid
-	})
-	if len(processes) > maxProcessCandidates {
-		processes = processes[:maxProcessCandidates]
-		result.Truncated = true
-	}
-
-	observations := make([]processObservation, 0, len(processes))
-	nextRaw := make(map[processKey]rawProcess, len(processes))
-	partial := false
-
-	for _, candidate := range processes {
-		observation, key, ok := observeProcess(ctx, candidate, previous, interval)
-		if !ok {
-			partial = true
-			continue
-		}
-
-		observations = append(observations, observation)
-		nextRaw[key] = observation.raw
-		result.Threads += int(observation.metric.Threads)
-		countProcessStatus(&result, observation.status)
-		partial = partial || observation.partial
-	}
-
-	current.processes = nextRaw
-	sort.Slice(observations, func(left, right int) bool {
-		leftMetric := observations[left].metric
-		rightMetric := observations[right].metric
-		if leftMetric.CPUPercent != rightMetric.CPUPercent {
-			return leftMetric.CPUPercent > rightMetric.CPUPercent
-		}
-		if leftMetric.MemoryRSSBytes != rightMetric.MemoryRSSBytes {
-			return leftMetric.MemoryRSSBytes > rightMetric.MemoryRSSBytes
-		}
-		return leftMetric.PID < rightMetric.PID
-	})
-
-	if len(observations) > maxProcessItems {
-		observations = observations[:maxProcessItems]
-		result.Truncated = true
-	}
-	for _, observation := range observations {
-		result.Items = append(result.Items, observation.metric)
-	}
-
-	if partial {
-		*issues = append(*issues, issue("processes", "partial"))
-	}
-	if result.Truncated {
-		*issues = append(*issues, issue("processes", "truncated"))
-	}
-
-	return result
-}
-
-func observeProcess(
-	ctx context.Context,
-	candidate *process.Process,
-	previous map[processKey]rawProcess,
-	interval time.Duration,
-) (processObservation, processKey, bool) {
-	startedMS, err := candidate.CreateTimeWithContext(ctx)
-	if err != nil || startedMS <= 0 {
-		return processObservation{}, processKey{}, false
-	}
-
-	name, err := candidate.NameWithContext(ctx)
-	if err != nil {
-		return processObservation{}, processKey{}, false
-	}
-	times, err := candidate.TimesWithContext(ctx)
-	if err != nil {
-		return processObservation{}, processKey{}, false
-	}
-	memory, err := candidate.MemoryInfoWithContext(ctx)
-	if err != nil {
-		return processObservation{}, processKey{}, false
-	}
-
-	ioCounters, ioErr := candidate.IOCountersWithContext(ctx)
-	status, statusErr := candidate.StatusWithContext(ctx)
-	threads, threadsErr := candidate.NumThreadsWithContext(ctx)
-	fileDescriptors, fileDescriptorsErr := candidate.NumFDsWithContext(ctx)
-
-	currentRaw := rawProcess{cpuSeconds: processCPUSeconds(times)}
-	if ioCounters != nil {
-		currentRaw.readBytes = ioCounters.ReadBytes
-		if currentRaw.readBytes == 0 {
-			currentRaw.readBytes = ioCounters.DiskReadBytes
-		}
-		currentRaw.writeBytes = ioCounters.WriteBytes
-		if currentRaw.writeBytes == 0 {
-			currentRaw.writeBytes = ioCounters.DiskWriteBytes
-		}
-	}
-
-	key := processKey{pid: candidate.Pid, startedMS: startedMS}
-	previousRaw, exists := previous[key]
-	seconds := interval.Seconds()
-	metric := protocol.ProcessMetric{
-		PID:                candidate.Pid,
-		StartedAt:          time.UnixMilli(startedMS).UTC(),
-		Name:               sanitize(name, 256),
-		MemoryRSSBytes:     memory.RSS,
-		MemoryVirtualBytes: memory.VMS,
-		Threads:            max(threads, 0),
-	}
-	if exists && seconds > 0 {
-		metric.CPUPercent = cpuPercent(counterDelta(previousRaw.cpuSeconds, currentRaw.cpuSeconds) / seconds * 100)
-		metric.ReadBytesPerSecond = rate(previousRaw.readBytes, currentRaw.readBytes, seconds)
-		metric.WriteBytesPerSecond = rate(previousRaw.writeBytes, currentRaw.writeBytes, seconds)
-	}
-	if fileDescriptorsErr == nil && fileDescriptors >= 0 {
-		metric.FileDescriptors = &fileDescriptors
-	}
-
-	processStatus := ""
-	if len(status) > 0 {
-		processStatus = strings.ToLower(status[0])
-	}
-
-	return processObservation{
-		metric:  metric,
-		raw:     currentRaw,
-		status:  processStatus,
-		partial: ioErr != nil || statusErr != nil || threadsErr != nil || fileDescriptorsErr != nil,
-	}, key, true
-}
-
-func countProcessStatus(result *protocol.ProcessMetrics, status string) {
-	switch status {
-	case "r", "running":
-		result.Running++
-	case "d", "blocked", "disk-sleep":
-		result.Blocked++
-	case "z", "zombie":
-		result.Zombie++
-	default:
-		result.Sleeping++
-	}
-}
-
-func processCPUSeconds(times *cpu.TimesStat) float64 {
-	if times == nil {
-		return 0
-	}
-
-	return times.User + times.Nice + times.System + times.Irq + times.Softirq + times.Steal
 }
 
 func counterDelta(previous, current float64) float64 {

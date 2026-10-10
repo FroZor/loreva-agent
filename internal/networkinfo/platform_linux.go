@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net"
 	"os"
 	"os/exec"
@@ -18,6 +19,8 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/FroZor/loreva-agent/internal/hostfs"
+	"github.com/FroZor/loreva-agent/internal/hostnet"
 	"github.com/FroZor/loreva-agent/internal/protocol"
 )
 
@@ -31,36 +34,51 @@ const (
 func collectPlatformNetwork(ctx context.Context) platformNetwork {
 	routes, routeIssues := collectLinuxRoutes()
 	firewall, firewallIssues := collectLinuxFirewall(ctx)
+	if ufw, err := ufwConfiguration(); ufw != nil || !errors.Is(err, fs.ErrNotExist) {
+		firewall.UFW = ufw
+		if err != nil {
+			firewallIssues = append(firewallIssues, networkIssue("firewall.ufw", err))
+		}
+	}
+	if firewalld, err := firewalldConfiguration(); firewalld != nil || !errors.Is(err, fs.ErrNotExist) {
+		firewall.Firewalld = firewalld
+		if err != nil {
+			firewallIssues = append(firewallIssues, networkIssue("firewall.firewalld", err))
+		}
+	}
+	dns, dnsIssues := collectDNS()
 
+	issues := append(routeIssues, firewallIssues...)
 	return platformNetwork{
 		routes:   routes,
 		firewall: firewall,
-		issues:   append(routeIssues, firewallIssues...),
+		dns:      dns,
+		issues:   append(issues, dnsIssues...),
 	}
 }
 
 func collectLinuxRoutes() ([]protocol.NetworkRoute, []protocol.CollectionIssue) {
-	interfaces, err := net.Interfaces()
+	interfaces, err := hostnet.Interfaces()
 	if err != nil {
 		return nil, []protocol.CollectionIssue{networkIssue("routes", err)}
 	}
 
 	interfaceIDs := make(map[string]string, len(interfaces))
 	for _, networkInterface := range interfaces {
-		interfaceIDs[networkInterface.Name] = "network:" + strconv.Itoa(networkInterface.Index)
+		interfaceIDs[networkInterface.Name] = networkInterface.ID()
 	}
 
 	routes := make([]protocol.NetworkRoute, 0)
 	issues := make([]protocol.CollectionIssue, 0, 2)
 
-	ipv4Routes, err := parseIPv4Routes("/proc/net/route", interfaceIDs)
+	ipv4Routes, err := parseIPv4Routes(hostnet.NetPath("route"), interfaceIDs)
 	if err != nil {
 		issues = append(issues, networkIssue("routes.ipv4", err))
 	} else {
 		routes = append(routes, ipv4Routes...)
 	}
 
-	ipv6Routes, err := parseIPv6Routes("/proc/net/ipv6_route", interfaceIDs)
+	ipv6Routes, err := parseIPv6Routes(hostnet.NetPath("ipv6_route"), interfaceIDs)
 	if err != nil {
 		issues = append(issues, networkIssue("routes.ipv6", err))
 	} else {
@@ -176,6 +194,19 @@ func parseIPv6Routes(path string, interfaceIDs map[string]string) ([]protocol.Ne
 
 func collectLinuxFirewall(ctx context.Context) (protocol.FirewallInformation, []protocol.CollectionIssue) {
 	providers := detectLinuxFirewallProviders()
+	if !hostnet.SameNamespace() {
+		// nft and iptables would list the rules of the agent's own
+		// container network, not the host's.
+		status := "inactive"
+		if len(providers) > 0 {
+			status = "partial"
+		}
+		return protocol.FirewallInformation{
+			Status:    status,
+			Providers: providers,
+			Rules:     []protocol.FirewallRule{},
+		}, []protocol.CollectionIssue{{Component: "firewall.rules", Code: "other_namespace"}}
+	}
 	issues := make([]protocol.CollectionIssue, 0)
 	rules := make([]protocol.FirewallRule, 0)
 	truncated := false
@@ -243,13 +274,13 @@ func collectLinuxFirewall(ctx context.Context) (protocol.FirewallInformation, []
 	return protocol.FirewallInformation{
 		Status:    "partial",
 		Providers: providers,
-		Rules:     nil,
+		Rules:     []protocol.FirewallRule{},
 	}, issues
 }
 
 func detectLinuxFirewallProviders() []protocol.FirewallProvider {
 	providers := make([]protocol.FirewallProvider, 0, 4)
-	modules, _ := readNetworkFile("/proc/modules", maxRouteFileSize)
+	modules, _ := readNetworkFile(hostfs.Proc("modules"), maxRouteFileSize)
 	moduleText := string(modules)
 	if strings.Contains(moduleText, "nf_tables ") {
 		providers = append(providers, protocol.FirewallProvider{Name: "nftables", Role: "filter", Status: "detected"})
@@ -258,12 +289,12 @@ func detectLinuxFirewallProviders() []protocol.FirewallProvider {
 		providers = append(providers, protocol.FirewallProvider{Name: "iptables", Role: "filter", Status: "detected"})
 	}
 
-	if fileExists("/run/firewalld/firewalld.pid") || fileExists("/var/run/firewalld/firewalld.pid") {
+	if fileExists(hostfs.Root("/run/firewalld/firewalld.pid")) || fileExists(hostfs.Root("/var/run/firewalld/firewalld.pid")) {
 		providers = append(providers, protocol.FirewallProvider{
 			Name: "firewalld", Role: "manager", Status: "active", Backend: detectedFilterBackend(providers),
 		})
 	}
-	if configuration, err := readNetworkFile("/etc/ufw/ufw.conf", 64*1024); err == nil {
+	if configuration, err := readNetworkFile(hostfs.Root("/etc/ufw/ufw.conf"), 64*1024); err == nil {
 		status := "inactive"
 		if strings.Contains(strings.ToUpper(string(configuration)), "ENABLED=YES") {
 			status = "active"
@@ -580,9 +611,16 @@ func parsePortList(value string) []protocol.PortRange {
 	return result
 }
 
+// runBoundedCommand runs one of the host's own tools. In a container the
+// tool runs inside the host's root, so it uses the host's libraries and
+// configuration exactly as on a host install; that needs CAP_SYS_CHROOT.
 func runBoundedCommand(ctx context.Context, path string, arguments []string, limit int) ([]byte, error) {
 	command := exec.CommandContext(ctx, path, arguments...)
 	command.Env = []string{"LANG=C", "LC_ALL=C", "PATH=/usr/sbin:/usr/bin:/sbin:/bin"}
+	if root := hostfs.RootDir(); root != "" {
+		command.SysProcAttr = &syscall.SysProcAttr{Chroot: root}
+		command.Dir = "/"
+	}
 
 	var output boundedBuffer
 	output.limit = limit
@@ -624,9 +662,11 @@ func (b *boundedBuffer) Write(data []byte) (int, error) {
 	return b.Buffer.Write(data)
 }
 
+// trustedExecutable returns the first host path that is a root-owned
+// executable nobody else can write.
 func trustedExecutable(paths ...string) string {
 	for _, path := range paths {
-		info, err := os.Stat(path)
+		info, err := os.Stat(hostfs.Root(path))
 		if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o022 != 0 {
 			continue
 		}

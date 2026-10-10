@@ -20,6 +20,7 @@ import (
 	"github.com/FroZor/loreva-agent/internal/control"
 	"github.com/FroZor/loreva-agent/internal/direct"
 	"github.com/FroZor/loreva-agent/internal/metrics"
+	"github.com/FroZor/loreva-agent/internal/metricstore"
 	"github.com/FroZor/loreva-agent/internal/networkinfo"
 	"github.com/FroZor/loreva-agent/internal/pairing"
 	"github.com/FroZor/loreva-agent/internal/protocol"
@@ -31,9 +32,11 @@ import (
 const testTimeout = 30 * time.Second
 
 type testNode struct {
-	node      *state.Node
-	stateDir  string
-	workloads *fakeWorkloads
+	node       *state.Node
+	stateDir   string
+	workloads  *fakeWorkloads
+	containers *fakeContainers
+	files      *fakeFiles
 }
 
 // fakeWorkloads records what device sessions hand to the workload runtime.
@@ -94,7 +97,17 @@ func (f *fakeWorkloads) StoreArtifact(reference protocol.ArtifactReference, data
 	return nil
 }
 
-func testCollectors() direct.Collectors {
+func testCollectors(t *testing.T) direct.Collectors {
+	t.Helper()
+
+	metricStore, err := metricstore.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := metricStore.Append(metrics.Snapshot{ObservedAt: time.Now().UTC(), Interval: time.Second, ObservationScope: "host"}); err != nil {
+		t.Fatal(err)
+	}
+
 	return direct.Collectors{
 		Specifications: func(context.Context) (specifications.Snapshot, error) {
 			return specifications.Snapshot{ObservationScope: "host"}, nil
@@ -102,15 +115,12 @@ func testCollectors() direct.Collectors {
 		Network: func(context.Context) (networkinfo.Snapshot, error) {
 			return networkinfo.Snapshot{ObservationScope: "host"}, nil
 		},
-		Metrics: func(context.Context) <-chan metrics.Sample {
-			samples := make(chan metrics.Sample, 1)
-			samples <- metrics.Sample{Snapshot: metrics.Snapshot{
-				ObservedAt:       time.Now().UTC(),
-				Interval:         time.Second,
-				ObservationScope: "host",
-			}}
-
-			return samples
+		Metrics: metricStore,
+		Processes: func(pid int32, startedAt time.Time) (protocol.ProcessDetails, error) {
+			if pid != 42 {
+				return protocol.ProcessDetails{}, metrics.ErrProcessNotFound
+			}
+			return protocol.ProcessDetails{PID: pid, ParentPID: 1, StartedAt: startedAt, Name: "java", CommandLine: []string{"java", "-jar", "server.jar"}}, nil
 		},
 	}
 }
@@ -128,13 +138,18 @@ func startNode(t *testing.T) *testNode {
 	}
 
 	workloads := newFakeWorkloads()
+	containers := &fakeContainers{}
+	files := newFakeFiles(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
 		done <- direct.Run(ctx, store, node, direct.Options{
 			Version:    "test",
-			Collectors: testCollectors(),
+			Collectors: testCollectors(t),
 			Workloads:  workloads,
+			Containers: containers,
+			Files:      files,
+			Inventory:  fakeInventory{},
 		})
 	}()
 	t.Cleanup(func() {
@@ -144,7 +159,7 @@ func startNode(t *testing.T) *testNode {
 		}
 	})
 
-	return &testNode{node: node, stateDir: store.Dir(), workloads: workloads}
+	return &testNode{node: node, stateDir: store.Dir(), workloads: workloads, containers: containers, files: files}
 }
 
 // dialControl waits for the control socket of a starting node.
@@ -357,6 +372,29 @@ func TestPairAndUseSession(t *testing.T) {
 	expect(ctx, t, session, protocol.DevicesListResultType, &devices)
 	if len(devices.Devices) != 1 || !devices.Devices[0].Current || devices.Devices[0].Name != "test laptop" {
 		t.Fatalf("devices = %+v", devices)
+	}
+
+	// A refresh answers with a new network report, acknowledged as usual.
+	send(ctx, t, session, protocol.NodeNetworkRefresh{Type: protocol.NodeNetworkRefreshType, RequestID: "6f4f1c5e-8d2a-4c1b-9f3e-2a7b5c9d1e04"})
+	var refreshed protocol.NodeNetworkReport
+	expect(ctx, t, session, protocol.NodeNetworkReportType, &refreshed)
+	if refreshed.RequestID == network.RequestID {
+		t.Fatal("refreshed network report reused the first request_id")
+	}
+	send(ctx, t, session, protocol.NodeNetworkAccepted{Type: protocol.NodeNetworkAcceptedType, RequestID: refreshed.RequestID})
+
+	startedAt := time.Date(2026, 10, 6, 12, 0, 0, 0, time.UTC)
+	send(ctx, t, session, protocol.NodeProcessInspect{Type: protocol.NodeProcessInspectType, RequestID: "9c2d3e4f-5a6b-4c7d-8e9f-0a1b2c3d4e5f", PID: 42, StartedAt: startedAt})
+	var process protocol.NodeProcessInspectResult
+	expect(ctx, t, session, protocol.NodeProcessInspectResultType, &process)
+	if process.Process.PID != 42 || len(process.Process.CommandLine) != 3 {
+		t.Fatalf("process = %+v", process)
+	}
+	send(ctx, t, session, protocol.NodeProcessInspect{Type: protocol.NodeProcessInspectType, RequestID: "1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d", PID: 7, StartedAt: startedAt})
+	var missing protocol.Error
+	expect(ctx, t, session, protocol.ErrorType, &missing)
+	if missing.Code != "not_found" || missing.RequestID != "1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d" {
+		t.Fatalf("missing process = %+v", missing)
 	}
 
 	// The invite is single use: with no active invite left, the node refuses
@@ -615,7 +653,7 @@ func TestShutdownEndsPendingPairing(t *testing.T) {
 	runCtx, stop := context.WithCancel(ctx)
 	done := make(chan error, 1)
 	go func() {
-		done <- direct.Run(runCtx, store, node, direct.Options{Collectors: testCollectors()})
+		done <- direct.Run(runCtx, store, node, direct.Options{Collectors: testCollectors(t)})
 	}()
 
 	conn := (&testNode{node: node, stateDir: store.Dir()}).dialControl(t)

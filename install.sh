@@ -85,60 +85,10 @@ verify_download() {
 	[ "$actual_checksum" = "$expected_checksum" ] || fail "binary checksum verification failed"
 }
 
-ensure_service_user() {
-	service_user="$1"
-	state_dir="$2"
-
-	if id "$service_user" >/dev/null 2>&1; then
-		return
-	fi
-
-	if command -v useradd >/dev/null 2>&1; then
-		nologin_shell="$(command -v nologin || true)"
-		[ -n "$nologin_shell" ] || fail "nologin shell not found"
-
-		useradd \
-			--system \
-			--user-group \
-			--home-dir "$state_dir" \
-			--shell "$nologin_shell" \
-			"$service_user"
-		return
-	fi
-
-	fail "system user management is not supported on this host"
-}
-
-grant_docker_socket_access() {
-	service_user="$1"
-	docker_socket="/var/run/docker.sock"
-
-	if [ ! -S "$docker_socket" ]; then
-		printf 'Loreva Agent: Docker socket not found; container management will remain unavailable.\n' >&2
-		return
-	fi
-
-	require_command docker
-	require_command stat
-	require_command usermod
-	docker compose version >/dev/null 2>&1 || fail "Docker Compose plugin is required for Compose workloads"
-
-	docker_group_id="$(stat -c '%g' "$docker_socket")"
-	case "$docker_group_id" in
-		*[!0-9]* | "") fail "Docker socket has an invalid group" ;;
-		0) fail "Docker socket is owned by the root group; refusing to grant the service broad root-group access" ;;
-	esac
-
-	if ! id -G "$service_user" | tr ' ' '\n' | grep -qx "$docker_group_id"; then
-		usermod -a -G "$docker_group_id" "$service_user"
-	fi
-}
-
 install_systemd_service() {
 	mode="$1"
 	config_path="$2"
 	service_name="loreva-agent"
-	service_user="loreva-agent"
 	state_dir="/var/lib/loreva-agent"
 	unit_path="/etc/systemd/system/${service_name}.service"
 
@@ -146,10 +96,7 @@ install_systemd_service() {
 		fail "refusing to overwrite unmanaged service unit: $unit_path"
 	fi
 
-	ensure_service_user "$service_user" "$state_dir"
-	grant_docker_socket_access "$service_user"
-	service_group="$(id -gn "$service_user")"
-	install -d -m 0750 -o "$service_user" -g "$service_group" "$state_dir"
+	install -d -m 0700 -o root -g root "$state_dir"
 
 	unit_tmp="${unit_path}.tmp.$$"
 	(
@@ -168,8 +115,10 @@ StartLimitBurst=10
 
 [Service]
 Type=simple
-User=${service_user}
-Group=${service_group}
+# The agent runs as root, the same as in its container, so both installs
+# see the same host. It keeps only CAP_NET_ADMIN, to read firewall rules,
+# and CAP_CHOWN, to take over state left by releases that ran as the
+# loreva-agent user, and never sees password hashes or home directories.
 ExecStart=${install_path} run --state-dir ${state_dir}
 Restart=on-failure
 RestartSec=5s
@@ -178,8 +127,9 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
+InaccessiblePaths=/etc/shadow
 StateDirectory=loreva-agent
-StateDirectoryMode=0750
+StateDirectoryMode=0700
 ReadWritePaths=${state_dir}
 ProtectControlGroups=true
 ProtectKernelLogs=true
@@ -192,7 +142,7 @@ RestrictRealtime=true
 RestrictSUIDSGID=true
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 SystemCallArchitectures=native
-CapabilityBoundingSet=
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_CHOWN
 
 [Install]
 WantedBy=multi-user.target
@@ -209,7 +159,6 @@ EOF
 	if [ "$mode" = "portal" ] && [ ! -e "${state_dir}/identity.json" ]; then
 		enroll_and_start_service \
 			"$service_name" \
-			"$service_user" \
 			"$state_dir" \
 			"$config_path"
 		return
@@ -218,7 +167,6 @@ EOF
 	if [ "$mode" = "standalone" ] && [ ! -e "${state_dir}/node.json" ] && [ ! -e "${state_dir}/identity.json" ]; then
 		init_and_start_service \
 			"$service_name" \
-			"$service_user" \
 			"$state_dir"
 		return
 	fi
@@ -233,13 +181,9 @@ EOF
 
 init_and_start_service() {
 	service_name="$1"
-	service_user="$2"
-	state_dir="$3"
+	state_dir="$2"
 
-	require_command runuser
-
-	runuser -u "$service_user" -- \
-		"$install_path" init --state-dir "$state_dir"
+	"$install_path" init --state-dir "$state_dir"
 
 	systemctl start "$service_name"
 
@@ -265,21 +209,15 @@ init_and_start_service() {
 
 enroll_and_start_service() {
 	service_name="$1"
-	service_user="$2"
-	state_dir="$3"
-	config_path="$4"
-
-	require_command runuser
+	state_dir="$2"
+	config_path="$3"
 
 	if [ -n "$config_path" ]; then
-		runuser -u "$service_user" -- \
-			"$install_path" enroll --config - --state-dir "$state_dir" <"$config_path"
+		"$install_path" enroll --config - --state-dir "$state_dir" <"$config_path"
 	elif [ -t 0 ]; then
-		runuser -u "$service_user" -- \
-			"$install_path" configure --state-dir "$state_dir"
+		"$install_path" configure --state-dir "$state_dir"
 	else
-		runuser -u "$service_user" -- \
-			"$install_path" configure --bootstrap - --state-dir "$state_dir"
+		"$install_path" configure --bootstrap - --state-dir "$state_dir"
 	fi
 
 	systemctl restart "$service_name"

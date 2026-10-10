@@ -11,27 +11,47 @@ import (
 	"github.com/FroZor/loreva-agent/internal/state"
 )
 
-func TestRunStartReadsBootstrapOnlyWithoutIdentity(t *testing.T) {
-	stateDir := t.TempDir()
-	missingConfig := filepath.Join(t.TempDir(), "missing.json")
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-
-	err := runStart([]string{"--state-dir", stateDir, "--config", missingConfig}, logger)
-	if err == nil || !strings.Contains(err.Error(), "open bootstrap config") {
-		t.Fatalf("runStart() error = %v, want missing bootstrap error", err)
-	}
-
-	store, err := state.New(stateDir)
+func TestSetUpInitializesDirectAccessWithoutBootstrap(t *testing.T) {
+	store, err := state.New(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.SaveIdentity(&state.Identity{}); err != nil {
+	missingConfig := filepath.Join(t.TempDir(), "missing.json")
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	if err := setUp(store, missingConfig, logger); err != nil {
 		t.Fatal(err)
 	}
 
-	err = runStart([]string{"--state-dir", stateDir, "--config", missingConfig}, logger)
-	if err == nil || strings.Contains(err.Error(), "open bootstrap config") {
-		t.Fatalf("runStart() error = %v, want stored identity validation error", err)
+	node, err := store.LoadNode()
+	if err != nil {
+		t.Fatalf("LoadNode() error = %v, want a node created by the first start", err)
+	}
+	if err := setUp(store, missingConfig, logger); err != nil {
+		t.Fatal(err)
+	}
+	again, err := store.LoadNode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again.NodeID != node.NodeID {
+		t.Fatalf("second start replaced node %s with %s", node.NodeID, again.NodeID)
+	}
+}
+
+func TestSetUpReportsUnreadableBootstrap(t *testing.T) {
+	store, err := state.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	err = setUp(store, t.TempDir(), logger)
+	if err == nil || !strings.Contains(err.Error(), "bootstrap config") {
+		t.Fatalf("setUp() error = %v, want bootstrap read error", err)
+	}
+	if _, err := store.LoadNode(); err == nil {
+		t.Fatal("setUp() created a direct node although a bootstrap was mounted")
 	}
 }
 

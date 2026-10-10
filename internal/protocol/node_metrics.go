@@ -58,12 +58,15 @@ type PluginMetricSet struct {
 
 // NodeMetrics contains dynamic resource usage visible to the agent.
 type NodeMetrics struct {
-	CPU       CPUMetrics       `json:"cpu"`
-	Memory    MemoryMetrics    `json:"memory"`
-	Storage   StorageMetrics   `json:"storage"`
-	Network   []NetworkMetrics `json:"network"`
-	GPUs      []GPUMetrics     `json:"gpus"`
-	Processes ProcessMetrics   `json:"processes"`
+	CPU     CPUMetrics       `json:"cpu"`
+	Memory  MemoryMetrics    `json:"memory"`
+	Storage StorageMetrics   `json:"storage"`
+	Network []NetworkMetrics `json:"network"`
+	TCP     *TCPMetrics      `json:"tcp,omitempty"`
+	GPUs    []GPUMetrics     `json:"gpus"`
+	// Sensors is left out when the node exposes no hardware monitoring.
+	Sensors   []SensorMetrics `json:"sensors,omitempty"`
+	Processes ProcessMetrics  `json:"processes"`
 }
 
 // CPUMetrics contains aggregate and per-logical-processor utilization.
@@ -105,10 +108,12 @@ type LoadAverageMetrics struct {
 
 // MemoryMetrics contains current memory gauges and paging rates.
 type MemoryMetrics struct {
+	TotalBytes               uint64   `json:"total_bytes"`
 	UsedBytes                uint64   `json:"used_bytes"`
 	AvailableBytes           uint64   `json:"available_bytes"`
 	CachedBytes              uint64   `json:"cached_bytes"`
 	BuffersBytes             uint64   `json:"buffers_bytes"`
+	SwapTotalBytes           uint64   `json:"swap_total_bytes"`
 	SwapUsedBytes            uint64   `json:"swap_used_bytes"`
 	PageFaultsPerSecond      *float64 `json:"page_faults_per_second,omitempty"`
 	MajorPageFaultsPerSecond *float64 `json:"major_page_faults_per_second,omitempty"`
@@ -118,6 +123,22 @@ type MemoryMetrics struct {
 type StorageMetrics struct {
 	Devices     []StorageDeviceMetrics `json:"devices"`
 	Filesystems []FilesystemMetrics    `json:"filesystems"`
+	// RAID is left out when the node has no software RAID.
+	RAID []RAIDMetrics `json:"raid,omitempty"`
+}
+
+// RAIDMetrics is the state of one Linux software RAID (md) array. Degraded
+// counts missing members; FailedMembers names members marked faulty.
+// SyncPercent is set while the array resyncs, recovers, or is checked.
+type RAIDMetrics struct {
+	DeviceID      string   `json:"device_id"`
+	Level         string   `json:"level"`
+	State         string   `json:"state"`
+	Disks         int      `json:"disks"`
+	Degraded      int      `json:"degraded"`
+	FailedMembers []string `json:"failed_members"`
+	SyncAction    string   `json:"sync_action,omitempty"`
+	SyncPercent   *float64 `json:"sync_percent,omitempty"`
 }
 
 // StorageDeviceMetrics contains rates for one device from specifications.
@@ -129,12 +150,17 @@ type StorageDeviceMetrics struct {
 	WriteOperationsPerSecond float64 `json:"write_operations_per_second"`
 	IOUtilizationPercent     float64 `json:"io_utilization_percent"`
 	QueueDepth               float64 `json:"queue_depth"`
+	ReadBytesTotal           uint64  `json:"read_bytes_total"`
+	WriteBytesTotal          uint64  `json:"write_bytes_total"`
 }
 
 // FilesystemMetrics contains current capacity for one mounted filesystem.
 type FilesystemMetrics struct {
 	FilesystemID      string   `json:"filesystem_id"`
 	Mountpoint        string   `json:"mountpoint"`
+	Device            string   `json:"device"`
+	FilesystemType    string   `json:"filesystem_type"`
+	TotalBytes        uint64   `json:"total_bytes"`
 	UsedBytes         uint64   `json:"used_bytes"`
 	AvailableBytes    uint64   `json:"available_bytes"`
 	UsedPercent       float64  `json:"used_percent"`
@@ -152,6 +178,34 @@ type NetworkMetrics struct {
 	TXErrorsPerSecond  float64 `json:"tx_errors_per_second"`
 	RXDropsPerSecond   float64 `json:"rx_drops_per_second"`
 	TXDropsPerSecond   float64 `json:"tx_drops_per_second"`
+	RXBytesTotal       uint64  `json:"rx_bytes_total"`
+	TXBytesTotal       uint64  `json:"tx_bytes_total"`
+}
+
+// TCPMetrics summarizes the TCP stack of the host's network namespace for
+// IPv4 and IPv6 together. Gauges are current counts; rates are per second.
+type TCPMetrics struct {
+	Established                    uint64  `json:"established"`
+	TimeWait                       uint64  `json:"time_wait"`
+	Orphaned                       uint64  `json:"orphaned"`
+	InUse                          uint64  `json:"in_use"`
+	ActiveOpensPerSecond           float64 `json:"active_opens_per_second"`
+	PassiveOpensPerSecond          float64 `json:"passive_opens_per_second"`
+	FailedAttemptsPerSecond        float64 `json:"failed_attempts_per_second"`
+	ResetsSentPerSecond            float64 `json:"resets_sent_per_second"`
+	RetransmittedSegmentsPerSecond float64 `json:"retransmitted_segments_per_second"`
+}
+
+// SensorMetrics is one hardware monitoring reading: a temperature in
+// degrees Celsius or a fan speed in revolutions per minute.
+type SensorMetrics struct {
+	SensorID string  `json:"sensor_id"`
+	Chip     string  `json:"chip"`
+	Label    string  `json:"label"`
+	Type     string  `json:"type"`
+	Value    float64 `json:"value"`
+	// CriticalCelsius is the chip's critical temperature, when it has one.
+	CriticalCelsius *float64 `json:"critical_celsius,omitempty"`
 }
 
 // GPUMetrics contains dynamic telemetry for one GPU from specifications.
@@ -180,8 +234,12 @@ type ProcessMetrics struct {
 // ProcessMetric identifies a process by PID and start time to survive PID reuse.
 type ProcessMetric struct {
 	PID                 int32     `json:"pid"`
+	ParentPID           int32     `json:"parent_pid"`
 	StartedAt           time.Time `json:"started_at"`
 	Name                string    `json:"name"`
+	State               string    `json:"state,omitempty"`
+	UID                 *uint32   `json:"uid,omitempty"`
+	User                string    `json:"user,omitempty"`
 	CPUPercent          float64   `json:"cpu_percent"`
 	MemoryRSSBytes      uint64    `json:"memory_rss_bytes"`
 	MemoryVirtualBytes  uint64    `json:"memory_virtual_bytes"`
@@ -205,11 +263,16 @@ type ContainerMetrics struct {
 	PIDs        ContainerPIDMetrics     `json:"pids"`
 }
 
-// ContainerCPUMetrics follows the single-logical-core percentage convention.
+// ContainerCPUMetrics follows the single-logical-core percentage convention:
+// 100 is one fully busy logical CPU, so UsagePercent can reach
+// OnlineCPUs*100. LimitCores is set only when a quota or cpuset caps the
+// container below OnlineCPUs.
 type ContainerCPUMetrics struct {
-	UsagePercent          float64 `json:"usage_percent"`
-	ThrottledSecondsTotal float64 `json:"throttled_seconds_total"`
-	ThrottledPeriodsTotal uint64  `json:"throttled_periods_total"`
+	UsagePercent          float64  `json:"usage_percent"`
+	OnlineCPUs            uint32   `json:"online_cpus"`
+	LimitCores            *float64 `json:"limit_cores,omitempty"`
+	ThrottledSecondsTotal float64  `json:"throttled_seconds_total"`
+	ThrottledPeriodsTotal uint64   `json:"throttled_periods_total"`
 }
 
 // ContainerMemoryMetrics contains current cgroup or job-object memory usage.
@@ -241,4 +304,85 @@ type ContainerNetworkMetrics struct {
 type ContainerPIDMetrics struct {
 	Current uint64 `json:"current"`
 	Limit   uint64 `json:"limit"`
+}
+
+// Metrics history message types.
+const (
+	MetricsRollupType      = "metrics.rollup"
+	MetricsQueryType       = "metrics.query"
+	MetricsQueryResultType = "metrics.query.result"
+)
+
+// MetricAggregate summarizes one series over a window. MaxAt is the time of
+// the peak.
+type MetricAggregate struct {
+	Min   float64   `json:"min"`
+	Avg   float64   `json:"avg"`
+	Max   float64   `json:"max"`
+	MaxAt time.Time `json:"max_at"`
+}
+
+// MetricRollup is a compacted window of samples of one metric type. Series
+// are keyed by the path of a numeric field, with array elements keyed by
+// their identifier, for example "cpu.total.usage_percent" or
+// "network.network:2.rx_bytes_per_second".
+type MetricRollup struct {
+	FirstSequence uint64                     `json:"first_sequence"`
+	LastSequence  uint64                     `json:"last_sequence"`
+	Start         time.Time                  `json:"start"`
+	End           time.Time                  `json:"end"`
+	Samples       int                        `json:"samples"`
+	Series        map[string]MetricAggregate `json:"series"`
+}
+
+// MetricsRollupReport carries compacted history to a reader that missed the
+// full samples; it is acknowledged like metrics.report.
+type MetricsRollupReport struct {
+	Type          string             `json:"type"`
+	SchemaVersion int                `json:"schema_version"`
+	RequestID     string             `json:"request_id"`
+	StreamID      string             `json:"stream_id"`
+	Metric        MetricRollupSeries `json:"metric"`
+}
+
+// MetricRollupSeries is a batch of rollups of one metric type.
+type MetricRollupSeries struct {
+	Type   string         `json:"type"`
+	Points []MetricRollup `json:"points"`
+}
+
+// MetricsQuery asks for stored history in a time range.
+type MetricsQuery struct {
+	Type      string    `json:"type"`
+	RequestID string    `json:"request_id"`
+	From      time.Time `json:"from"`
+	To        time.Time `json:"to"`
+}
+
+// MetricsQueryResult answers metrics.query, oldest first. NextFrom is set
+// when the answer was cut to fit a frame: query again from it.
+type MetricsQueryResult struct {
+	Type      string        `json:"type"`
+	RequestID string        `json:"request_id"`
+	StreamID  string        `json:"stream_id"`
+	Items     []MetricsItem `json:"items"`
+	NextFrom  *time.Time    `json:"next_from,omitempty"`
+}
+
+// MetricsItem is a full sample or a compacted window.
+type MetricsItem struct {
+	Sample    *MetricsSampleRecord `json:"sample,omitempty"`
+	Node      *MetricRollup        `json:"node,omitempty"`
+	Container *MetricRollup        `json:"container,omitempty"`
+}
+
+// MetricsSampleRecord is one full collected sample of both metric types.
+type MetricsSampleRecord struct {
+	Sequence         uint64             `json:"sequence"`
+	ObservedAt       time.Time          `json:"observed_at"`
+	IntervalMS       uint64             `json:"interval_ms"`
+	ObservationScope string             `json:"observation_scope"`
+	Node             NodeMetrics        `json:"node"`
+	Containers       []ContainerMetrics `json:"containers"`
+	CollectionIssues []CollectionIssue  `json:"collection_issues,omitempty"`
 }
