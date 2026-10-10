@@ -47,7 +47,7 @@ The credentials file holds the device's TLS key and is created with mode 0600.
 
 ## Requirements
 
-- Go 1.26.6 for local development and source builds.
+- Go 1.26.9 for local development and source builds.
 - A bootstrap issued by a Loreva portal.
 - Docker Engine for workload management.
 - Docker Compose plugin for Compose workloads and container installation.

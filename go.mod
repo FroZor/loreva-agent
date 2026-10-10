@@ -1,6 +1,6 @@
 module github.com/FroZor/loreva-agent
 
-go 1.26.6
+go 1.26.9
 
 require (
 	github.com/cloudflare/circl v1.6.5
@@ -14,8 +14,8 @@ require (
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.3
 	github.com/shirou/gopsutil/v4 v4.26.7
 	go.yaml.in/yaml/v4 v4.0.0-rc.6
-	golang.org/x/net v0.56.0
-	golang.org/x/term v0.45.0
+	golang.org/x/net v0.60.0
+	golang.org/x/term v0.46.0
 )
 
 require (
@@ -47,9 +47,9 @@ require (
 	go.opentelemetry.io/otel v1.44.0 // indirect
 	go.opentelemetry.io/otel/metric v1.44.0 // indirect
 	go.opentelemetry.io/otel/trace v1.44.0 // indirect
-	golang.org/x/sync v0.22.0 // indirect
-	golang.org/x/text v0.41.0 // indirect
+	golang.org/x/sync v0.23.0 // indirect
+	golang.org/x/text v0.42.0 // indirect
 )
 
 // Security override for GO-2026-5024 / CVE-2026-39824.
-require golang.org/x/sys v0.47.0
+require golang.org/x/sys v0.48.0
