@@ -134,7 +134,7 @@ func TestMetricReporterSendsBatchesAndMovesTheCursor(t *testing.T) {
 }
 
 func TestMetricReporterSendsRollupsForCompactedHistory(t *testing.T) {
-	start := time.Now().UTC().Add(-3 * time.Hour).Truncate(time.Minute)
+	start := time.Now().UTC().Add(-3 * time.Hour).Truncate(time.Hour)
 	store := testStore(t, 120, start)
 	if err := store.Maintain(time.Now(), true); err != nil {
 		t.Fatal(err)
