@@ -1,3 +1,5 @@
+//go:build linux
+
 package fileops
 
 import (
@@ -13,9 +15,6 @@ import (
 const (
 	// maxCalls bounds the calls one helper runs at once.
 	maxCalls = 32
-	// creditBatchBytes is how much consumed data the helper collects before
-	// it returns credit.
-	creditBatchBytes = 256 * 1024
 	// progressInterval spaces progress responses.
 	progressInterval = 250 * time.Millisecond
 )
