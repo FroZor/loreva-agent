@@ -8,6 +8,10 @@ import (
 	"sync"
 )
 
+// creditBatchBytes is how much consumed data a receiver collects before it
+// returns credit.
+const creditBatchBytes = 256 * 1024
+
 // ErrWindowExceeded reports a sender that ignored the credit it was given.
 var ErrWindowExceeded = errors.New("data exceeds the granted window")
 
