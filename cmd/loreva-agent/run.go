@@ -158,7 +158,7 @@ func runAgent(arguments []string, logger *slog.Logger) error {
 	}
 	if identity != nil {
 		services = append(services, func(ctx context.Context) error {
-			return runPortal(ctx, store, collectors, logger)
+			return session.Supervise(ctx, store, collectors, logger)
 		})
 	}
 
@@ -221,138 +221,6 @@ func runServices(ctx context.Context, services []func(context.Context) error) er
 	}
 
 	return err
-}
-
-// runPortal keeps the portal session up while the connection preference is
-// enabled, pausing on disconnect and when the identity is rejected.
-func runPortal(ctx context.Context, store *state.Store, collectors session.Collectors, logger *slog.Logger) error {
-	for {
-		if err := store.WaitUntilConnectionEnabled(ctx); err != nil {
-			if errors.Is(err, context.Canceled) {
-				return nil
-			}
-
-			return err
-		}
-
-		connectionLock, err := store.LockConnection(ctx)
-		if err != nil {
-			if errors.Is(err, context.Canceled) {
-				return nil
-			}
-
-			return err
-		}
-
-		enabled, err := store.ConnectionEnabled()
-		if err != nil {
-			closeStateLock(connectionLock, "release connection lock", logger)
-			return err
-		}
-		if !enabled {
-			closeStateLock(connectionLock, "release connection lock", logger)
-			continue
-		}
-
-		runErr := runPortalConnection(ctx, store, collectors, connectionLock, logger)
-		if runErr == nil || errors.Is(runErr, context.Canceled) {
-			if ctx.Err() != nil {
-				return nil
-			}
-
-			continue
-		}
-		if session.IsTerminal(runErr) {
-			logger.Error("agent disconnected; configuration is required", "error", runErr)
-			if err := store.RequireConfiguration(); err != nil {
-				return errors.Join(runErr, err)
-			}
-
-			continue
-		}
-
-		return runErr
-	}
-}
-
-func runPortalConnection(
-	ctx context.Context,
-	store *state.Store,
-	collectors session.Collectors,
-	connectionLock *state.Lock,
-	logger *slog.Logger,
-) error {
-	defer closeStateLock(connectionLock, "release connection lock", logger)
-
-	identity, err := store.LoadIdentity()
-	if err != nil {
-		return fmt.Errorf("load enrolled identity: %w", err)
-	}
-
-	runner, err := session.New(store, identity, collectors)
-	if err != nil {
-		return err
-	}
-
-	runCtx, cancelRun := context.WithCancel(ctx)
-	preferenceResult := make(chan error, 1)
-	go watchConnectionPreference(runCtx, store, cancelRun, preferenceResult)
-
-	err = runner.Run(runCtx, sessionEvents(identity, logger))
-	cancelRun()
-	if preferenceErr := <-preferenceResult; preferenceErr != nil {
-		return errors.Join(err, preferenceErr)
-	}
-
-	return err
-}
-
-func sessionEvents(identity *state.Identity, logger *slog.Logger) session.Events {
-	return session.Events{
-		Connected: func(endpoint string) {
-			logger.Info("agent connected", "node_id", identity.NodeID, "endpoint", endpoint)
-		},
-		Retrying: func(retry session.ConnectionRetry) {
-			logger.Warn(
-				"agent reconnect scheduled",
-				"error", retry.Err,
-				"retry_in", retry.RetryIn,
-			)
-		},
-		ReportRejected: func(rejection session.NodeReportRejection) {
-			if rejection.Retryable {
-				logger.Warn(
-					"node report rejected; retry scheduled",
-					"type", rejection.Type,
-					"code", rejection.Code,
-					"retry_in", rejection.RetryIn,
-				)
-				return
-			}
-
-			logger.Error(
-				"node report rejected; request discarded",
-				"type", rejection.Type,
-				"code", rejection.Code,
-			)
-		},
-	}
-}
-
-func watchConnectionPreference(
-	ctx context.Context,
-	store *state.Store,
-	cancelRun context.CancelFunc,
-	result chan<- error,
-) {
-	err := store.WaitUntilConnectionDisabled(ctx)
-	if ctx.Err() != nil {
-		result <- nil
-		return
-	}
-
-	cancelRun()
-	result <- err
 }
 
 func closeStateLock(lock *state.Lock, operation string, logger *slog.Logger) {
