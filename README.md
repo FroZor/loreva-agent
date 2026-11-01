@@ -95,7 +95,7 @@ Override with `--state-dir` or `LOREVA_STATE_DIR`.
 
 ## Development
 
-- Requires Go 1.26.9.
+- Requires Go 1.26.10.
 - Test and build: `go test ./... && go build -trimpath -o loreva-agent ./cmd/loreva-agent`
 - Local portal: `go run ./cmd/loreva-agent configure`, then `go run ./cmd/loreva-agent`.
 - Protocol: [contract/v1](contract/v1/README.md), checked against the Go types by `go test`.
