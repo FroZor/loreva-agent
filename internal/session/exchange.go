@@ -81,6 +81,14 @@ func (x *exchange) retryReport(ctx context.Context, conn *websocket.Conn) error 
 // metricsStored sends newly stored metrics once the node reports are done.
 func (x *exchange) metricsStored(ctx context.Context, conn *websocket.Conn) error {
 	x.metrics.woke()
+
+	return x.sendMetrics(ctx, conn)
+}
+
+// sendMetrics fills the reader's window with history, then sends the newest
+// sample live if history has not reached it. Metrics start after both node
+// reports.
+func (x *exchange) sendMetrics(ctx context.Context, conn *websocket.Conn) error {
 	if !x.reports.state.complete {
 		return nil
 	}
@@ -90,20 +98,29 @@ func (x *exchange) metricsStored(ctx context.Context, conn *websocket.Conn) erro
 		return err
 	}
 	if sent {
-		x.metricsReplyTimer.Reset(metricsReplyTimeout)
+		x.armMetricsReplyTimer()
 	}
 
-	return nil
+	return x.metrics.writeLive(ctx, conn)
+}
+
+// armMetricsReplyTimer waits for the next acknowledgement while written
+// frames await one; the wait restarts on every acknowledgement.
+func (x *exchange) armMetricsReplyTimer() {
+	stopTimer(x.metricsReplyTimer)
+	if x.metrics.awaiting() && !x.metrics.retrying {
+		x.metricsReplyTimer.Reset(metricsReplyTimeout)
+	}
 }
 
 func (x *exchange) retryMetrics(ctx context.Context, conn *websocket.Conn) error {
-	if err := x.metrics.writeActive(ctx, conn); err != nil {
+	if err := x.metrics.resend(ctx, conn); err != nil {
 		return err
 	}
 
-	x.metricsReplyTimer.Reset(metricsReplyTimeout)
+	x.armMetricsReplyTimer()
 
-	return nil
+	return x.sendMetrics(ctx, conn)
 }
 
 func (x *exchange) scheduleNodeReportRetry(events Events, code string) {
@@ -119,13 +136,20 @@ func (x *exchange) scheduleNodeReportRetry(events Events, code string) {
 	})
 }
 
-func (x *exchange) scheduleMetricsRetry(events Events, code string) {
-	delay := x.metrics.retryDelay()
+// scheduleMetricsRetry sends the unacknowledged frames again after a
+// backoff. requestID names the rejected frame, or is empty after a timeout.
+func (x *exchange) scheduleMetricsRetry(events Events, requestID, code string) {
+	delay, scheduled := x.metrics.scheduleRetry()
+	if !scheduled {
+		return
+	}
+
+	stopTimer(x.metricsReplyTimer)
 	stopTimer(x.metricsRetryTimer)
 	x.metricsRetryTimer.Reset(delay)
 
 	notifyNodeReportRejection(events, NodeReportRejection{
-		Type:      x.metrics.activeType(),
+		Type:      x.metrics.frameType(requestID),
 		Code:      code,
 		RetryIn:   delay,
 		Retryable: true,
@@ -194,19 +218,7 @@ func (x *exchange) handleReportResponse(ctx context.Context, conn *websocket.Con
 }
 
 func (x *exchange) startMetricsAfterReports(ctx context.Context, conn *websocket.Conn) error {
-	if !x.reports.state.complete {
-		return nil
-	}
-
-	sent, err := x.metrics.writeReady(ctx, conn)
-	if err != nil {
-		return err
-	}
-	if sent {
-		x.metricsReplyTimer.Reset(metricsReplyTimeout)
-	}
-
-	return nil
+	return x.sendMetrics(ctx, conn)
 }
 
 func (x *exchange) handleMetricsResponse(ctx context.Context, conn *websocket.Conn, data []byte, events Events) error {
@@ -220,37 +232,31 @@ func (x *exchange) handleMetricsResponse(ctx context.Context, conn *websocket.Co
 			return err
 		}
 
-		stopTimer(x.metricsReplyTimer)
-		stopTimer(x.metricsRetryTimer)
-
 		if identityNodeReportRejection(rejection.code) {
+			stopTimer(x.metricsReplyTimer)
+			stopTimer(x.metricsRetryTimer)
+
 			return &identityRejection{err: rejection}
 		}
 		if !terminalNodeReportRejection(rejection.code) {
-			x.scheduleMetricsRetry(events, rejection.code)
+			x.scheduleMetricsRetry(events, rejection.requestID, rejection.code)
 			return nil
 		}
 
-		metricType := x.metrics.activeType()
-		x.metrics.discardActive()
+		metricType := x.metrics.frameType(rejection.requestID)
+		x.metrics.discard(rejection.requestID)
 		notifyNodeReportRejection(events, NodeReportRejection{
 			Type: metricType,
 			Code: rejection.code,
 		})
-	} else {
-		stopTimer(x.metricsReplyTimer)
+	}
+
+	if x.metrics.cancelRetry() {
 		stopTimer(x.metricsRetryTimer)
 	}
+	x.armMetricsReplyTimer()
 
-	sent, err := x.metrics.writeNext(ctx, conn)
-	if err != nil {
-		return err
-	}
-	if sent {
-		x.metricsReplyTimer.Reset(metricsReplyTimeout)
-	}
-
-	return nil
+	return x.sendMetrics(ctx, conn)
 }
 
 func notifyNodeReportRejection(events Events, rejection NodeReportRejection) {

@@ -45,6 +45,8 @@ func (x *exchange) handleRequest(
 	switch messageType {
 	case protocol.MetricsQueryType:
 		return true, x.answerMetricsQuery(ctx, conn, data, reject)
+	case protocol.MetricsSubscribeType:
+		return true, x.subscribeMetrics(ctx, conn, data, reject)
 	case protocol.NodeNetworkRefreshType:
 		return true, x.refreshNetwork(ctx, data, reject)
 	case protocol.NodeProcessInspectType:
@@ -56,6 +58,36 @@ func (x *exchange) handleRequest(
 	default:
 		return false, nil
 	}
+}
+
+// subscribeMetrics applies the reader's delivery settings and sends what
+// they allow right away.
+func (x *exchange) subscribeMetrics(ctx context.Context, conn *websocket.Conn, data []byte, reject rejectFunc) error {
+	var request protocol.MetricsSubscribe
+	if err := protocol.DecodeStrict(data, &request); err != nil || !agentcrypto.ValidUUID(request.RequestID) ||
+		request.Window < 1 || request.Window > protocol.MaxMetricsWindow {
+		return reject(ctx, request.RequestID, "invalid_message",
+			fmt.Sprintf("metrics.subscribe needs a UUID request_id, live, and a window of 1 to %d", protocol.MaxMetricsWindow))
+	}
+	if x.collectors.Metrics == nil {
+		return reject(ctx, request.RequestID, "metrics_unavailable", "this node keeps no metrics")
+	}
+
+	x.metrics.subscribe(request.Live, request.Window)
+
+	writeCtx, cancel := context.WithTimeout(ctx, nodeRequestWrites)
+	err := wsframe.WriteJSON(writeCtx, conn, protocol.MetricsSubscribeAccepted{
+		Type:      protocol.MetricsSubscribeAcceptedType,
+		RequestID: request.RequestID,
+		Live:      request.Live,
+		Window:    request.Window,
+	})
+	cancel()
+	if err != nil {
+		return fmt.Errorf("answer metrics subscription: %w", err)
+	}
+
+	return x.sendMetrics(ctx, conn)
 }
 
 func (x *exchange) answerMetricsQuery(ctx context.Context, conn *websocket.Conn, data []byte, reject rejectFunc) error {

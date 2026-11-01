@@ -386,3 +386,41 @@ type MetricsSampleRecord struct {
 	Containers       []ContainerMetrics `json:"containers"`
 	CollectionIssues []CollectionIssue  `json:"collection_issues,omitempty"`
 }
+
+// Metrics delivery settings.
+const (
+	MetricsSubscribeType         = "metrics.subscribe"
+	MetricsSubscribeAcceptedType = "metrics.subscribe.accepted"
+	MetricsLiveType              = "metrics.live"
+	// MaxMetricsWindow is the most history frames a reader may let the node
+	// send before it acknowledges them.
+	MaxMetricsWindow = 8
+)
+
+// MetricsSubscribe sets how the node delivers metrics to this session. Live
+// asks for metrics.live while stored history is behind; Window is the number
+// of history frames that may await acknowledgement, 1 to MaxMetricsWindow.
+type MetricsSubscribe struct {
+	Type      string `json:"type"`
+	RequestID string `json:"request_id"`
+	Live      bool   `json:"live"`
+	Window    int    `json:"window"`
+}
+
+// MetricsSubscribeAccepted confirms the settings now in effect.
+type MetricsSubscribeAccepted struct {
+	Type      string `json:"type"`
+	RequestID string `json:"request_id"`
+	Live      bool   `json:"live"`
+	Window    int    `json:"window"`
+}
+
+// MetricsLive carries the newest sample ahead of stored history. It is not
+// acknowledged and does not move the reader's cursor; the same sample
+// arrives again with history, so readers drop it by sequence.
+type MetricsLive struct {
+	Type          string       `json:"type"`
+	SchemaVersion int          `json:"schema_version"`
+	StreamID      string       `json:"stream_id"`
+	Metric        MetricSeries `json:"metric"`
+}

@@ -130,7 +130,7 @@ func ServeDevice(ctx context.Context, conn *websocket.Conn, config DeviceConfig)
 				return err
 			}
 		case <-data.metricsReplyTimer.C:
-			data.scheduleMetricsRetry(events, "ack_timeout")
+			data.scheduleMetricsRetry(events, "", "ack_timeout")
 		case <-data.metricsRetryTimer.C:
 			if err := data.retryMetrics(readCtx, conn); err != nil {
 				return err

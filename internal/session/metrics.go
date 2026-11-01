@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -22,6 +23,9 @@ const (
 	// maxMetricBatch is the most samples or rollups one frame carries; the
 	// contract allows 60 samples per metrics.report.
 	maxMetricBatch = 60
+	// recentAnswers is how many answered request IDs a reporter remembers,
+	// so a second answer to a resent frame is ignored.
+	recentAnswers = 4 * protocol.MaxMetricsWindow
 )
 
 // MetricsSource is the agent's metrics store. Every session is a reader with
@@ -30,39 +34,55 @@ type MetricsSource interface {
 	StreamID() string
 	After(after uint64, limit int) []metricstore.Item
 	Range(from, to time.Time, limit int) []metricstore.Item
+	Latest() *metricstore.Record
 	Changed() <-chan struct{}
 	Cursor(reader string) uint64
 	SetCursor(reader string, sequence uint64)
 	RemoveCursor(reader string)
 }
 
-type activeMetricReport struct {
+type metricFrame struct {
 	requestID  string
 	metricType string
 	payload    []byte
 	// commit is the cursor to store once this frame is acknowledged; zero
 	// while more frames of the same batch follow.
-	commit uint64
+	commit       uint64
+	acknowledged bool
 }
 
-// metricReporter delivers stored metrics to one reader, one frame at a time.
-// A batch of samples becomes a node frame and a container frame; the cursor
-// moves when both are acknowledged.
+// metricReporter delivers stored metrics to one reader. A batch of samples
+// becomes a node frame and a container frame; the cursor moves when both are
+// acknowledged. Up to window frames await acknowledgement at once; the
+// reader sets the window and live delivery with metrics.subscribe.
 type metricReporter struct {
-	source  MetricsSource
-	reader  string
-	cursor  uint64
-	wake    <-chan struct{}
-	pending []activeMetricReport
+	source MetricsSource
+	reader string
+	cursor uint64
+	wake   <-chan struct{}
+	window int
+	live   bool
 
-	active                *activeMetricReport
-	retryAttempt          int
-	lastAcceptedRequestID string
+	// encoded is the newest sequence placed in a frame, sent or pending.
+	encoded uint64
+	// liveSent is the sequence of the last metrics.live sample.
+	liveSent uint64
+	pending  []metricFrame
+	// inflight holds written frames in order until every frame before
+	// them is acknowledged.
+	inflight []*metricFrame
+	// retrying holds new frames back until the unacknowledged ones are
+	// sent again.
+	retrying     bool
+	retryAttempt int
+	// answered holds the request IDs of recently accepted or skipped frames.
+	answered []string
 }
 
 type metricRejection struct {
-	code    string
-	message string
+	requestID string
+	code      string
+	message   string
 }
 
 var errDuplicateMetricsAcknowledgement = errors.New("duplicate metrics acknowledgement")
@@ -76,9 +96,10 @@ func (rejection *metricRejection) Error() string {
 }
 
 func newMetricReporter(source MetricsSource, reader string) *metricReporter {
-	reporter := &metricReporter{source: source, reader: reader}
+	reporter := &metricReporter{source: source, reader: reader, window: 1}
 	if source != nil {
 		reporter.cursor = source.Cursor(reader)
+		reporter.encoded = reporter.cursor
 		reporter.wake = source.Changed()
 	}
 
@@ -90,45 +111,107 @@ func (reporter *metricReporter) woke() {
 	reporter.wake = reporter.source.Changed()
 }
 
-// writeNext sends the next frame unless one is waiting for its answer.
-func (reporter *metricReporter) writeNext(ctx context.Context, conn *websocket.Conn) (bool, error) {
-	if reporter.active != nil || reporter.source == nil {
-		return false, nil
-	}
-	if len(reporter.pending) == 0 {
-		frames, err := reporter.nextBatch()
-		if err != nil {
-			return false, err
-		}
-		reporter.pending = frames
-	}
-	if len(reporter.pending) == 0 {
-		return false, nil
-	}
-
-	next := reporter.pending[0]
-	reporter.pending = reporter.pending[1:]
-	reporter.active = &next
-
-	if err := reporter.writeActive(ctx, conn); err != nil {
-		return false, err
-	}
-
-	return true, nil
+// subscribe applies a reader's delivery settings.
+func (reporter *metricReporter) subscribe(live bool, window int) {
+	reporter.live = live
+	reporter.window = window
 }
 
-func (reporter *metricReporter) writeReady(ctx context.Context, conn *websocket.Conn) (bool, error) {
-	if reporter.active != nil {
-		return true, reporter.writeActive(ctx, conn)
+// awaiting reports whether a written frame waits for its acknowledgement.
+func (reporter *metricReporter) awaiting() bool {
+	return slices.ContainsFunc(reporter.inflight, func(frame *metricFrame) bool { return !frame.acknowledged })
+}
+
+// writeNext fills the window with the next frames. It reports whether it
+// wrote any.
+func (reporter *metricReporter) writeNext(ctx context.Context, conn *websocket.Conn) (bool, error) {
+	if reporter.source == nil || reporter.retrying {
+		return false, nil
 	}
 
-	return reporter.writeNext(ctx, conn)
+	sent := false
+	for len(reporter.inflight) < reporter.window {
+		if len(reporter.pending) == 0 {
+			frames, err := reporter.nextBatch()
+			if err != nil {
+				return sent, err
+			}
+			reporter.pending = frames
+		}
+		if len(reporter.pending) == 0 {
+			break
+		}
+
+		next := reporter.pending[0]
+		reporter.pending = reporter.pending[1:]
+		reporter.inflight = append(reporter.inflight, &next)
+
+		if err := writeMetricFrame(ctx, conn, next.payload); err != nil {
+			return sent, err
+		}
+		sent = true
+	}
+
+	return sent, nil
+}
+
+// resend writes every unacknowledged frame again, with the same request ID,
+// and lets new frames follow.
+func (reporter *metricReporter) resend(ctx context.Context, conn *websocket.Conn) error {
+	reporter.retrying = false
+
+	for _, frame := range reporter.inflight {
+		if frame.acknowledged {
+			continue
+		}
+		if err := writeMetricFrame(ctx, conn, frame.payload); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// writeLive sends the newest sample as metrics.live while stored history
+// has not reached it yet. Once history is caught up the regular frames
+// carry new samples, so live frames stop.
+func (reporter *metricReporter) writeLive(ctx context.Context, conn *websocket.Conn) error {
+	if !reporter.live || reporter.source == nil {
+		return nil
+	}
+
+	// The sample right after the last encoded one goes out as history next,
+	// so live frames start only when history is further behind.
+	record := reporter.source.Latest()
+	if record == nil || record.Sequence <= reporter.encoded+1 || record.Sequence <= reporter.liveSent {
+		return nil
+	}
+
+	for _, metricType := range []string{protocol.MetricTypeNode, protocol.MetricTypeContainer} {
+		frame := &protocol.MetricsLive{
+			Type:          protocol.MetricsLiveType,
+			SchemaVersion: protocol.MetricsSchemaVersion,
+			StreamID:      reporter.source.StreamID(),
+			Metric:        sampleSeries(metricType, []metricstore.Item{{Record: record}}),
+		}
+
+		payload, err := encodeSampleFrame(frame, &frame.Metric)
+		if err != nil {
+			return err
+		}
+		if err := writeMetricFrame(ctx, conn, payload); err != nil {
+			return err
+		}
+	}
+	reporter.liveSent = record.Sequence
+
+	return nil
 }
 
 // nextBatch encodes the next run of items of one kind as frames, halving the
 // batch until every frame fits the size limit.
-func (reporter *metricReporter) nextBatch() ([]activeMetricReport, error) {
-	items := reporter.source.After(reporter.cursor, maxMetricBatch)
+func (reporter *metricReporter) nextBatch() ([]metricFrame, error) {
+	items := reporter.source.After(reporter.encoded, maxMetricBatch)
 	if len(items) == 0 {
 		return nil, nil
 	}
@@ -142,10 +225,11 @@ func (reporter *metricReporter) nextBatch() ([]activeMetricReport, error) {
 
 	for {
 		frames, err := reporter.encodeBatch(items, rollup)
-		if err == nil || len(items) == 1 {
-			return frames, err
+		if err == nil {
+			reporter.encoded = items[len(items)-1].LastSequence()
+			return frames, nil
 		}
-		if !errors.Is(err, errMetricsFrameTooLarge) {
+		if len(items) == 1 || !errors.Is(err, errMetricsFrameTooLarge) {
 			return nil, err
 		}
 
@@ -155,48 +239,50 @@ func (reporter *metricReporter) nextBatch() ([]activeMetricReport, error) {
 
 var errMetricsFrameTooLarge = errors.New("metrics frame is too large")
 
-func (reporter *metricReporter) encodeBatch(items []metricstore.Item, rollup bool) ([]activeMetricReport, error) {
+func (reporter *metricReporter) encodeBatch(items []metricstore.Item, rollup bool) ([]metricFrame, error) {
 	streamID := reporter.source.StreamID()
 	last := items[len(items)-1].LastSequence()
 
-	var frames []activeMetricReport
+	var frames []metricFrame
 	for index, metricType := range []string{protocol.MetricTypeNode, protocol.MetricTypeContainer} {
 		requestID, err := agentcrypto.NewUUID()
 		if err != nil {
 			return nil, fmt.Errorf("create metrics request ID: %w", err)
 		}
 
-		var frame any
+		var payload []byte
 		if rollup {
-			frame = rollupFrame(requestID, streamID, metricType, items)
+			payload, err = json.Marshal(rollupFrame(requestID, streamID, metricType, items))
 		} else {
-			frame = sampleFrame(requestID, streamID, metricType, items)
+			frame := &protocol.MetricsReport{
+				Type:          protocol.MetricsReportType,
+				SchemaVersion: protocol.MetricsSchemaVersion,
+				RequestID:     requestID,
+				StreamID:      streamID,
+				Metric:        sampleSeries(metricType, items),
+			}
+			payload, err = encodeSampleFrame(frame, &frame.Metric)
 		}
-
-		payload, err := json.Marshal(frame)
 		if err != nil {
-			return nil, fmt.Errorf("encode metrics frame: %w", err)
+			return nil, err
 		}
 		if len(payload) > maxMetricsReportSize {
-			if len(items) > 1 {
-				return nil, errMetricsFrameTooLarge
-			}
-			if payload, err = shrinkSingleSample(frame); err != nil {
-				return nil, err
-			}
+			return nil, errMetricsFrameTooLarge
 		}
 
-		active := activeMetricReport{requestID: requestID, metricType: metricType, payload: payload}
+		frame := metricFrame{requestID: requestID, metricType: metricType, payload: payload}
 		if index == 1 {
-			active.commit = last
+			frame.commit = last
 		}
-		frames = append(frames, active)
+		frames = append(frames, frame)
 	}
 
 	return frames, nil
 }
 
-func sampleFrame(requestID, streamID, metricType string, items []metricstore.Item) *protocol.MetricsReport {
+// sampleSeries puts the node or the container part of full samples into one
+// series.
+func sampleSeries(metricType string, items []metricstore.Item) protocol.MetricSeries {
 	samples := make([]protocol.MetricSample, 0, len(items))
 	for _, item := range items {
 		record := item.Record
@@ -208,7 +294,7 @@ func sampleFrame(requestID, streamID, metricType string, items []metricstore.Ite
 			ObservationScope: record.ObservationScope,
 		}
 		if metricType == protocol.MetricTypeNode {
-			node := record.Node
+			node := wireNode(record.Node)
 			sample.Node = &node
 			sample.CollectionIssues = nodeIssues
 		} else {
@@ -218,13 +304,7 @@ func sampleFrame(requestID, streamID, metricType string, items []metricstore.Ite
 		samples = append(samples, sample)
 	}
 
-	return &protocol.MetricsReport{
-		Type:          protocol.MetricsReportType,
-		SchemaVersion: protocol.MetricsSchemaVersion,
-		RequestID:     requestID,
-		StreamID:      streamID,
-		Metric:        protocol.MetricSeries{Type: metricType, Samples: samples},
-	}
+	return protocol.MetricSeries{Type: metricType, Samples: samples}
 }
 
 func rollupFrame(requestID, streamID, metricType string, items []metricstore.Item) *protocol.MetricsRollupReport {
@@ -246,23 +326,23 @@ func rollupFrame(requestID, streamID, metricType string, items []metricstore.Ite
 	}
 }
 
-// shrinkSingleSample trims optional lists of one oversized sample.
-func shrinkSingleSample(frame any) ([]byte, error) {
-	report, ok := frame.(*protocol.MetricsReport)
-	if !ok || len(report.Metric.Samples) != 1 {
-		return nil, fmt.Errorf("metrics frame exceeds %d bytes", maxMetricsReportSize)
-	}
-
-	sample := &report.Metric.Samples[0]
+// encodeSampleFrame marshals a frame of samples. A frame of one oversized
+// sample has its optional lists trimmed until it fits; a larger frame is
+// reported as too large, so the caller splits the batch.
+func encodeSampleFrame(frame any, series *protocol.MetricSeries) ([]byte, error) {
 	for {
-		payload, err := json.Marshal(report)
+		payload, err := json.Marshal(frame)
 		if err != nil {
-			return nil, fmt.Errorf("encode metrics report: %w", err)
+			return nil, fmt.Errorf("encode metrics frame: %w", err)
 		}
 		if len(payload) <= maxMetricsReportSize {
 			return payload, nil
 		}
+		if len(series.Samples) != 1 {
+			return nil, errMetricsFrameTooLarge
+		}
 
+		sample := &series.Samples[0]
 		switch {
 		case sample.Node != nil && len(sample.Node.Processes.Items) > 0:
 			items := sample.Node.Processes.Items
@@ -274,7 +354,7 @@ func shrinkSingleSample(frame any) ([]byte, error) {
 			sample.Containers.Items = items[:len(items)/2]
 			appendMetricIssue(sample, "containers", "truncated")
 		default:
-			return nil, fmt.Errorf("metrics report exceeds %d bytes without optional entries", maxMetricsReportSize)
+			return nil, fmt.Errorf("metrics frame exceeds %d bytes without optional entries", maxMetricsReportSize)
 		}
 	}
 }
@@ -308,13 +388,9 @@ func appendMetricIssue(sample *protocol.MetricSample, component, code string) {
 	})
 }
 
-func (reporter *metricReporter) writeActive(ctx context.Context, conn *websocket.Conn) error {
-	if reporter.active == nil {
-		return errors.New("metrics retry has no active request")
-	}
-
+func writeMetricFrame(ctx context.Context, conn *websocket.Conn, payload []byte) error {
 	writeCtx, cancel := context.WithTimeout(ctx, metricsWriteTimeout)
-	err := conn.Write(writeCtx, websocket.MessageText, reporter.active.payload)
+	err := conn.Write(writeCtx, websocket.MessageText, payload)
 	cancel()
 
 	if err != nil {
@@ -324,6 +400,8 @@ func (reporter *metricReporter) writeActive(ctx context.Context, conn *websocket
 	return nil
 }
 
+// handleResponse applies metrics.accepted or metrics.rejected to the frame
+// it names. A rejection is returned as *metricRejection.
 func (reporter *metricReporter) handleResponse(data []byte) error {
 	messageType, err := protocol.MessageType(data)
 	if err != nil {
@@ -335,16 +413,18 @@ func (reporter *metricReporter) handleResponse(data []byte) error {
 		if err := protocol.DecodeStrict(data, &accepted); err != nil {
 			return fmt.Errorf("decode metrics acknowledgement: %w", err)
 		}
-		if accepted.RequestID == reporter.lastAcceptedRequestID &&
-			(reporter.active == nil || accepted.RequestID != reporter.active.requestID) {
-			return errDuplicateMetricsAcknowledgement
-		}
-		if reporter.active == nil || accepted.RequestID != reporter.active.requestID {
+
+		frame := reporter.frame(accepted.RequestID)
+		if frame == nil || frame.acknowledged {
+			if slices.Contains(reporter.answered, accepted.RequestID) {
+				return errDuplicateMetricsAcknowledgement
+			}
+
 			return errors.New("invalid metrics acknowledgement")
 		}
 
-		reporter.lastAcceptedRequestID = accepted.RequestID
-		reporter.complete()
+		reporter.retryAttempt = 0
+		reporter.complete(frame)
 
 		return nil
 	}
@@ -357,43 +437,96 @@ func (reporter *metricReporter) handleResponse(data []byte) error {
 	if err := protocol.DecodeStrict(data, &rejected); err != nil {
 		return fmt.Errorf("decode metrics rejection: %w", err)
 	}
-	if reporter.active == nil || rejected.RequestID != reporter.active.requestID || rejected.Code == "" {
+	if rejected.Code == "" {
+		return errors.New("invalid metrics rejection")
+	}
+	if frame := reporter.frame(rejected.RequestID); frame == nil || frame.acknowledged {
+		// A resent frame can be answered twice; the first answer counts.
+		if slices.Contains(reporter.answered, rejected.RequestID) {
+			return errDuplicateMetricsAcknowledgement
+		}
+
 		return errors.New("invalid metrics rejection")
 	}
 
-	return &metricRejection{code: rejected.Code, message: rejected.Message}
+	return &metricRejection{requestID: rejected.RequestID, code: rejected.Code, message: rejected.Message}
 }
 
-// complete finishes the active frame and, at the end of a batch, stores the
-// reader's cursor.
-func (reporter *metricReporter) complete() {
-	if commit := reporter.active.commit; commit > reporter.cursor {
-		reporter.cursor = commit
-		reporter.source.SetCursor(reporter.reader, commit)
+func (reporter *metricReporter) frame(requestID string) *metricFrame {
+	for _, frame := range reporter.inflight {
+		if frame.requestID == requestID {
+			return frame
+		}
 	}
 
-	reporter.active = nil
-	reporter.retryAttempt = 0
+	return nil
 }
 
-func (reporter *metricReporter) retryDelay() time.Duration {
+// complete marks a frame answered and drops the answered frames at the head
+// of the window, storing the reader's cursor at the end of each batch.
+func (reporter *metricReporter) complete(frame *metricFrame) {
+	frame.acknowledged = true
+	if len(reporter.answered) == recentAnswers {
+		reporter.answered = reporter.answered[1:]
+	}
+	reporter.answered = append(reporter.answered, frame.requestID)
+
+	for len(reporter.inflight) > 0 && reporter.inflight[0].acknowledged {
+		if commit := reporter.inflight[0].commit; commit > reporter.cursor {
+			reporter.cursor = commit
+			reporter.source.SetCursor(reporter.reader, commit)
+		}
+		reporter.inflight = reporter.inflight[1:]
+	}
+}
+
+// scheduleRetry holds new frames back and returns the delay before the
+// unacknowledged frames are sent again. It reports false when a retry is
+// already scheduled, so a burst of rejections backs off only once.
+func (reporter *metricReporter) scheduleRetry() (time.Duration, bool) {
+	if reporter.retrying {
+		return 0, false
+	}
+
+	reporter.retrying = true
 	reporter.retryAttempt++
 
-	return retryDelay(reporter.retryAttempt)
+	return retryDelay(reporter.retryAttempt), true
 }
 
-// discardActive skips a frame the peer rejected for good, so one bad frame
-// cannot stall the reader.
-func (reporter *metricReporter) discardActive() {
-	reporter.complete()
+// discard skips a frame the peer rejected for good, so one bad frame cannot
+// stall the reader.
+func (reporter *metricReporter) discard(requestID string) {
+	if frame := reporter.frame(requestID); frame != nil {
+		reporter.retryAttempt = 0
+		reporter.complete(frame)
+	}
 }
 
-func (reporter *metricReporter) activeType() string {
-	if reporter.active == nil {
-		return protocol.MetricsReportType
+// cancelRetry drops a scheduled retry once every written frame has been
+// answered, so delivery does not wait out a backoff with nothing to resend.
+func (reporter *metricReporter) cancelRetry() bool {
+	if !reporter.retrying || reporter.awaiting() {
+		return false
 	}
 
-	return protocol.MetricsReportType + "/" + reporter.active.metricType
+	reporter.retrying = false
+
+	return true
+}
+
+// frameType names the frame for rejection events.
+func (reporter *metricReporter) frameType(requestID string) string {
+	if frame := reporter.frame(requestID); frame != nil {
+		return protocol.MetricsReportType + "/" + frame.metricType
+	}
+	for _, frame := range reporter.inflight {
+		if !frame.acknowledged {
+			return protocol.MetricsReportType + "/" + frame.metricType
+		}
+	}
+
+	return protocol.MetricsReportType
 }
 
 // queryResult answers metrics.query from the store, cut to fit one frame.
@@ -442,7 +575,7 @@ func toProtocolItem(item metricstore.Item) protocol.MetricsItem {
 		ObservedAt:       record.ObservedAt,
 		IntervalMS:       record.IntervalMS,
 		ObservationScope: record.ObservationScope,
-		Node:             record.Node,
+		Node:             wireNode(record.Node),
 		Containers:       append([]protocol.ContainerMetrics{}, record.Containers...),
 		CollectionIssues: record.Issues,
 	}}
@@ -454,4 +587,15 @@ func itemStart(item metricstore.Item) time.Time {
 	}
 
 	return item.Node.Start
+}
+
+// wireNode returns node metrics as the contract requires them. The store
+// drops process lists after five minutes and on disk, which leaves them nil;
+// the contract sends an empty list instead.
+func wireNode(node protocol.NodeMetrics) protocol.NodeMetrics {
+	if node.Processes.Items == nil {
+		node.Processes.Items = []protocol.ProcessMetric{}
+	}
+
+	return node
 }

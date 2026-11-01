@@ -149,6 +149,10 @@ func TestWSSContractRejectsInvalidFrames(t *testing.T) {
 		`{"type":"metrics.report","schema_version":1,"batch_id":"2ab9d734-7434-4cdf-bca4-6ce7a46cdd65"}`,
 		`{"type":"metrics.report","schema_version":1,"request_id":"2ab9d734-7434-4cdf-bca4-6ce7a46cdd65","stream_id":"d1b181c1-52ec-4d55-b2c9-b1428305b294","metric":{"type":"node","samples":[{"sequence":1,"observed_at":"2030-01-02T03:04:05Z","interval_ms":1000,"observation_scope":"host","plugin":{"values":{"players":1}}}]}}`,
 		`{"type":"metrics.report","schema_version":1,"request_id":"2ab9d734-7434-4cdf-bca4-6ce7a46cdd65","stream_id":"d1b181c1-52ec-4d55-b2c9-b1428305b294","metric":{"type":"plugin:minecraft","schema_version":1,"source_id":"container:server-1","samples":[{"sequence":1,"observed_at":"2030-01-02T03:04:05Z","interval_ms":1000,"observation_scope":"runtime","plugin":{"values":{}}}]}}`,
+		`{"type":"metrics.subscribe","request_id":"2ab9d734-7434-4cdf-bca4-6ce7a46cdd65","live":true,"window":9}`,
+		`{"type":"metrics.subscribe","request_id":"2ab9d734-7434-4cdf-bca4-6ce7a46cdd65","live":true}`,
+		`{"type":"metrics.live","schema_version":1,"request_id":"2ab9d734-7434-4cdf-bca4-6ce7a46cdd65","stream_id":"d1b181c1-52ec-4d55-b2c9-b1428305b294","metric":{"type":"container","samples":[{"sequence":1,"observed_at":"2030-01-02T03:04:05Z","interval_ms":1000,"observation_scope":"runtime","containers":{"items":[]}}]}}`,
+		`{"type":"metrics.live","schema_version":1,"stream_id":"d1b181c1-52ec-4d55-b2c9-b1428305b294","metric":{"type":"container","samples":[{"sequence":1,"observed_at":"2030-01-02T03:04:05Z","interval_ms":1000,"observation_scope":"runtime","containers":{"items":[]}},{"sequence":2,"observed_at":"2030-01-02T03:04:06Z","interval_ms":1000,"observation_scope":"runtime","containers":{"items":[]}}]}}`,
 		`{"type":"sources.update","sources":{"generation":1,"expires_at":"2030-01-02T03:04:05Z","items":[{"url":"https://gateway.example/agent/v1/connect","priority":0,"weight":1,"security_profile":"pqc-hybrid-v1"}]}}`,
 	}
 
@@ -353,6 +357,9 @@ func contractMessageTypes() map[string]string {
 		"artifactUploadResult":       ArtifactUploadResultType,
 		"metricsRollup":              MetricsRollupType,
 		"metricsQuery":               MetricsQueryType,
+		"metricsSubscribe":           MetricsSubscribeType,
+		"metricsSubscribeAccepted":   MetricsSubscribeAcceptedType,
+		"metricsLive":                MetricsLiveType,
 		"nodeNetworkRefresh":         NodeNetworkRefreshType,
 		"nodeProcessInspect":         NodeProcessInspectType,
 		"nodeProcessInspectResult":   NodeProcessInspectResultType,
@@ -411,6 +418,9 @@ func contractDTOs() map[string]reflect.Type {
 		"metricRollupSeries":             reflect.TypeFor[MetricRollupSeries](),
 		"metricsRollup":                  reflect.TypeFor[MetricsRollupReport](),
 		"metricsQuery":                   reflect.TypeFor[MetricsQuery](),
+		"metricsSubscribe":               reflect.TypeFor[MetricsSubscribe](),
+		"metricsSubscribeAccepted":       reflect.TypeFor[MetricsSubscribeAccepted](),
+		"metricsLive":                    reflect.TypeFor[MetricsLive](),
 		"nodeNetworkRefresh":             reflect.TypeFor[NodeNetworkRefresh](),
 		"nodeProcessInspect":             reflect.TypeFor[NodeProcessInspect](),
 		"nodeProcessInspectResult":       reflect.TypeFor[NodeProcessInspectResult](),
@@ -853,6 +863,21 @@ func canonicalContractMessages() []any {
 			CommandLine: []string{"java", "-Xmx4G", "-jar", "server.jar", "nogui"},
 		}},
 		MetricsQuery{Type: MetricsQueryType, RequestID: requestID, From: now.Add(-time.Hour), To: now},
+		MetricsSubscribe{Type: MetricsSubscribeType, RequestID: requestID, Live: true, Window: MaxMetricsWindow},
+		MetricsSubscribeAccepted{Type: MetricsSubscribeAcceptedType, RequestID: requestID, Live: true, Window: MaxMetricsWindow},
+		MetricsLive{
+			Type: MetricsLiveType, SchemaVersion: MetricsSchemaVersion, StreamID: portalID,
+			Metric: MetricSeries{Type: MetricTypeNode, Samples: []MetricSample{{
+				Sequence: 7, ObservedAt: now, IntervalMS: 1000, ObservationScope: ObservationScopeHost, Node: &nodeMetrics,
+			}}},
+		},
+		MetricsLive{
+			Type: MetricsLiveType, SchemaVersion: MetricsSchemaVersion, StreamID: portalID,
+			Metric: MetricSeries{Type: MetricTypeContainer, Samples: []MetricSample{{
+				Sequence: 7, ObservedAt: now, IntervalMS: 1000, ObservationScope: ObservationScopeRuntime,
+				Containers: &ContainerMetricSet{Items: []ContainerMetrics{}},
+			}}},
+		},
 		MetricsQueryResult{
 			Type: MetricsQueryResultType, RequestID: requestID, StreamID: portalID,
 			Items: []MetricsItem{

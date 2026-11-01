@@ -32,7 +32,7 @@ agent  connect.proof
 portal connect.accepted | connect.rejected
 ```
 
-After `connect.accepted`, the agent can send `renew.request`, `node.specifications.report`, `node.network.report`, `metrics.report`, and `metrics.rollup` (see [Metrics store](#metrics-store)). A metrics frame contains `metric.type`: `node`, `container`, or a versioned `plugin:<name>` adapter namespace. The portal can send the correlated accepted/rejected responses, `sources.update`, `drain`, a signed `portal.command`, `metrics.query`, `node.network.refresh`, `node.process.inspect`, `containers.list`, `container.inspect`, and the container log and console requests of [Container logs and consoles](#container-logs-and-consoles).
+After `connect.accepted`, the agent can send `renew.request`, `node.specifications.report`, `node.network.report`, `metrics.report`, `metrics.rollup`, and `metrics.live` (see [Metrics store](#metrics-store)). A metrics frame contains `metric.type`: `node`, `container`, or a versioned `plugin:<name>` adapter namespace. The portal can send the correlated accepted/rejected responses, `sources.update`, `drain`, a signed `portal.command`, `metrics.query`, `metrics.subscribe`, `node.network.refresh`, `node.process.inspect`, `containers.list`, `container.inspect`, and the container log and console requests of [Container logs and consoles](#container-logs-and-consoles).
 
 ## Workload commands
 
@@ -223,9 +223,10 @@ node   node.specifications.report    device answers node.specifications.accepted
 node   node.network.report           device answers node.network.accepted | rejected
 node   metrics.rollup / metrics.report  stored history from the device's cursor, then live samples;
                                      device answers metrics.accepted | rejected, one frame at a time
+                                     unless metrics.subscribe set a larger window
 ```
 
-Node reports and metrics are the same frames as on the portal session and follow the same rules: one report is outstanding at a time, a report is retried with the same `request_id` until it is acknowledged, and metrics start after both node reports. A device that stops acknowledging stops receiving metrics.
+Node reports and metrics are the same frames as on the portal session and follow the same rules: one node report is outstanding at a time, and so is one metrics frame unless `metrics.subscribe` sets a larger window (see [Delivery settings](#delivery-settings)); a report is retried with the same `request_id` until it is acknowledged, and metrics start after both node reports. A device that stops acknowledging stops receiving metrics.
 
 A device or the portal can also ask for stored history at any time with `metrics.query` (`from`, `to`, at most 8 days apart); the node answers `metrics.query.result` with the stored items in that range, oldest first, cut to one frame with `next_from` set when more remain.
 
@@ -360,7 +361,7 @@ When the agent runs in a container without the host's network namespace, interfa
 - Node CPU (`cpu.total.usage_percent`, `cpu.logical[].usage_percent`) is a share of the whole machine or of one logical CPU: 0 to 100.
 - Container CPU (`cpu.usage_percent`) follows `docker stats`: 100 is one fully busy logical CPU, so a container can report up to `online_cpus` × 100. For example, 161 on a 4-CPU node is about 1.6 CPUs, or 40 % of the machine. `online_cpus` is the number of logical CPUs the container sees. `limit_cores` is present only when a CPU quota or cpuset caps the container below `online_cpus`; then `usage_percent / limit_cores` is the share of its limit in percent.
 - Memory and swap report `total_bytes` and `swap_total_bytes` next to the used amounts. File systems report `device`, `filesystem_type`, and `total_bytes`; `used_percent` follows `df`: used against used plus available to unprivileged users.
-- `*_total` fields of network interfaces and storage devices are the kernel's counters since boot, so traffic over a period is the difference of two samples. In a rollup the `max` of such a series is its value at the end of the window.
+- `*_total` fields of network interfaces and storage devices are the kernel's counters since boot, so traffic over a period is the difference of two samples. In a rollup the `max` of such a series is its value at the end of the window unless the counter was reset (a reboot, a recreated interface, or a restarted container for the container `*_total` fields); `min` and `avg` of a counter carry no meaning.
 - `storage.raid` lists Linux software RAID (md) arrays: level, state, member count, `degraded` (missing members), `failed_members`, and the progress of a running resync, recovery, or check. `sensors` lists hwmon temperatures (degrees Celsius, with the critical limit when the chip has one) and fan speeds (RPM); virtual machines usually have none. Both are left out when the node has none.
 - `tcp` covers IPv4 and IPv6 of the host's network namespace: `established` and `time_wait` connections, `orphaned` sockets, sockets `in_use`, and per-second rates of opened (`active_opens`, `passive_opens`), failed, and reset connections and retransmitted segments. It comes from `/proc/net/snmp` and `/proc/net/sockstat`, which stay cheap on servers with many connections, and is left out until two samples exist.
 - A process item has no command line, which can be long and is sent every second. `node.process.inspect` with the item's `pid` and `started_at` returns `node.process.inspect.result` with `command_line` as an argument list (cut at 32 KiB, then `command_line_truncated` is set) and the process's identity. A process that has exited or whose PID was reused is answered with `error` `not_found`. Command lines are returned in full, including any passwords in them; masking them is the client's job.
@@ -372,16 +373,30 @@ The agent writes every metrics sample into a store on disk and serves every read
 
 | Age | Kept as |
 | --- | --- |
-| Up to 1 hour | Every sample (process lists only for the last 5 minutes) |
-| 1 hour to 1 day | One rollup per minute. Neighbouring minutes that differ only by noise (under 2 percentage points for `*_percent` series, under 2 % otherwise) are merged. A minute with a spike (a `*_percent` series moving 10 points or more, or another series moving by half its average) keeps all its samples |
+| Up to 1 hour | Every sample (process lists only for the last 5 minutes; older samples carry an empty `processes.items`) |
+| 1 hour to 1 day | One rollup per minute. Neighbouring minutes of the same hour that differ only by noise (under 2 percentage points for `*_percent` series, under 2 % otherwise) are merged. A minute with a spike (a `*_percent` series moving 10 points or more, or another series moving by half its average and by at least 1) is kept as 10-second rollups |
 | 1 day to 7 days | One rollup per hour |
 | Older | Removed; the store also drops its oldest data above 200 MB |
 
-A rollup (`metricRollup`) covers `first_sequence` to `last_sequence` and holds, for every numeric series, `min`, `avg`, `max`, and `max_at` (when the peak happened). A series is named by the path of a numeric field of the sample; array elements are named by their identifier field, for example `cpu.total.usage_percent` or `network.network:2.rx_bytes_per_second`.
+A rollup (`metricRollup`) covers `first_sequence` to `last_sequence` and holds, for every numeric series except those under `processes` (process counts and the process list stay only in full samples), `min`, `avg`, `max`, and `max_at` (when the peak happened). A series is named by the path of a numeric field of the sample; array elements are named by their identifier field, for example `cpu.total.usage_percent` or `network.network:2.rx_bytes_per_second`.
 
 Delivery reads the store in sequence order. Full samples go out as `metrics.report`, up to 60 samples per frame; compacted windows go out as `metrics.rollup`, up to 60 rollups per frame. Each batch is a `node` frame followed by a `container` frame with the same items, and the reader's cursor moves when the second frame is acknowledged. `stream_id` identifies the store and stays the same across restarts, and `sequence` keeps growing within it, so a reader can drop duplicates by sequence. A sample's node and container frames carry the same `sequence`.
 
 The store lives in `metrics/` in the agent's state directory as DEFLATE-compressed JSON records, mode 0600.
+
+### Delivery settings
+
+By default the node delivers history one frame at a time, as above. A reader that was offline for a while sees current values only after all of its history arrived, so it can change delivery with `metrics.subscribe` at any time in the session:
+
+```json
+{"type":"metrics.subscribe","request_id":"<uuid>","live":true,"window":8}
+```
+
+- `window` (1 to 8) is how many history frames may await `metrics.accepted` at once. Acknowledgements may arrive in any order; the cursor moves to the end of the longest run of acknowledged frames from the oldest one. When a frame is rejected with a retryable code, or no acknowledgement arrives within 30 seconds, the node waits a backoff and sends every unacknowledged frame again with its original `request_id`, so a reader may see a frame twice and must answer it again; only the first answer to a frame counts, and later answers to it are ignored. An acknowledgement that leaves no frame unanswered cancels the pending retry. A frame rejected with a terminal code is skipped, as with a window of 1.
+- `live: true` asks for `metrics.live` while history is behind: right after both node reports and then on every new sample, the node sends the newest sample as two `metrics.live` frames, `node` and `container`, each with exactly one sample. A live frame has no `request_id`, is not acknowledged, is never resent, and does not move the cursor. The same sample arrives again later in history with the same `sequence`, so a reader shows the live sample at once and drops the repeated one. Live frames are sent only while history is more than one sample behind; once it catches up, new samples arrive as `metrics.report` alone, so a reader that acknowledges within the sampling interval receives every sample once.
+
+The node answers `metrics.subscribe.accepted` with the settings now in effect, or `error` `invalid_message` for a `window` outside 1 to 8 or a malformed request, and `metrics_unavailable` on a node without a metrics store. The settings last until the session ends; a new session starts with a window of 1 and no live frames, so readers that never send `metrics.subscribe` keep the behaviour above. At most 8 distinct history frames of 512 KiB await acknowledgement per session, plus two live frames per second; a retry may put a second copy of each on the wire.
+
 
 ## Rules outside JSON Schema
 

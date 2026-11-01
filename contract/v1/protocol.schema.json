@@ -45,6 +45,9 @@
     { "$ref": "#/$defs/artifactUploadResult" },
     { "$ref": "#/$defs/metricsRollup" },
     { "$ref": "#/$defs/metricsQuery" },
+    { "$ref": "#/$defs/metricsSubscribe" },
+    { "$ref": "#/$defs/metricsSubscribeAccepted" },
+    { "$ref": "#/$defs/metricsLive" },
     { "$ref": "#/$defs/nodeNetworkRefresh" },
     { "$ref": "#/$defs/nodeProcessInspect" },
     { "$ref": "#/$defs/nodeProcessInspectResult" },
@@ -2671,6 +2674,44 @@
         "request_id": { "$ref": "#/$defs/uuid" },
         "from": { "$ref": "#/$defs/timestamp" },
         "to": { "$ref": "#/$defs/timestamp" }
+      }
+    },
+    "metricsSubscribe": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "request_id", "live", "window"],
+      "properties": {
+        "type": { "const": "metrics.subscribe" },
+        "request_id": { "$ref": "#/$defs/uuid" },
+        "live": { "type": "boolean" },
+        "window": { "type": "integer", "minimum": 1, "maximum": 8 }
+      }
+    },
+    "metricsSubscribeAccepted": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "request_id", "live", "window"],
+      "properties": {
+        "type": { "const": "metrics.subscribe.accepted" },
+        "request_id": { "$ref": "#/$defs/uuid" },
+        "live": { "type": "boolean" },
+        "window": { "type": "integer", "minimum": 1, "maximum": 8 }
+      }
+    },
+    "metricsLive": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "schema_version", "stream_id", "metric"],
+      "properties": {
+        "type": { "const": "metrics.live" },
+        "schema_version": { "const": 1 },
+        "stream_id": { "$ref": "#/$defs/uuid" },
+        "metric": {
+          "allOf": [
+            { "$ref": "#/$defs/metricSeries" },
+            { "properties": { "type": { "enum": ["node", "container"] }, "samples": { "maxItems": 1 } } }
+          ]
+        }
       }
     },
     "metricsSampleRecord": {

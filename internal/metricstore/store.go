@@ -231,6 +231,18 @@ func (s *Store) After(after uint64, limit int) []Item {
 	return result
 }
 
+// Latest returns the newest full sample, or nil when the store has none.
+func (s *Store) Latest() *Record {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if len(s.raw) == 0 {
+		return nil
+	}
+
+	return s.raw[len(s.raw)-1]
+}
+
 // Range returns up to limit items that overlap [from, to], oldest first.
 func (s *Store) Range(from, to time.Time, limit int) []Item {
 	s.mu.Lock()

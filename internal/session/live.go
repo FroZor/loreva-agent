@@ -138,7 +138,7 @@ func (r *Runner) maintain(
 				return err
 			}
 		case <-live.metricsReplyTimer.C:
-			live.scheduleMetricsRetry(events, "ack_timeout")
+			live.scheduleMetricsRetry(events, "", "ack_timeout")
 		case <-live.metricsRetryTimer.C:
 			if err := live.retryMetrics(readCtx, conn); err != nil {
 				return err
