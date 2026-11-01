@@ -35,7 +35,19 @@ const (
 type containerObservation struct {
 	metric        protocol.ContainerMetrics
 	raw           rawContainer
+	inspection    containerInspection
 	limitsUnknown bool
+}
+
+// containerInspection is what the collector needs from container.inspect.
+// It is read once per container start, not on every sample.
+type containerInspection struct {
+	known         bool
+	cpuLimitCores float64
+	pid           int
+	// hostNetwork marks a container that shares the host's network, whose
+	// traffic is the host's and is not counted for the container.
+	hostNetwork bool
 }
 
 type containerCollection struct {
@@ -56,20 +68,36 @@ func (collector *Collector) collectContainers(
 		return []protocol.ContainerMetrics{}
 	}
 
-	result, err := collector.dockerClient.ContainerList(ctx, client.ContainerListOptions{})
-	if err != nil {
-		collector.nextDockerProbe = time.Now().Add(dockerProbeInterval)
-		*issues = append(*issues, issue("containers.docker", classifyError(err)))
-		return []protocol.ContainerMetrics{}
+	now := time.Now()
+	if collector.docker.needsList(now, collector.listedAt) {
+		result, err := collector.dockerClient.ContainerList(ctx, client.ContainerListOptions{})
+		if err != nil {
+			collector.nextDockerProbe = now.Add(dockerProbeInterval)
+			*issues = append(*issues, issue("containers.docker", classifyError(err)))
+			return []protocol.ContainerMetrics{}
+		}
+		collector.listed = result.Items
+		collector.listedAt = now
 	}
 	collector.nextDockerProbe = time.Time{}
+	collector.inspectMu.Lock()
+	for id := range collector.docker.takeChanged() {
+		delete(collector.inspected, id)
+	}
+	collector.inspectMu.Unlock()
 
-	containers := result.Items
+	containers := collector.listed
 	truncated := false
 	if len(containers) > maxContainers {
 		containers = containers[:maxContainers]
 		truncated = true
 	}
+
+	keys := make(map[string]string, len(containers))
+	for _, summary := range containers {
+		keys[sanitize(summary.ID, 128)] = ContainerKey(containerName(summary), composeLabels(summary.Labels))
+	}
+	collector.containerKeys = keys
 
 	observations := make([]containerObservation, 0, len(containers))
 	nextRaw := make(map[string]rawContainer, len(containers))
@@ -88,6 +116,14 @@ func (collector *Collector) collectContainers(
 	}
 
 	collector.containers = nextRaw
+	collector.inspectMu.Lock()
+	listedIDs := keysByID(containers)
+	for id := range collector.inspected {
+		if _, listed := listedIDs[id]; !listed {
+			delete(collector.inspected, id)
+		}
+	}
+	collector.inspectMu.Unlock()
 	sort.Slice(observations, func(left, right int) bool {
 		return observations[left].metric.ContainerID < observations[right].metric.ContainerID
 	})
@@ -164,6 +200,23 @@ func (collector *Collector) observeContainer(
 	ctx context.Context,
 	summary container.Summary,
 ) (containerObservation, error) {
+	inspection := collector.inspect(ctx, summary.ID)
+	previous, hasPrevious := collector.containers[summary.ID]
+
+	if collector.cgroupRoot != "" && inspection.pid > 0 {
+		if reading, err := readContainerCgroup(ctx, collector.cgroupRoot, summary.ID, inspection.pid, !inspection.hostNetwork); err == nil {
+			current := reading.raw(collector.onlineCPUs())
+			current.cpuLimitCores = inspection.cpuLimitCores
+			metric := containerMetric(summary, previous, hasPrevious, current)
+			metric.CPU.ThrottledSecondsTotal = reading.throttledSeconds
+			metric.CPU.ThrottledPeriodsTotal = reading.throttledPeriods
+			metric.Memory = reading.memory(collector.hostMemory)
+			metric.PIDs = protocol.ContainerPIDMetrics{Current: reading.pids, Limit: reading.pidsLimit}
+
+			return containerObservation{metric: metric, raw: current, inspection: inspection, limitsUnknown: !inspection.known}, nil
+		}
+	}
+
 	statsResult, err := collector.dockerClient.ContainerStats(ctx, summary.ID, client.ContainerStatsOptions{
 		Stream:                false,
 		IncludePreviousSample: false,
@@ -182,28 +235,35 @@ func (collector *Collector) observeContainer(
 	}
 
 	current := rawDockerCounters(stats)
-	previous, hasPrevious := collector.containers[summary.ID]
-	limitsKnown := collector.readCPULimit(ctx, summary.ID, previous, hasPrevious, &current)
+	current.cpuLimitCores = inspection.cpuLimitCores
 
+	metric := containerMetric(summary, previous, hasPrevious, current)
+	metric.CPU.ThrottledSecondsTotal = float64(stats.CPUStats.ThrottlingData.ThrottledTime) / float64(time.Second)
+	metric.CPU.ThrottledPeriodsTotal = stats.CPUStats.ThrottlingData.ThrottledPeriods
+	metric.Memory = containerMemory(stats.MemoryStats)
+	metric.PIDs = protocol.ContainerPIDMetrics{
+		Current: stats.PidsStats.Current,
+		Limit:   stats.PidsStats.Limit,
+	}
+	if stats.PidsStats.Current == 0 && stats.NumProcs > 0 {
+		metric.PIDs.Current = uint64(stats.NumProcs)
+	}
+
+	return containerObservation{metric: metric, raw: current, inspection: inspection, limitsUnknown: !inspection.known}, nil
+}
+
+// containerMetric fills the identity and the rates of a container from two
+// readings of its counters.
+func containerMetric(summary container.Summary, previous rawContainer, hasPrevious bool, current rawContainer) protocol.ContainerMetrics {
 	metric := protocol.ContainerMetrics{
 		ContainerID: sanitize(summary.ID, 128),
 		Runtime:     "docker",
 		Name:        containerName(summary),
 		State:       sanitize(string(summary.State), 64),
 		CPU: protocol.ContainerCPUMetrics{
-			OnlineCPUs:            current.onlineCPUs,
-			LimitCores:            containerLimitCores(current),
-			ThrottledSecondsTotal: float64(stats.CPUStats.ThrottlingData.ThrottledTime) / float64(time.Second),
-			ThrottledPeriodsTotal: stats.CPUStats.ThrottlingData.ThrottledPeriods,
+			OnlineCPUs: current.onlineCPUs,
+			LimitCores: containerLimitCores(current),
 		},
-		Memory: containerMemory(stats.MemoryStats),
-		PIDs: protocol.ContainerPIDMetrics{
-			Current: stats.PidsStats.Current,
-			Limit:   stats.PidsStats.Limit,
-		},
-	}
-	if stats.PidsStats.Current == 0 && stats.NumProcs > 0 {
-		metric.PIDs.Current = uint64(stats.NumProcs)
 	}
 
 	if hasPrevious {
@@ -222,36 +282,51 @@ func (collector *Collector) observeContainer(
 		}
 	}
 
-	return containerObservation{metric: metric, raw: current, limitsUnknown: !limitsKnown}, nil
+	return metric
 }
 
-// readCPULimit sets the container's CPU limit on current. It reuses the
-// previous value while it is fresh and reports false when Docker could not
-// say what the limit is.
-func (collector *Collector) readCPULimit(
-	ctx context.Context,
-	containerID string,
-	previous rawContainer,
-	hasPrevious bool,
-	current *rawContainer,
-) bool {
-	if hasPrevious {
-		current.cpuLimitCores = previous.cpuLimitCores
-		current.limitsReadAt = previous.limitsReadAt
-		if current.readAt.Sub(previous.limitsReadAt) < containerLimitsInterval {
-			return true
+// inspectedContainer is a cached inspection and when it was read.
+type inspectedContainer struct {
+	containerInspection
+	readAt time.Time
+}
+
+func keysByID(containers []container.Summary) map[string]struct{} {
+	result := make(map[string]struct{}, len(containers))
+	for _, summary := range containers {
+		result[summary.ID] = struct{}{}
+	}
+
+	return result
+}
+
+// inspect returns the container's limits, process and network mode. They
+// are read once per container start; Docker events mark them stale, and a
+// failed read is tried again after containerLimitsInterval.
+func (collector *Collector) inspect(ctx context.Context, containerID string) containerInspection {
+	collector.inspectMu.Lock()
+	cached, found := collector.inspected[containerID]
+	collector.inspectMu.Unlock()
+	if found && (cached.known || time.Since(cached.readAt) < containerLimitsInterval) {
+		return cached.containerInspection
+	}
+
+	result := inspectedContainer{readAt: time.Now()}
+	inspection, err := collector.dockerClient.ContainerInspect(ctx, containerID, client.ContainerInspectOptions{})
+	if err == nil && inspection.Container.HostConfig != nil {
+		result.known = true
+		result.cpuLimitCores = cpuLimitCores(inspection.Container.HostConfig.Resources)
+		result.hostNetwork = inspection.Container.HostConfig.NetworkMode.IsHost()
+		if inspection.Container.State != nil {
+			result.pid = inspection.Container.State.Pid
 		}
 	}
 
-	inspection, err := collector.dockerClient.ContainerInspect(ctx, containerID, client.ContainerInspectOptions{})
-	if err != nil || inspection.Container.HostConfig == nil {
-		return false
-	}
+	collector.inspectMu.Lock()
+	collector.inspected[containerID] = result
+	collector.inspectMu.Unlock()
 
-	current.cpuLimitCores = cpuLimitCores(inspection.Container.HostConfig.Resources)
-	current.limitsReadAt = current.readAt
-
-	return true
+	return result.containerInspection
 }
 
 // cpuLimitCores returns the most logical CPUs a container may use according

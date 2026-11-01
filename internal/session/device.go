@@ -125,16 +125,12 @@ func ServeDevice(ctx context.Context, conn *websocket.Conn, config DeviceConfig)
 			if err := data.retryReport(readCtx, conn); err != nil {
 				return err
 			}
-		case <-data.metrics.wake:
-			if err := data.metricsStored(readCtx, conn); err != nil {
+		case <-data.metrics.tick.C:
+			if err := data.metrics.send(readCtx, conn); err != nil {
 				return err
 			}
-		case <-data.metricsReplyTimer.C:
-			data.scheduleMetricsRetry(events, "", "ack_timeout")
-		case <-data.metricsRetryTimer.C:
-			if err := data.retryMetrics(readCtx, conn); err != nil {
-				return err
-			}
+		case <-data.metrics.leaseEnd.C:
+			data.metrics.end()
 		case <-pingTimer.C:
 			if err := ping(ctx, conn); err != nil {
 				return err

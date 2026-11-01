@@ -145,14 +145,12 @@ func TestWSSContractRejectsInvalidFrames(t *testing.T) {
 		`{"type":"node.network.accepted"}`,
 		`{"type":"node.network.accepted","request_id":"not-a-uuid"}`,
 		`{"type":"node.specifications.report","schema_version":2}`,
-		`{"type":"metrics.accepted","request_id":"2ab9d734-7434-4cdf-bca4-6ce7a46cdd65","processed":1,"failed":0}`,
-		`{"type":"metrics.report","schema_version":1,"batch_id":"2ab9d734-7434-4cdf-bca4-6ce7a46cdd65"}`,
-		`{"type":"metrics.report","schema_version":1,"request_id":"2ab9d734-7434-4cdf-bca4-6ce7a46cdd65","stream_id":"d1b181c1-52ec-4d55-b2c9-b1428305b294","metric":{"type":"node","samples":[{"sequence":1,"observed_at":"2030-01-02T03:04:05Z","interval_ms":1000,"observation_scope":"host","plugin":{"values":{"players":1}}}]}}`,
-		`{"type":"metrics.report","schema_version":1,"request_id":"2ab9d734-7434-4cdf-bca4-6ce7a46cdd65","stream_id":"d1b181c1-52ec-4d55-b2c9-b1428305b294","metric":{"type":"plugin:minecraft","schema_version":1,"source_id":"container:server-1","samples":[{"sequence":1,"observed_at":"2030-01-02T03:04:05Z","interval_ms":1000,"observation_scope":"runtime","plugin":{"values":{}}}]}}`,
-		`{"type":"metrics.subscribe","request_id":"2ab9d734-7434-4cdf-bca4-6ce7a46cdd65","live":true,"window":9}`,
-		`{"type":"metrics.subscribe","request_id":"2ab9d734-7434-4cdf-bca4-6ce7a46cdd65","live":true}`,
-		`{"type":"metrics.live","schema_version":1,"request_id":"2ab9d734-7434-4cdf-bca4-6ce7a46cdd65","stream_id":"d1b181c1-52ec-4d55-b2c9-b1428305b294","metric":{"type":"container","samples":[{"sequence":1,"observed_at":"2030-01-02T03:04:05Z","interval_ms":1000,"observation_scope":"runtime","containers":{"items":[]}}]}}`,
-		`{"type":"metrics.live","schema_version":1,"stream_id":"d1b181c1-52ec-4d55-b2c9-b1428305b294","metric":{"type":"container","samples":[{"sequence":1,"observed_at":"2030-01-02T03:04:05Z","interval_ms":1000,"observation_scope":"runtime","containers":{"items":[]}},{"sequence":2,"observed_at":"2030-01-02T03:04:06Z","interval_ms":1000,"observation_scope":"runtime","containers":{"items":[]}}]}}`,
+		`{"type":"metrics.report","schema_version":1}`,
+		`{"type":"metrics.watch","request_id":"2ab9d734-7434-4cdf-bca4-6ce7a46cdd65","views":[],"interval_ms":500}`,
+		`{"type":"metrics.watch","request_id":"2ab9d734-7434-4cdf-bca4-6ce7a46cdd65","views":[{"scope":"everything"}]}`,
+		`{"type":"metrics.history","request_id":"2ab9d734-7434-4cdf-bca4-6ce7a46cdd65","range":"30d","series":["cpu.usage_percent"]}`,
+		`{"type":"metrics.history","request_id":"2ab9d734-7434-4cdf-bca4-6ce7a46cdd65","range":"1h","series":[]}`,
+		`{"type":"metrics.tick","version":1,"sequence":1,"observed_at":"2030-01-02T03:04:05Z","values":[1],"changes":{"0":1}}`,
 		`{"type":"sources.update","sources":{"generation":1,"expires_at":"2030-01-02T03:04:05Z","items":[{"url":"https://gateway.example/agent/v1/connect","priority":0,"weight":1,"security_profile":"pqc-hybrid-v1"}]}}`,
 	}
 
@@ -335,9 +333,6 @@ func contractMessageTypes() map[string]string {
 		"nodeNetworkReport":          NodeNetworkReportType,
 		"nodeNetworkAccepted":        NodeNetworkAcceptedType,
 		"nodeNetworkRejected":        NodeNetworkRejectedType,
-		"metricsReport":              MetricsReportType,
-		"metricsAccepted":            MetricsAcceptedType,
-		"metricsRejected":            MetricsRejectedType,
 		"portalCommand":              PortalCommandType,
 		"workloadPlanResult":         WorkloadPlanResultType,
 		"workloadOperationEvent":     WorkloadOperationEventType,
@@ -355,11 +350,16 @@ func contractMessageTypes() map[string]string {
 		"artifactUploadRequest":      ArtifactUploadRequestType,
 		"artifactUploadChunk":        ArtifactUploadChunkType,
 		"artifactUploadResult":       ArtifactUploadResultType,
-		"metricsRollup":              MetricsRollupType,
-		"metricsQuery":               MetricsQueryType,
-		"metricsSubscribe":           MetricsSubscribeType,
-		"metricsSubscribeAccepted":   MetricsSubscribeAcceptedType,
-		"metricsLive":                MetricsLiveType,
+		"metricsWatch":               MetricsWatchType,
+		"metricsWatchAccepted":       MetricsWatchAcceptedType,
+		"metricsSchema":              MetricsSchemaType,
+		"metricsTick":                MetricsTickType,
+		"metricsDetail":              MetricsDetailType,
+		"metricsEventPush":           MetricsEventType,
+		"metricsHistory":             MetricsHistoryType,
+		"metricsHistoryResult":       MetricsHistoryResultType,
+		"metricsEvents":              MetricsEventsType,
+		"metricsEventsResult":        MetricsEventsResultType,
 		"nodeNetworkRefresh":         NodeNetworkRefreshType,
 		"nodeProcessInspect":         NodeProcessInspectType,
 		"nodeProcessInspectResult":   NodeProcessInspectResultType,
@@ -367,7 +367,6 @@ func contractMessageTypes() map[string]string {
 		"containersListResult":       ContainersListResultType,
 		"containerInspect":           ContainerInspectType,
 		"containerInspectResult":     ContainerInspectResultType,
-		"metricsQueryResult":         MetricsQueryResultType,
 		"containerLogsOpen":          ContainerLogsOpenType,
 		"containerLogsOpened":        ContainerLogsOpenedType,
 		"streamCredit":               StreamCreditType,
@@ -413,14 +412,20 @@ func contractDTOs() map[string]reflect.Type {
 		"artifactUploadRequest":          reflect.TypeFor[ArtifactUploadRequest](),
 		"artifactUploadChunk":            reflect.TypeFor[ArtifactUploadChunk](),
 		"artifactUploadResult":           reflect.TypeFor[ArtifactUploadResult](),
-		"metricAggregate":                reflect.TypeFor[MetricAggregate](),
-		"metricRollup":                   reflect.TypeFor[MetricRollup](),
-		"metricRollupSeries":             reflect.TypeFor[MetricRollupSeries](),
-		"metricsRollup":                  reflect.TypeFor[MetricsRollupReport](),
-		"metricsQuery":                   reflect.TypeFor[MetricsQuery](),
-		"metricsSubscribe":               reflect.TypeFor[MetricsSubscribe](),
-		"metricsSubscribeAccepted":       reflect.TypeFor[MetricsSubscribeAccepted](),
-		"metricsLive":                    reflect.TypeFor[MetricsLive](),
+		"metricsView":                    reflect.TypeFor[MetricsView](),
+		"metricsWatch":                   reflect.TypeFor[MetricsWatch](),
+		"metricsWatchAccepted":           reflect.TypeFor[MetricsWatchAccepted](),
+		"metricColumn":                   reflect.TypeFor[MetricColumn](),
+		"metricsSchema":                  reflect.TypeFor[MetricsSchema](),
+		"metricsTick":                    reflect.TypeFor[MetricsTick](),
+		"metricsDetail":                  reflect.TypeFor[MetricsDetail](),
+		"metricEvent":                    reflect.TypeFor[MetricEvent](),
+		"metricsEventPush":               reflect.TypeFor[MetricsEventPush](),
+		"metricsHistory":                 reflect.TypeFor[MetricsHistory](),
+		"metricHistorySeries":            reflect.TypeFor[MetricHistorySeries](),
+		"metricsHistoryResult":           reflect.TypeFor[MetricsHistoryResult](),
+		"metricsEvents":                  reflect.TypeFor[MetricsEvents](),
+		"metricsEventsResult":            reflect.TypeFor[MetricsEventsResult](),
 		"nodeNetworkRefresh":             reflect.TypeFor[NodeNetworkRefresh](),
 		"nodeProcessInspect":             reflect.TypeFor[NodeProcessInspect](),
 		"nodeProcessInspectResult":       reflect.TypeFor[NodeProcessInspectResult](),
@@ -482,9 +487,6 @@ func contractDTOs() map[string]reflect.Type {
 		"fsWriteOpen":                    reflect.TypeFor[FSWriteOpen](),
 		"fsWriteReady":                   reflect.TypeFor[FSWriteReady](),
 		"fsWriteResult":                  reflect.TypeFor[FSWriteResult](),
-		"metricsSampleRecord":            reflect.TypeFor[MetricsSampleRecord](),
-		"metricsItem":                    reflect.TypeFor[MetricsItem](),
-		"metricsQueryResult":             reflect.TypeFor[MetricsQueryResult](),
 		"jwk":                            reflect.TypeFor[agentcrypto.JWK](),
 		"connectChallengeClaims":         reflect.TypeFor[Challenge](),
 		"agentInfo":                      reflect.TypeFor[AgentInfo](),
@@ -579,13 +581,6 @@ func contractDTOs() map[string]reflect.Type {
 		"containerPIDMetrics":            reflect.TypeFor[ContainerPIDMetrics](),
 		"containerMetrics":               reflect.TypeFor[ContainerMetrics](),
 		"nodeMetrics":                    reflect.TypeFor[NodeMetrics](),
-		"containerMetricSet":             reflect.TypeFor[ContainerMetricSet](),
-		"pluginMetricSet":                reflect.TypeFor[PluginMetricSet](),
-		"metricSample":                   reflect.TypeFor[MetricSample](),
-		"metricSeries":                   reflect.TypeFor[MetricSeries](),
-		"metricsReport":                  reflect.TypeFor[MetricsReport](),
-		"metricsAccepted":                reflect.TypeFor[MetricsAccepted](),
-		"metricsRejected":                reflect.TypeFor[NodeReportRejected](),
 	}
 }
 
@@ -602,6 +597,7 @@ func canonicalContractMessages() []any {
 	portalID := "d1b181c1-52ec-4d55-b2c9-b1428305b294"
 	pin := base64.StdEncoding.EncodeToString(make([]byte, 32))
 	syncPercent, criticalCelsius := 25.0, 100.0
+	tickValue, memoryTotal := 12.5, uint64(1<<30)
 	nodeMetrics := NodeMetrics{
 		CPU:    CPUMetrics{Total: CPUUtilizationMetrics{UsagePercent: 10, IdlePercent: 90}, Logical: []LogicalProcessorMetrics{}},
 		Memory: MemoryMetrics{TotalBytes: 1024, UsedBytes: 512, AvailableBytes: 512},
@@ -656,10 +652,6 @@ func canonicalContractMessages() []any {
 		Logging:     ContainerLogging{Driver: "json-file", Options: map[string]string{"max-size": "10m"}},
 		Compose:     &ContainerCompose{Project: "games", Service: "minecraft", ConfigFiles: []string{"/srv/games/compose.yaml"}},
 		SizeRWBytes: &sizeRW,
-	}
-	rollup := MetricRollup{
-		FirstSequence: 1, LastSequence: 60, Start: now, End: now.Add(time.Minute), Samples: 60,
-		Series: map[string]MetricAggregate{"cpu.total.usage_percent": {Min: 1, Avg: 2, Max: 90, MaxAt: now}},
 	}
 	jws := "e30.e30.A"
 	certificate := "-----BEGIN CERTIFICATE-----\nAA==\n-----END CERTIFICATE-----\n"
@@ -835,10 +827,6 @@ func canonicalContractMessages() []any {
 		},
 		FSWriteReady{Type: FSWriteReadyType, RequestID: requestID, StreamID: 4, Offset: 0},
 		FSWriteResult{Type: FSWriteResultType, RequestID: requestID, StreamID: 4, Entry: fsEntry},
-		MetricsRollupReport{
-			Type: MetricsRollupType, SchemaVersion: MetricsSchemaVersion, RequestID: requestID, StreamID: portalID,
-			Metric: MetricRollupSeries{Type: MetricTypeNode, Points: []MetricRollup{rollup}},
-		},
 		NodeNetworkRefresh{Type: NodeNetworkRefreshType, RequestID: requestID},
 		NodeProcessInspect{Type: NodeProcessInspectType, RequestID: requestID, PID: 812, StartedAt: now},
 		ContainersList{Type: ContainersListType, RequestID: requestID},
@@ -862,33 +850,40 @@ func canonicalContractMessages() []any {
 			PID: 812, ParentPID: 1, StartedAt: now, Name: "java", State: "sleeping", User: "minecraft",
 			CommandLine: []string{"java", "-Xmx4G", "-jar", "server.jar", "nogui"},
 		}},
-		MetricsQuery{Type: MetricsQueryType, RequestID: requestID, From: now.Add(-time.Hour), To: now},
-		MetricsSubscribe{Type: MetricsSubscribeType, RequestID: requestID, Live: true, Window: MaxMetricsWindow},
-		MetricsSubscribeAccepted{Type: MetricsSubscribeAcceptedType, RequestID: requestID, Live: true, Window: MaxMetricsWindow},
-		MetricsLive{
-			Type: MetricsLiveType, SchemaVersion: MetricsSchemaVersion, StreamID: portalID,
-			Metric: MetricSeries{Type: MetricTypeNode, Samples: []MetricSample{{
-				Sequence: 7, ObservedAt: now, IntervalMS: 1000, ObservationScope: ObservationScopeHost, Node: &nodeMetrics,
-			}}},
+		MetricsWatch{
+			Type: MetricsWatchType, RequestID: requestID, IntervalMS: 2000, LeaseS: 60,
+			Views: []MetricsView{{Scope: MetricsScopeOverview}, {Scope: MetricsScopeProcesses, Limit: 20}, {Scope: MetricsScopeContainer, ContainerID: containerID}},
 		},
-		MetricsLive{
-			Type: MetricsLiveType, SchemaVersion: MetricsSchemaVersion, StreamID: portalID,
-			Metric: MetricSeries{Type: MetricTypeContainer, Samples: []MetricSample{{
-				Sequence: 7, ObservedAt: now, IntervalMS: 1000, ObservationScope: ObservationScopeRuntime,
-				Containers: &ContainerMetricSet{Items: []ContainerMetrics{}},
-			}}},
+		MetricsWatchAccepted{
+			Type: MetricsWatchAcceptedType, RequestID: requestID, StreamID: portalID, IntervalMS: 2000, LeaseS: 60,
+			Views: []MetricsView{{Scope: MetricsScopeNode}},
 		},
-		MetricsQueryResult{
-			Type: MetricsQueryResultType, RequestID: requestID, StreamID: portalID,
-			Items: []MetricsItem{
-				{Node: &rollup, Container: &rollup},
-				{Sample: &MetricsSampleRecord{
-					Sequence: 1, ObservedAt: now, IntervalMS: 1000, ObservationScope: ObservationScopeHost,
-					Node: nodeMetrics, Containers: []ContainerMetrics{},
-				}},
+		MetricsSchema{
+			Type: MetricsSchemaType, StreamID: portalID, Version: 1, Full: true,
+			Columns: []MetricColumn{
+				{Index: 0, Key: "cpu.usage_percent", Unit: "%"},
+				{Index: 1, Key: "memory.used_bytes", Unit: "B", TotalBytes: &memoryTotal},
+				{Index: 2, Key: "container.cpu_percent@compose:games/minecraft/1", Unit: "%", Name: "minecraft", ContainerID: containerID, LimitCores: &limitCores},
 			},
-			NextFrom: &now,
 		},
+		MetricsSchema{Type: MetricsSchemaType, StreamID: portalID, Version: 2, Columns: []MetricColumn{}, Removed: []int{2}},
+		MetricsTick{Type: MetricsTickType, Version: 1, Sequence: 7, ObservedAt: now, Values: []*float64{&tickValue, nil, &tickValue}},
+		MetricsTick{Type: MetricsTickType, Version: 2, Sequence: 8, ObservedAt: now, Changes: map[string]*float64{"0": &tickValue}},
+		MetricsDetail{Type: MetricsDetailType, Scope: MetricsScopeNode, Sequence: 7, ObservedAt: now, Node: &nodeMetrics},
+		MetricsDetail{Type: MetricsDetailType, Scope: MetricsScopeProcesses, Sequence: 7, ObservedAt: now, Processes: &ProcessMetrics{Items: []ProcessMetric{}}},
+		MetricsEventPush{Type: MetricsEventType, Event: MetricEvent{
+			ID: 3, Kind: "cpu_high", Start: now, Ongoing: true, Peak: &tickValue, PeakAt: &now,
+		}},
+		MetricsHistory{Type: MetricsHistoryType, RequestID: requestID, Range: MetricsRange24h, Series: []string{"cpu.usage_percent"}, Since: &now},
+		MetricsHistoryResult{
+			Type: MetricsHistoryResultType, RequestID: requestID, StreamID: portalID, Range: MetricsRange24h, StepS: 300, Start: now, Points: 2,
+			Series:  []MetricHistorySeries{{Key: "cpu.usage_percent", Avg: []*float64{&tickValue, nil}, Max: []*float64{&tickValue, nil}}},
+			Unknown: []string{"fs.used_percent@/old"},
+		},
+		MetricsEvents{Type: MetricsEventsType, RequestID: requestID, From: now.Add(-time.Hour), To: now, Limit: 100},
+		MetricsEventsResult{Type: MetricsEventsResultType, RequestID: requestID, More: false, Events: []MetricEvent{{
+			ID: 4, Kind: "container_stopped", Subject: "compose:games/minecraft/1", Name: "minecraft", Start: now, End: &now, Detail: "exit_code=137",
+		}}},
 		NodeSpecificationsReport{
 			Type: NodeSpecificationsReportType, SchemaVersion: NodeSpecificationsSchemaVersion,
 			RequestID: requestID, ObservedAt: now, ObservationScope: ObservationScopeHost,
@@ -903,46 +898,5 @@ func canonicalContractMessages() []any {
 		},
 		NodeNetworkAccepted{Type: NodeNetworkAcceptedType, RequestID: requestID},
 		NodeReportRejected{Type: NodeNetworkRejectedType, RequestID: requestID, Code: "temporarily_unavailable"},
-		MetricsReport{
-			Type: MetricsReportType, SchemaVersion: MetricsSchemaVersion,
-			RequestID: requestID, StreamID: portalID,
-			Metric: MetricSeries{Type: MetricTypeNode, Samples: []MetricSample{{
-				Sequence: 1, ObservedAt: now, IntervalMS: 1000, ObservationScope: ObservationScopeHost,
-				Node: &NodeMetrics{
-					CPU: CPUMetrics{
-						Total:   CPUUtilizationMetrics{UsagePercent: 10, UserPercent: 7, SystemPercent: 3, IdlePercent: 90},
-						Logical: []LogicalProcessorMetrics{{ID: "cpu:0", UsagePercent: 10, UserPercent: 7, SystemPercent: 3, IdlePercent: 90}},
-					},
-					Memory:  MemoryMetrics{UsedBytes: 512, AvailableBytes: 512},
-					Storage: StorageMetrics{Devices: []StorageDeviceMetrics{}, Filesystems: []FilesystemMetrics{}},
-					Network: []NetworkMetrics{}, GPUs: []GPUMetrics{},
-					Processes: ProcessMetrics{Items: []ProcessMetric{}},
-				},
-			}}},
-		},
-		MetricsReport{
-			Type: MetricsReportType, SchemaVersion: MetricsSchemaVersion,
-			RequestID: requestID, StreamID: portalID,
-			Metric: MetricSeries{Type: MetricTypeContainer, Samples: []MetricSample{{
-				Sequence: 2, ObservedAt: now, IntervalMS: 1000, ObservationScope: ObservationScopeRuntime,
-				Containers: &ContainerMetricSet{Items: []ContainerMetrics{{
-					ContainerID: "container-1", Runtime: "docker", Name: "minecraft", State: "running",
-					CPU: ContainerCPUMetrics{UsagePercent: 161, OnlineCPUs: 4, LimitCores: &limitCores},
-				}}},
-			}}},
-		},
-		MetricsReport{
-			Type: MetricsReportType, SchemaVersion: MetricsSchemaVersion,
-			RequestID: requestID, StreamID: portalID,
-			Metric: MetricSeries{
-				Type: "plugin:minecraft", SchemaVersion: 1, SourceID: "container:server-1",
-				Samples: []MetricSample{{
-					Sequence: 3, ObservedAt: now, IntervalMS: 1000, ObservationScope: ObservationScopeRuntime,
-					Plugin: &PluginMetricSet{Values: map[string]float64{"players.online": 3}},
-				}},
-			},
-		},
-		MetricsAccepted{Type: MetricsAcceptedType, RequestID: requestID},
-		NodeReportRejected{Type: MetricsRejectedType, RequestID: requestID, Code: "temporarily_unavailable"},
 	}
 }

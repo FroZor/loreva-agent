@@ -6,6 +6,7 @@ import (
 	"errors"
 	"math"
 	"os"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -13,6 +14,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/moby/moby/api/types/container"
 	"github.com/moby/moby/client"
 	"github.com/shirou/gopsutil/v4/cpu"
 	"github.com/shirou/gopsutil/v4/disk"
@@ -44,7 +46,47 @@ type Snapshot struct {
 	Node             protocol.NodeMetrics
 	Containers       []protocol.ContainerMetrics
 	CollectionIssues []protocol.CollectionIssue
+	// ContainersFresh is false when Containers repeats the last reading
+	// because containers are read less often than the node.
+	ContainersFresh bool
+	// ContainerKeys maps a container ID to its stable identity: the compose
+	// project, service and replica, or the container name. A recreated
+	// container keeps its identity.
+	ContainerKeys map[string]string
+	// Interfaces maps the ID of each physical or primary interface to its
+	// name; bridges, veth pairs, loopback and tunnels are left out.
+	Interfaces map[string]string
+	// Disks lists the IDs of whole block devices; partitions, loop, zram
+	// and device-mapper devices are left out.
+	Disks []string
+	// ContainerEvents are the lifecycle changes Docker reported since the
+	// previous sample.
+	ContainerEvents []ContainerEvent
 }
+
+// Demand is what readers are watching right now. The collector reads the
+// costly parts only while someone looks at them.
+type Demand struct {
+	// Processes is how many processes a reader shows; zero skips the
+	// process table.
+	Processes int
+	// Containers reads containers on every sample instead of every
+	// idleContainerInterval.
+	Containers bool
+	// Detail reads GPUs and sensors on every sample.
+	Detail bool
+}
+
+const (
+	// idleContainerInterval is how often containers are read while nobody
+	// watches them; their history averages stay exact because they come
+	// from cumulative counters.
+	idleContainerInterval = 5 * time.Second
+	idleGPUInterval       = 5 * time.Second
+	idleSensorInterval    = 10 * time.Second
+	filesystemInterval    = 10 * time.Second
+	raidInterval          = 30 * time.Second
+)
 
 type rawCounters struct {
 	at        time.Time
@@ -78,7 +120,6 @@ type rawContainer struct {
 	onlineCPUs      uint32
 	cpuUnitNanos    uint64
 	cpuLimitCores   float64
-	limitsReadAt    time.Time
 	readBytes       uint64
 	writeBytes      uint64
 	readOperations  uint64
@@ -106,6 +147,29 @@ type Collector struct {
 	nextDockerProbe  time.Time
 	startupIssues    []protocol.CollectionIssue
 	users            userCache
+
+	// Cached readings of the parts read less often than every sample.
+	containerCache   []protocol.ContainerMetrics
+	containerKeys    map[string]string
+	containersReadAt time.Time
+	gpuCache         []protocol.GPUMetrics
+	gpuReadAt        time.Time
+	sensorCache      []protocol.SensorMetrics
+	sensorsReadAt    time.Time
+	filesystemCache  []protocol.FilesystemMetrics
+	filesystemIssues []protocol.CollectionIssue
+	filesystemsAt    time.Time
+	raidCache        []protocol.RAIDMetrics
+	raidReadAt       time.Time
+	docker           *dockerWatch
+	listed           []container.Summary
+	listedAt         time.Time
+	inspectMu        sync.Mutex
+	inspected        map[string]inspectedContainer
+	// cgroupRoot is the host's cgroup v2 mount, or "" when containers are
+	// read through the Docker stats API.
+	cgroupRoot string
+	hostMemory uint64
 }
 
 // NewCollector primes counter baselines without delaying the caller.
@@ -113,6 +177,9 @@ func NewCollector(ctx context.Context) *Collector {
 	environment := observation.Detect(ctx)
 	collector := &Collector{observationScope: environment.Scope}
 	collector.containers = make(map[string]rawContainer)
+	collector.inspected = make(map[string]inspectedContainer)
+	collector.docker = newDockerWatch()
+	collector.cgroupRoot = findCgroupRoot()
 	dockerClient, err := client.New(client.FromEnv)
 	if err != nil {
 		collector.startupIssues = append(collector.startupIssues, issue("containers.docker", classifyError(err)))
@@ -123,6 +190,7 @@ func NewCollector(ctx context.Context) *Collector {
 		}
 	} else {
 		collector.dockerClient = dockerClient
+		go collector.docker.run(ctx, dockerClient)
 	}
 
 	snapshot, err := specifications.Collect(ctx)
@@ -150,7 +218,8 @@ func (collector *Collector) Close() error {
 }
 
 // Collect returns a best-effort sample calculated from the preceding counters.
-func (collector *Collector) Collect(ctx context.Context) (Snapshot, error) {
+// demand decides which costly parts are read on this sample.
+func (collector *Collector) Collect(ctx context.Context, demand Demand) (Snapshot, error) {
 	collector.mu.Lock()
 	defer collector.mu.Unlock()
 
@@ -165,17 +234,34 @@ func (collector *Collector) Collect(ctx context.Context) (Snapshot, error) {
 	issues := append([]protocol.CollectionIssue(nil), collector.startupIssues...)
 	issues = append(issues, current.issues...)
 	node := protocol.NodeMetrics{
-		CPU:       collectCPU(ctx, collector.previous, current, &issues),
-		Memory:    collectMemory(current.swap, &issues),
-		Storage:   collectStorage(ctx, collector.previous.disk, current.disk, interval, &issues),
-		Network:   collectNetwork(collector.previous.network, current.network, interval, &issues),
-		GPUs:      collector.collectGPUs(ctx, &issues),
-		Sensors:   collectSensors(),
-		Processes: collectProcesses(ctx, collector.previous.processes, interval, &current, &collector.users, &issues),
+		CPU:     collectCPU(ctx, collector.previous, current, &issues),
+		Memory:  collectMemory(current.swap, &issues),
+		Storage: collectDevices(collector.previous.disk, current.disk, interval),
+		GPUs:    collector.cachedGPUs(ctx, observedAt, demand.Detail, &issues),
+		Sensors: collector.cachedSensors(observedAt, demand.Detail),
+	}
+	network, interfaceNames := collectNetwork(collector.previous.network, current.network, interval, &issues)
+	node.Network = network
+	node.Storage.Filesystems = collector.cachedFilesystems(ctx, observedAt, &issues)
+	node.Storage.RAID = collector.cachedRAID(observedAt)
+	if demand.Processes > 0 {
+		node.Processes = collectProcesses(ctx, collector.previous.processes, interval, &current, &collector.users, &issues)
+	} else {
+		// Without a reader the process table is not read, so the next
+		// reader starts with fresh baselines.
+		node.Processes = protocol.ProcessMetrics{Items: []protocol.ProcessMetric{}}
+		current.processes = nil
 	}
 	applyKernelRates(collector.previous.kernel, current.kernel, interval, &node.CPU, &node.Memory)
 	node.TCP = tcpMetrics(collector.previous.kernel, current.kernel, interval)
-	containers := collector.collectContainers(ctx, &issues)
+	collector.hostMemory = node.Memory.TotalBytes
+
+	fresh := demand.Containers || collector.containersReadAt.IsZero() ||
+		observedAt.Sub(collector.containersReadAt) >= idleContainerInterval-idleSlack
+	if fresh {
+		collector.containerCache = collector.collectContainers(ctx, &issues)
+		collector.containersReadAt = observedAt
+	}
 
 	collector.previous = current
 
@@ -184,9 +270,70 @@ func (collector *Collector) Collect(ctx context.Context) (Snapshot, error) {
 		Interval:         interval,
 		ObservationScope: collector.observationScope,
 		Node:             node,
-		Containers:       containers,
+		Containers:       collector.containerCache,
 		CollectionIssues: deduplicateIssues(issues),
+		ContainersFresh:  fresh,
+		ContainerKeys:    collector.containerKeys,
+		Interfaces:       keyInterfaces(interfaceNames),
+		Disks:            keyDisks(node.Storage.Devices),
+		ContainerEvents:  collector.docker.takeEvents(),
 	}, nil
+}
+
+// idleSlack lets a reading that is due within the next sample count as due,
+// so a 1-second ticker does not stretch a 5-second interval to 6.
+const idleSlack = 500 * time.Millisecond
+
+// onlineCPUs is the number of logical CPUs of the node.
+func (collector *Collector) onlineCPUs() uint32 {
+	if count := len(collector.previous.cpuPerCPU); count > 0 {
+		return uint32(count)
+	}
+
+	return uint32(max(runtime.NumCPU(), 1))
+}
+
+func due(last, now time.Time, every time.Duration) bool {
+	return last.IsZero() || now.Sub(last) >= every-idleSlack
+}
+
+func (collector *Collector) cachedGPUs(ctx context.Context, now time.Time, detail bool, issues *[]protocol.CollectionIssue) []protocol.GPUMetrics {
+	if detail || due(collector.gpuReadAt, now, idleGPUInterval) {
+		collector.gpuCache = collector.collectGPUs(ctx, issues)
+		collector.gpuReadAt = now
+	}
+
+	return collector.gpuCache
+}
+
+func (collector *Collector) cachedSensors(now time.Time, detail bool) []protocol.SensorMetrics {
+	if detail || due(collector.sensorsReadAt, now, idleSensorInterval) {
+		collector.sensorCache = collectSensors()
+		collector.sensorsReadAt = now
+	}
+
+	return collector.sensorCache
+}
+
+func (collector *Collector) cachedFilesystems(ctx context.Context, now time.Time, issues *[]protocol.CollectionIssue) []protocol.FilesystemMetrics {
+	if due(collector.filesystemsAt, now, filesystemInterval) {
+		var found []protocol.CollectionIssue
+		collector.filesystemCache = collectFilesystems(ctx, &found)
+		collector.filesystemIssues = found
+		collector.filesystemsAt = now
+	}
+	*issues = append(*issues, collector.filesystemIssues...)
+
+	return collector.filesystemCache
+}
+
+func (collector *Collector) cachedRAID(now time.Time) []protocol.RAIDMetrics {
+	if due(collector.raidReadAt, now, raidInterval) {
+		collector.raidCache = collectRAID()
+		collector.raidReadAt = now
+	}
+
+	return collector.raidCache
 }
 
 func collectRawCounters(ctx context.Context, observedAt time.Time, previousProcesses map[processKey]rawProcess) rawCounters {
@@ -346,16 +493,15 @@ func collectMemory(swap *mem.SwapMemoryStat, issues *[]protocol.CollectionIssue)
 	return result
 }
 
-func collectStorage(
-	ctx context.Context,
+// collectDevices returns the block-device rates; file systems and RAID are
+// read on their own schedule.
+func collectDevices(
 	previous, current map[string]disk.IOCountersStat,
 	interval time.Duration,
-	issues *[]protocol.CollectionIssue,
 ) protocol.StorageMetrics {
 	result := protocol.StorageMetrics{
 		Devices:     []protocol.StorageDeviceMetrics{},
 		Filesystems: []protocol.FilesystemMetrics{},
-		RAID:        collectRAID(),
 	}
 	seconds := interval.Seconds()
 	if seconds <= 0 {
@@ -390,6 +536,11 @@ func collectStorage(
 		})
 	}
 
+	return result
+}
+
+func collectFilesystems(ctx context.Context, issues *[]protocol.CollectionIssue) []protocol.FilesystemMetrics {
+	result := []protocol.FilesystemMetrics{}
 	partitions, err := disk.PartitionsWithContext(ctx, false)
 	if err != nil {
 		*issues = append(*issues, issue("storage.filesystems", classifyError(err)))
@@ -434,11 +585,11 @@ func collectStorage(
 			filesystem.InodesUsedPercent = &value
 		}
 
-		result.Filesystems = append(result.Filesystems, filesystem)
+		result = append(result, filesystem)
 	}
 
 	switch {
-	case len(result.Filesystems) == 0:
+	case len(result) == 0:
 		*issues = append(*issues, issue("storage.filesystems", "not_available"))
 	case unreadable > 0:
 		*issues = append(*issues, issue("storage.filesystems", "partial"))
@@ -451,10 +602,10 @@ func collectNetwork(
 	previous, current map[string]gnet.IOCountersStat,
 	interval time.Duration,
 	issues *[]protocol.CollectionIssue,
-) []protocol.NetworkMetrics {
+) ([]protocol.NetworkMetrics, map[string]string) {
 	seconds := interval.Seconds()
 	if seconds <= 0 {
-		return []protocol.NetworkMetrics{}
+		return []protocol.NetworkMetrics{}, nil
 	}
 
 	interfaces, err := hostnet.Interfaces()
@@ -473,6 +624,7 @@ func collectNetwork(
 	sort.Strings(names)
 
 	result := make([]protocol.NetworkMetrics, 0, min(len(names), maxNetworkInterfaces))
+	reported := make(map[string]string, len(names))
 	for _, name := range names {
 		currentInterface := current[name]
 		previousInterface, exists := previous[name]
@@ -488,6 +640,7 @@ func collectNetwork(
 		if interfaceID == "" {
 			interfaceID = "network-name:" + sanitizeID(name)
 		}
+		reported[interfaceID] = name
 
 		result = append(result, protocol.NetworkMetrics{
 			InterfaceID:        interfaceID,
@@ -504,7 +657,7 @@ func collectNetwork(
 		})
 	}
 
-	return result
+	return result, reported
 }
 
 // logicalCPUID names a processor as the specifications do, "cpu:<number>",

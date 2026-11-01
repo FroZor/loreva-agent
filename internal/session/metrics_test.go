@@ -2,9 +2,7 @@ package session
 
 import (
 	"context"
-	"errors"
-	"fmt"
-	"strings"
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -15,542 +13,244 @@ import (
 	"github.com/FroZor/loreva-agent/internal/protocol"
 )
 
-func testStore(t *testing.T, samples int, at time.Time) *metricstore.Store {
+const watchRequestID = "2ab9d734-7434-4cdf-bca4-6ce7a46cdd65"
+
+var watchBase = time.Date(2030, 1, 2, 3, 0, 0, 0, time.UTC)
+
+func watchSample(at time.Time, cpu float64, containers ...protocol.ContainerMetrics) metrics.Snapshot {
+	return metrics.Snapshot{
+		ObservedAt: at,
+		Interval:   time.Second,
+		Node: protocol.NodeMetrics{
+			CPU:       protocol.CPUMetrics{Total: protocol.CPUUtilizationMetrics{UsagePercent: cpu}},
+			Memory:    protocol.MemoryMetrics{TotalBytes: 1000, UsedBytes: 400},
+			Processes: protocol.ProcessMetrics{Items: []protocol.ProcessMetric{{PID: 1, CPUPercent: 1}, {PID: 2, CPUPercent: 9}, {PID: 3, CPUPercent: 5}}},
+		},
+		Containers:      containers,
+		ContainersFresh: true,
+	}
+}
+
+type watchHarness struct {
+	t       *testing.T
+	store   *metricstore.Store
+	x       *exchange
+	client  *websocket.Conn
+	server  *websocket.Conn
+	rejects []string
+}
+
+func newWatchHarness(t *testing.T) *watchHarness {
 	t.Helper()
 
 	store, err := metricstore.Open(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
-	for index := range samples {
-		err := store.Append(metrics.Snapshot{
-			ObservedAt:       at.Add(time.Duration(index) * time.Second),
-			Interval:         time.Second,
-			ObservationScope: protocol.ObservationScopeHost,
-			Node:             protocol.NodeMetrics{CPU: protocol.CPUMetrics{Total: protocol.CPUUtilizationMetrics{UsagePercent: 5}}},
-			Containers:       []protocol.ContainerMetrics{{ContainerID: "container:a", Name: "web"}},
-		})
-		if err != nil {
-			t.Fatal(err)
-		}
+	client, server := newWebSocketPair(t)
+	harness := &watchHarness{
+		t: t, store: store, client: client, server: server,
+		x: &exchange{collectors: Collectors{Metrics: store}, metrics: newMetricWatch(store, "test")},
 	}
+	t.Cleanup(harness.x.metrics.stop)
 
-	return store
+	return harness
 }
 
-// readFrame reads one frame the reporter wrote and returns its type and
-// request ID.
-func readFrame(t *testing.T, conn *websocket.Conn) (string, string, []byte) {
-	t.Helper()
+func (h *watchHarness) append(snapshot metrics.Snapshot) {
+	h.t.Helper()
 
-	conn.SetReadLimit(1 << 20)
-	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	if err := h.store.Append(snapshot); err != nil {
+		h.t.Fatal(err)
+	}
+}
+
+func (h *watchHarness) reject(_ context.Context, _, code, _ string) error {
+	h.rejects = append(h.rejects, code)
+
+	return nil
+}
+
+func (h *watchHarness) watch(views ...protocol.MetricsView) {
+	h.t.Helper()
+
+	if views == nil {
+		views = []protocol.MetricsView{}
+	}
+	data, err := json.Marshal(protocol.MetricsWatch{Type: protocol.MetricsWatchType, RequestID: watchRequestID, Views: views})
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	if err := h.x.watchMetrics(h.t.Context(), h.server, data, h.reject); err != nil {
+		h.t.Fatal(err)
+	}
+}
+
+// read decodes the next frame the session wrote, which must be of the
+// given type.
+func (h *watchHarness) read(messageType string, target any) {
+	h.t.Helper()
+
+	ctx, cancel := context.WithTimeout(h.t.Context(), 2*time.Second)
 	defer cancel()
 
-	_, data, err := conn.Read(ctx)
+	_, data, err := h.client.Read(ctx)
 	if err != nil {
-		t.Fatal(err)
+		h.t.Fatalf("read %s: %v", messageType, err)
 	}
-	messageType, err := protocol.MessageType(data)
-	if err != nil {
-		t.Fatal(err)
+	if got, _ := protocol.MessageType(data); got != messageType {
+		h.t.Fatalf("got %s, want %s: %s", got, messageType, data)
 	}
-
-	return messageType, extractRequestID(data), data
-}
-
-func extractRequestID(data []byte) string {
-	const marker = `"request_id":"`
-	text := string(data)
-	start := strings.Index(text, marker)
-	if start < 0 {
-		return ""
-	}
-	start += len(marker)
-
-	return text[start : start+36]
-}
-
-func accept(t *testing.T, reporter *metricReporter, requestID string) {
-	t.Helper()
-
-	if err := reporter.handleResponse([]byte(`{"type":"metrics.accepted","request_id":"` + requestID + `"}`)); err != nil {
-		t.Fatalf("accept %s: %v", requestID, err)
+	if err := protocol.DecodeStrict(data, target); err != nil {
+		h.t.Fatalf("decode %s: %v", messageType, err)
 	}
 }
 
-func TestMetricReporterSendsBatchesAndMovesTheCursor(t *testing.T) {
-	store := testStore(t, 70, time.Now().UTC())
-	reporter := newMetricReporter(store, "device:a")
-	agent, peer := newWebSocketPair(t)
+func TestWatchSendsTheCurrentValuesAtOnceAndThenOnlyChanges(t *testing.T) {
+	h := newWatchHarness(t)
+	h.append(watchSample(watchBase, 12.34))
 
-	// The first batch is 60 samples: a node frame, then a container frame.
-	if sent, err := reporter.writeNext(t.Context(), agent); err != nil || !sent {
-		t.Fatalf("writeNext() = %v, %v", sent, err)
+	h.watch(protocol.MetricsView{Scope: protocol.MetricsScopeOverview})
+
+	var accepted protocol.MetricsWatchAccepted
+	h.read(protocol.MetricsWatchAcceptedType, &accepted)
+	if accepted.IntervalMS != protocol.MetricsIntervalDefaultMS || accepted.StreamID != h.store.StreamID() {
+		t.Fatalf("accepted = %+v", accepted)
 	}
-	messageType, requestID, data := readFrame(t, peer)
-	var report protocol.MetricsReport
-	if err := protocol.DecodeStrict(data, &report); err != nil {
+	var schema protocol.MetricsSchema
+	h.read(protocol.MetricsSchemaType, &schema)
+	if !schema.Full || schema.Version != 1 || schema.Columns[0].Key != "cpu.usage_percent" || schema.Columns[0].Index != 0 {
+		t.Fatalf("schema = %+v", schema)
+	}
+	var tick protocol.MetricsTick
+	h.read(protocol.MetricsTickType, &tick)
+	if len(tick.Values) != len(schema.Columns) || *tick.Values[0] != 12.3 {
+		t.Fatalf("keyframe = %+v", tick)
+	}
+	if demand := h.store.Demand(); !demand.Containers || demand.Processes != 0 {
+		t.Fatalf("demand = %+v", demand)
+	}
+
+	// Only the value that changed is sent.
+	h.append(watchSample(watchBase.Add(time.Second), 50))
+	if err := h.x.metrics.send(t.Context(), h.server); err != nil {
 		t.Fatal(err)
 	}
-	if messageType != protocol.MetricsReportType || report.Metric.Type != protocol.MetricTypeNode || len(report.Metric.Samples) != 60 {
-		t.Fatalf("first frame = %s %s with %d samples", messageType, report.Metric.Type, len(report.Metric.Samples))
-	}
-	if report.StreamID != store.StreamID() || report.Metric.Samples[0].Sequence != 1 {
-		t.Fatalf("first frame stream %q, first sequence %d", report.StreamID, report.Metric.Samples[0].Sequence)
-	}
-
-	accept(t, reporter, requestID)
-	if store.Cursor("device:a") != 0 {
-		t.Fatal("the cursor moved before the container frame was acknowledged")
+	tick = protocol.MetricsTick{}
+	h.read(protocol.MetricsTickType, &tick)
+	if tick.Values != nil || len(tick.Changes) != 1 || *tick.Changes["0"] != 50 {
+		t.Fatalf("delta = %+v", tick)
 	}
 
-	if sent, err := reporter.writeNext(t.Context(), agent); err != nil || !sent {
-		t.Fatalf("second writeNext() = %v, %v", sent, err)
-	}
-	_, requestID, data = readFrame(t, peer)
-	if err := protocol.DecodeStrict(data, &report); err != nil {
+	// A new container adds columns without a full schema; when it goes
+	// its columns are removed and their indices are not reused.
+	web := protocol.ContainerMetrics{ContainerID: "a", Name: "web", CPU: protocol.ContainerCPUMetrics{UsagePercent: 7}}
+	h.append(watchSample(watchBase.Add(2*time.Second), 50, web))
+	if err := h.x.metrics.send(t.Context(), h.server); err != nil {
 		t.Fatal(err)
 	}
-	if report.Metric.Type != protocol.MetricTypeContainer || report.Metric.Samples[0].Containers.Items[0].Name != "web" {
-		t.Fatalf("second frame = %+v", report.Metric)
+	var added protocol.MetricsSchema
+	h.read(protocol.MetricsSchemaType, &added)
+	if added.Full || added.Version != 2 || len(added.Columns) == 0 || added.Columns[0].Index < len(schema.Columns) {
+		t.Fatalf("added = %+v", added)
 	}
-	accept(t, reporter, requestID)
-	if store.Cursor("device:a") != 60 {
-		t.Fatalf("cursor = %d after the batch, want 60", store.Cursor("device:a"))
+	h.read(protocol.MetricsTickType, &tick)
+	if tick.Version != 2 {
+		t.Fatalf("tick version = %d", tick.Version)
 	}
 
-	// A new reporter for the same reader continues from the stored cursor.
-	resumed := newMetricReporter(store, "device:a")
-	if sent, err := resumed.writeNext(t.Context(), agent); err != nil || !sent {
-		t.Fatal("resumed reporter sent nothing")
-	}
-	_, _, data = readFrame(t, peer)
-	if err := protocol.DecodeStrict(data, &report); err != nil {
+	h.append(watchSample(watchBase.Add(3*time.Second), 50))
+	if err := h.x.metrics.send(t.Context(), h.server); err != nil {
 		t.Fatal(err)
 	}
-	if report.Metric.Samples[0].Sequence != 61 || len(report.Metric.Samples) != 10 {
-		t.Fatalf("resumed frame starts at %d with %d samples", report.Metric.Samples[0].Sequence, len(report.Metric.Samples))
+	var removed protocol.MetricsSchema
+	h.read(protocol.MetricsSchemaType, &removed)
+	if len(removed.Removed) != len(added.Columns) || len(removed.Columns) != 0 {
+		t.Fatalf("removed = %+v", removed)
+	}
+
+	// An empty watch stops it and clears the demand.
+	h.watch()
+	accepted = protocol.MetricsWatchAccepted{}
+	h.read(protocol.MetricsWatchAcceptedType, &accepted)
+	if len(accepted.Views) != 0 || h.x.metrics.active {
+		t.Fatalf("stopped watch = %+v", accepted)
+	}
+	if demand := h.store.Demand(); demand != (metrics.Demand{}) {
+		t.Fatalf("demand after stop = %+v", demand)
 	}
 }
 
-func TestMetricReporterSendsRollupsForCompactedHistory(t *testing.T) {
-	start := time.Now().UTC().Add(-3 * time.Hour).Truncate(time.Hour)
-	store := testStore(t, 120, start)
-	if err := store.Maintain(time.Now(), true); err != nil {
-		t.Fatal(err)
-	}
+func TestWatchSendsTheTopProcessesAndAsksForThem(t *testing.T) {
+	h := newWatchHarness(t)
+	h.append(watchSample(watchBase, 5))
 
-	reporter := newMetricReporter(store, "portal:p")
-	agent, peer := newWebSocketPair(t)
+	h.watch(protocol.MetricsView{Scope: protocol.MetricsScopeProcesses, Limit: 2})
 
-	if sent, err := reporter.writeNext(t.Context(), agent); err != nil || !sent {
-		t.Fatalf("writeNext() = %v, %v", sent, err)
+	var accepted protocol.MetricsWatchAccepted
+	h.read(protocol.MetricsWatchAcceptedType, &accepted)
+	var detail protocol.MetricsDetail
+	h.read(protocol.MetricsDetailType, &detail)
+	items := detail.Processes.Items
+	if len(items) != 2 || items[0].PID != 2 || items[1].PID != 3 || !detail.Processes.Truncated {
+		t.Fatalf("processes = %+v", detail.Processes)
 	}
-	messageType, requestID, data := readFrame(t, peer)
-	if messageType != protocol.MetricsRollupType {
-		t.Fatalf("history frame type = %s, want %s", messageType, protocol.MetricsRollupType)
-	}
-
-	var rollup protocol.MetricsRollupReport
-	if err := protocol.DecodeStrict(data, &rollup); err != nil {
-		t.Fatal(err)
-	}
-	if len(rollup.Metric.Points) != 1 || rollup.Metric.Points[0].Samples != 120 {
-		t.Fatalf("rollup points = %+v", rollup.Metric.Points)
-	}
-
-	accept(t, reporter, requestID)
-	if _, err := reporter.writeNext(t.Context(), agent); err != nil {
-		t.Fatal(err)
-	}
-	_, requestID, _ = readFrame(t, peer)
-	accept(t, reporter, requestID)
-	if store.Cursor("portal:p") != 120 {
-		t.Fatalf("cursor = %d, want 120", store.Cursor("portal:p"))
+	if demand := h.store.Demand(); demand.Processes != 2 {
+		t.Fatalf("demand = %+v", demand)
 	}
 }
 
-func TestMetricReporterAcknowledgementRules(t *testing.T) {
-	store := testStore(t, 1, time.Now().UTC())
-	reporter := newMetricReporter(store, "device:a")
-	reporter.inflight = []*metricFrame{{requestID: "2ab9d734-7434-4cdf-bca4-6ce7a46cdd65"}}
-	acknowledgement := []byte(`{"type":"metrics.accepted","request_id":"2ab9d734-7434-4cdf-bca4-6ce7a46cdd65"}`)
+func TestWatchRejectsInvalidSettings(t *testing.T) {
+	h := newWatchHarness(t)
 
-	if err := reporter.handleResponse(acknowledgement); err != nil {
-		t.Fatal(err)
-	}
-	if reporter.awaiting() || len(reporter.inflight) != 0 {
-		t.Fatal("accepted frame remains in flight")
-	}
-	if err := reporter.handleResponse(acknowledgement); !errors.Is(err, errDuplicateMetricsAcknowledgement) {
-		t.Fatalf("duplicate acknowledgement error = %v", err)
-	}
-	if err := reporter.handleResponse([]byte(`{"type":"metrics.accepted","request_id":"9d1f4c4e-1b7f-4a57-9a43-3c0e3f0a9b11"}`)); err == nil ||
-		errors.Is(err, errDuplicateMetricsAcknowledgement) {
-		t.Fatalf("unknown acknowledgement error = %v", err)
-	}
-
-	reporter.inflight = []*metricFrame{{requestID: "6e0c1d91-5145-440f-bf97-d84db4f83644"}}
-	err := reporter.handleResponse([]byte(`{"type":"metrics.rejected","request_id":"6e0c1d91-5145-440f-bf97-d84db4f83644","code":"internal_error"}`))
-	var rejection *metricRejection
-	if !errors.As(err, &rejection) || rejection.requestID != "6e0c1d91-5145-440f-bf97-d84db4f83644" || !reporter.awaiting() {
-		t.Fatalf("rejection error = %v, awaiting = %v", err, reporter.awaiting())
-	}
-}
-
-func TestMetricReporterWindowMovesTheCursorOverAcknowledgedPrefix(t *testing.T) {
-	store := testStore(t, 130, time.Now().UTC())
-	reporter := newMetricReporter(store, "device:a")
-	reporter.subscribe(false, 4)
-	agent, peer := newWebSocketPair(t)
-
-	if sent, err := reporter.writeNext(t.Context(), agent); err != nil || !sent {
-		t.Fatalf("writeNext() = %v, %v", sent, err)
-	}
-	var requestIDs []string
-	for range 4 {
-		_, requestID, _ := readFrame(t, peer)
-		requestIDs = append(requestIDs, requestID)
-	}
-	if len(reporter.inflight) != 4 {
-		t.Fatalf("%d frames in flight, want the window of 4", len(reporter.inflight))
-	}
-
-	// The second batch is acknowledged first: the cursor waits for the first.
-	accept(t, reporter, requestIDs[3])
-	accept(t, reporter, requestIDs[2])
-	accept(t, reporter, requestIDs[1])
-	if store.Cursor("device:a") != 0 {
-		t.Fatalf("cursor = %d before the first frame was acknowledged", store.Cursor("device:a"))
-	}
-	accept(t, reporter, requestIDs[0])
-	if store.Cursor("device:a") != 120 || len(reporter.inflight) != 0 {
-		t.Fatalf("cursor = %d with %d frames in flight, want 120 and none", store.Cursor("device:a"), len(reporter.inflight))
-	}
-
-	if sent, err := reporter.writeNext(t.Context(), agent); err != nil || !sent {
-		t.Fatalf("third writeNext() = %v, %v", sent, err)
-	}
-	_, _, data := readFrame(t, peer)
-	var report protocol.MetricsReport
-	if err := protocol.DecodeStrict(data, &report); err != nil {
-		t.Fatal(err)
-	}
-	if report.Metric.Samples[0].Sequence != 121 {
-		t.Fatalf("third batch starts at %d, want 121", report.Metric.Samples[0].Sequence)
-	}
-}
-
-func TestMetricReporterSendsTheNewestSampleLiveWhileHistoryIsBehind(t *testing.T) {
-	store := testStore(t, 70, time.Now().UTC())
-	reporter := newMetricReporter(store, "device:a")
-	reporter.subscribe(true, 1)
-	agent, peer := newWebSocketPair(t)
-
-	if _, err := reporter.writeNext(t.Context(), agent); err != nil {
-		t.Fatal(err)
-	}
-	_, historyID, _ := readFrame(t, peer)
-	if err := reporter.writeLive(t.Context(), agent); err != nil {
-		t.Fatal(err)
-	}
-
-	for _, want := range []string{protocol.MetricTypeNode, protocol.MetricTypeContainer} {
-		messageType, requestID, data := readFrame(t, peer)
-		var live protocol.MetricsLive
-		if err := protocol.DecodeStrict(data, &live); err != nil {
-			t.Fatal(err)
-		}
-		if messageType != protocol.MetricsLiveType || requestID != "" || live.Metric.Type != want ||
-			len(live.Metric.Samples) != 1 || live.Metric.Samples[0].Sequence != 70 {
-			t.Fatalf("live frame = %s %s with %d samples", messageType, live.Metric.Type, len(live.Metric.Samples))
-		}
-	}
-	if store.Cursor("device:a") != 0 {
-		t.Fatal("a live frame moved the cursor")
-	}
-
-	// The same newest sample is not sent live twice.
-	if err := reporter.writeLive(t.Context(), agent); err != nil {
-		t.Fatal(err)
-	}
-
-	accept(t, reporter, historyID)
-	if _, err := reporter.writeNext(t.Context(), agent); err != nil {
-		t.Fatal(err)
-	}
-	_, requestID, _ := readFrame(t, peer)
-	if requestID == "" {
-		t.Fatal("a second live frame was sent for the same sample")
-	}
-	accept(t, reporter, requestID)
-	for range 2 {
-		if _, err := reporter.writeNext(t.Context(), agent); err != nil {
-			t.Fatal(err)
-		}
-		_, requestID, _ = readFrame(t, peer)
-		accept(t, reporter, requestID)
-	}
-	if store.Cursor("device:a") != 70 {
-		t.Fatalf("cursor = %d, want 70", store.Cursor("device:a"))
-	}
-
-	// History has caught up: a new sample goes out as history, not live.
-	if err := store.Append(metrics.Snapshot{ObservedAt: time.Now().UTC(), Interval: time.Second}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := reporter.writeNext(t.Context(), agent); err != nil {
-		t.Fatal(err)
-	}
-	if err := reporter.writeLive(t.Context(), agent); err != nil {
-		t.Fatal(err)
-	}
-	messageType, _, _ := readFrame(t, peer)
-	if messageType != protocol.MetricsReportType {
-		t.Fatalf("caught-up sample went out as %s", messageType)
-	}
-}
-
-func TestMetricReporterResendsUnacknowledgedFramesOnce(t *testing.T) {
-	store := testStore(t, 130, time.Now().UTC())
-	reporter := newMetricReporter(store, "device:a")
-	reporter.subscribe(false, 4)
-	agent, peer := newWebSocketPair(t)
-
-	if _, err := reporter.writeNext(t.Context(), agent); err != nil {
-		t.Fatal(err)
-	}
-	var requestIDs []string
-	for range 4 {
-		_, requestID, _ := readFrame(t, peer)
-		requestIDs = append(requestIDs, requestID)
-	}
-	accept(t, reporter, requestIDs[0])
-
-	if _, scheduled := reporter.scheduleRetry(); !scheduled {
-		t.Fatal("the first rejection did not schedule a retry")
-	}
-	if _, scheduled := reporter.scheduleRetry(); scheduled {
-		t.Fatal("a burst of rejections scheduled a second retry")
-	}
-	if sent, _ := reporter.writeNext(t.Context(), agent); sent {
-		t.Fatal("new frames were sent while a retry was pending")
-	}
-
-	if err := reporter.resend(t.Context(), agent); err != nil {
-		t.Fatal(err)
-	}
-	for _, want := range requestIDs[1:] {
-		if _, requestID, _ := readFrame(t, peer); requestID != want {
-			t.Fatalf("resent request %s, want %s", requestID, want)
-		}
-	}
-}
-
-func TestMetricReporterIgnoresSecondAnswersToResentFrames(t *testing.T) {
-	store := testStore(t, 1, time.Now().UTC())
-	reporter := newMetricReporter(store, "device:a")
-	const (
-		acceptedID  = "2ab9d734-7434-4cdf-bca4-6ce7a46cdd65"
-		discardedID = "6e0c1d91-5145-440f-bf97-d84db4f83644"
-	)
-	reporter.inflight = []*metricFrame{{requestID: acceptedID}, {requestID: discardedID}}
-
-	accept(t, reporter, acceptedID)
-	reporter.discard(discardedID)
-
-	for _, answer := range []string{
-		`{"type":"metrics.rejected","request_id":"` + acceptedID + `","code":"busy"}`,
-		`{"type":"metrics.accepted","request_id":"` + discardedID + `"}`,
-		`{"type":"metrics.rejected","request_id":"` + discardedID + `","code":"invalid_report"}`,
+	for _, raw := range []string{
+		`{"type":"metrics.watch","request_id":"` + watchRequestID + `","views":[{"scope":"overview"}],"interval_ms":200}`,
+		`{"type":"metrics.watch","request_id":"` + watchRequestID + `","views":[{"scope":"container"}]}`,
+		`{"type":"metrics.watch","request_id":"` + watchRequestID + `","views":[{"scope":"all"}]}`,
+		`{"type":"metrics.watch","request_id":"` + watchRequestID + `"}`,
+		`{"type":"metrics.watch","request_id":"not-a-uuid","views":[]}`,
 	} {
-		if err := reporter.handleResponse([]byte(answer)); !errors.Is(err, errDuplicateMetricsAcknowledgement) {
-			t.Fatalf("%s: error = %v, want a duplicate", answer, err)
-		}
-	}
-}
-
-func TestMetricReporterCancelsRetryWhenEveryFrameIsAnswered(t *testing.T) {
-	store := testStore(t, 1, time.Now().UTC())
-	reporter := newMetricReporter(store, "device:a")
-	reporter.inflight = []*metricFrame{{requestID: "2ab9d734-7434-4cdf-bca4-6ce7a46cdd65"}}
-
-	if _, scheduled := reporter.scheduleRetry(); !scheduled {
-		t.Fatal("retry was not scheduled")
-	}
-	if reporter.cancelRetry() {
-		t.Fatal("retry was cancelled while a frame awaits its answer")
-	}
-	accept(t, reporter, "2ab9d734-7434-4cdf-bca4-6ce7a46cdd65")
-	if !reporter.cancelRetry() || reporter.retrying {
-		t.Fatal("retry stayed scheduled after the late acknowledgement")
-	}
-}
-
-func TestMetricReporterSendsNoLiveFrameForTheNextHistorySample(t *testing.T) {
-	store := testStore(t, 3, time.Now().UTC())
-	reporter := newMetricReporter(store, "device:a")
-	reporter.subscribe(true, 1)
-	agent, peer := newWebSocketPair(t)
-
-	if _, err := reporter.writeNext(t.Context(), agent); err != nil {
-		t.Fatal(err)
-	}
-	readFrame(t, peer)
-
-	// One sample arrives while the batch is still unacknowledged: it is the
-	// next history sample, not a reason for a live frame.
-	if err := store.Append(metrics.Snapshot{ObservedAt: time.Now().UTC(), Interval: time.Second}); err != nil {
-		t.Fatal(err)
-	}
-	if err := reporter.writeLive(t.Context(), agent); err != nil {
-		t.Fatal(err)
-	}
-	if reporter.liveSent != 0 {
-		t.Fatalf("live frame sent for sequence %d", reporter.liveSent)
-	}
-}
-
-func TestSubscribeMetricsValidatesAndAppliesSettings(t *testing.T) {
-	store := testStore(t, 70, time.Now().UTC())
-	x := &exchange{
-		collectors:        Collectors{Metrics: store},
-		reports:           &nodeReporter{state: &nodeReportState{complete: true}},
-		metrics:           newMetricReporter(store, "device:a"),
-		metricsReplyTimer: newStoppedTimer(),
-		metricsRetryTimer: newStoppedTimer(),
-	}
-	agent, peer := newWebSocketPair(t)
-	var rejected string
-	reject := func(_ context.Context, _, code, _ string) error {
-		rejected = code
-		return nil
-	}
-
-	for _, frame := range []string{
-		`{"type":"metrics.subscribe","request_id":"2ab9d734-7434-4cdf-bca4-6ce7a46cdd65","live":true,"window":9}`,
-		`{"type":"metrics.subscribe","request_id":"2ab9d734-7434-4cdf-bca4-6ce7a46cdd65","live":true,"window":0}`,
-		`{"type":"metrics.subscribe","request_id":"not-a-uuid","live":true,"window":2}`,
-		`{"type":"metrics.subscribe","request_id":"2ab9d734-7434-4cdf-bca4-6ce7a46cdd65","live":true,"window":2,"extra":1}`,
-	} {
-		rejected = ""
-		if handled, err := x.handleRequest(t.Context(), agent, protocol.MetricsSubscribeType, []byte(frame), reject); !handled || err != nil {
-			t.Fatalf("handleRequest(%s) = %v, %v", frame, handled, err)
-		}
-		if rejected != "invalid_message" {
-			t.Fatalf("%s was answered with %q, want invalid_message", frame, rejected)
-		}
-	}
-
-	request := `{"type":"metrics.subscribe","request_id":"2ab9d734-7434-4cdf-bca4-6ce7a46cdd65","live":true,"window":2}`
-	if _, err := x.handleRequest(t.Context(), agent, protocol.MetricsSubscribeType, []byte(request), reject); err != nil {
-		t.Fatal(err)
-	}
-	defer stopTimer(x.metricsReplyTimer)
-
-	_, _, data := readFrame(t, peer)
-	var accepted protocol.MetricsSubscribeAccepted
-	if err := protocol.DecodeStrict(data, &accepted); err != nil {
-		t.Fatal(err)
-	}
-	if accepted.Type != protocol.MetricsSubscribeAcceptedType || !accepted.Live || accepted.Window != 2 {
-		t.Fatalf("subscription answer = %+v", accepted)
-	}
-
-	// The window of two history frames goes out, then the newest sample live.
-	want := []string{protocol.MetricsReportType, protocol.MetricsReportType, protocol.MetricsLiveType, protocol.MetricsLiveType}
-	for _, wantType := range want {
-		if messageType, _, _ := readFrame(t, peer); messageType != wantType {
-			t.Fatalf("frame type = %s, want %s", messageType, wantType)
-		}
-	}
-}
-
-func TestQueryResultReturnsStoredHistory(t *testing.T) {
-	now := time.Now().UTC()
-	store := testStore(t, 30, now.Add(-time.Minute))
-
-	result, err := queryResult(store, "2ab9d734-7434-4cdf-bca4-6ce7a46cdd65", now.Add(-2*time.Minute), now)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(result.Items) != 30 || result.Items[0].Sample == nil || result.NextFrom != nil {
-		t.Fatalf("query returned %d items, next %v", len(result.Items), result.NextFrom)
-	}
-}
-
-func TestMetricFramesSendAnEmptyProcessListAfterTheStoreDroppedIt(t *testing.T) {
-	store := testStore(t, 1, time.Now().UTC())
-	items := store.After(0, 1)
-
-	series := sampleSeries(protocol.MetricTypeNode, items)
-	item := toProtocolItem(items[0])
-	if series.Samples[0].Node.Processes.Items == nil || item.Sample.Node.Processes.Items == nil {
-		t.Fatal("a stored sample without a process list is sent with processes.items null")
-	}
-}
-
-func TestMetricReporterSplitsAWindowTooLargeForOneFrame(t *testing.T) {
-	store, err := metricstore.Open(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	containers := make([]protocol.ContainerMetrics, 300)
-	for index := range containers {
-		containers[index] = protocol.ContainerMetrics{ContainerID: fmt.Sprintf("container:%d", index), Name: "web", State: "running"}
-	}
-	start := time.Now().UTC().Add(-3 * time.Hour).Truncate(time.Hour)
-	for index := range 60 {
-		err := store.Append(metrics.Snapshot{
-			ObservedAt: start.Add(time.Duration(index) * time.Second), Interval: time.Second,
-			ObservationScope: protocol.ObservationScopeHost, Containers: containers,
-		})
-		if err != nil {
+		h.rejects = nil
+		if err := h.x.watchMetrics(t.Context(), h.server, []byte(raw), h.reject); err != nil {
 			t.Fatal(err)
 		}
+		if len(h.rejects) != 1 || h.rejects[0] != "invalid_message" {
+			t.Errorf("%s: rejects = %v", raw, h.rejects)
+		}
 	}
-	if err := store.Maintain(time.Now(), true); err != nil {
+}
+
+func TestHistoryAndEventsAreAnsweredInOneFrame(t *testing.T) {
+	h := newWatchHarness(t)
+	for offset := range 30 {
+		h.append(watchSample(watchBase.Add(time.Duration(offset)*time.Second), 20))
+	}
+
+	request := `{"type":"metrics.history","request_id":"` + watchRequestID + `","range":"5m","series":["cpu.usage_percent"]}`
+	if err := h.x.answerMetricsHistory(t.Context(), h.server, []byte(request), h.reject); err != nil {
 		t.Fatal(err)
 	}
+	var history protocol.MetricsHistoryResult
+	h.read(protocol.MetricsHistoryResultType, &history)
+	if history.RequestID != watchRequestID || history.StepS != 1 || len(history.Series) != 1 || len(history.Series[0].Avg) != 300 {
+		t.Fatalf("history = %+v", history)
+	}
 
-	reporter := newMetricReporter(store, "device:a")
-	reporter.subscribe(false, protocol.MaxMetricsWindow)
-	agent, peer := newWebSocketPair(t)
-	if _, err := reporter.writeNext(t.Context(), agent); err != nil {
+	request = `{"type":"metrics.history","request_id":"` + watchRequestID + `","range":"30d","series":["cpu.usage_percent"]}`
+	if err := h.x.answerMetricsHistory(t.Context(), h.server, []byte(request), h.reject); err != nil {
 		t.Fatal(err)
 	}
-
-	series := 0
-	containerFrames := 0
-	for len(reporter.inflight) > 0 {
-		_, requestID, data := readFrame(t, peer)
-		if len(data) > maxMetricsReportSize {
-			t.Fatalf("frame of %d bytes exceeds the limit", len(data))
-		}
-		var frame protocol.MetricsRollupReport
-		if err := protocol.DecodeStrict(data, &frame); err != nil {
-			t.Fatal(err)
-		}
-		point := frame.Metric.Points[0]
-		if len(frame.Metric.Points) != 1 || point.FirstSequence != 1 || point.LastSequence != 60 || len(point.Series) > maxRollupSeries {
-			t.Fatalf("part has %d points, sequences %d-%d, %d series", len(frame.Metric.Points), point.FirstSequence, point.LastSequence, len(point.Series))
-		}
-		if frame.Metric.Type == protocol.MetricTypeContainer {
-			containerFrames++
-			series += len(point.Series)
-		}
-
-		accept(t, reporter, requestID)
-		if _, err := reporter.writeNext(t.Context(), agent); err != nil {
-			t.Fatal(err)
-		}
+	if len(h.rejects) != 1 || h.rejects[0] != "invalid_range" {
+		t.Fatalf("rejects = %v", h.rejects)
 	}
 
-	if containerFrames < 2 || series != len(store.After(0, 1)[0].Container.Series) {
-		t.Fatalf("%d container parts carry %d series", containerFrames, series)
+	request = `{"type":"metrics.events","request_id":"` + watchRequestID + `","from":"2030-01-02T00:00:00Z","to":"2030-01-02T04:00:00Z"}`
+	if err := h.x.answerMetricsEvents(t.Context(), h.server, []byte(request), h.reject); err != nil {
+		t.Fatal(err)
 	}
-	if store.Cursor("device:a") != 60 {
-		t.Fatalf("cursor = %d after every part, want 60", store.Cursor("device:a"))
+	var events protocol.MetricsEventsResult
+	h.read(protocol.MetricsEventsResultType, &events)
+	if events.RequestID != watchRequestID || events.Events == nil {
+		t.Fatalf("events = %+v", events)
 	}
 }

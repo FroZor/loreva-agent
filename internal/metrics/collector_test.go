@@ -159,15 +159,16 @@ func TestCollectStorageAveragesTheQueue(t *testing.T) {
 	previous := map[string]disk.IOCountersStat{"sda": {WeightedIO: 1000, IopsInProgress: 0}}
 	current := map[string]disk.IOCountersStat{"sda": {WeightedIO: 3500, IopsInProgress: 0}}
 
-	var issues []protocol.CollectionIssue
-	storage := collectStorage(t.Context(), previous, current, time.Second, &issues)
+	storage := collectDevices(previous, current, time.Second)
 
 	assertClose(t, "queue depth", storage.Devices[0].QueueDepth, 2.5)
 
 	// File systems come from the host this test runs on; whatever it
 	// mounts, every file system keeps its own identifier.
-	seen := make(map[string]bool, len(storage.Filesystems))
-	for _, filesystem := range storage.Filesystems {
+	var issues []protocol.CollectionIssue
+	filesystems := collectFilesystems(t.Context(), &issues)
+	seen := make(map[string]bool, len(filesystems))
+	for _, filesystem := range filesystems {
 		if seen[filesystem.FilesystemID] {
 			t.Fatalf("file system ID %s is used twice", filesystem.FilesystemID)
 		}
@@ -185,12 +186,40 @@ func TestCollectNetworkBoundsInterfaces(t *testing.T) {
 	}
 
 	var issues []protocol.CollectionIssue
-	network := collectNetwork(previous, current, time.Second, &issues)
+	network, _ := collectNetwork(previous, current, time.Second, &issues)
 
 	if len(network) != maxNetworkInterfaces {
 		t.Fatalf("%d interfaces, want %d", len(network), maxNetworkInterfaces)
 	}
 	if !slices.Contains(issues, protocol.CollectionIssue{Component: "network", Code: "truncated"}) {
 		t.Fatalf("issues = %+v, want network truncated", issues)
+	}
+}
+
+func TestKeySeriesLeaveOutVirtualDevices(t *testing.T) {
+	interfaces := keyInterfaces(map[string]string{
+		"network:1": "lo", "network:2": "eth0", "network:3": "veth1a2b", "network:4": "docker0",
+		"network:5": "br-3f2a", "network:6": "eth0.100", "network:7": "wlp2s0",
+	})
+	if len(interfaces) != 3 || interfaces["network:2"] != "eth0" || interfaces["network:6"] != "eth0.100" || interfaces["network:7"] != "wlp2s0" {
+		t.Fatalf("interfaces = %v", interfaces)
+	}
+
+	var devices []protocol.StorageDeviceMetrics
+	for _, name := range []string{"sda", "sda1", "nvme0n1", "nvme0n1p2", "loop3", "dm-0", "zram0", "vdb", "mmcblk0p1", "md0"} {
+		devices = append(devices, protocol.StorageDeviceMetrics{DeviceID: "storage:" + name})
+	}
+	if disks := keyDisks(devices); !slices.Equal(disks, []string{"storage:sda", "storage:nvme0n1", "storage:vdb", "storage:md0"}) {
+		t.Fatalf("disks = %v", disks)
+	}
+}
+
+func TestContainerKeyFollowsTheComposeService(t *testing.T) {
+	labels := map[string]string{composeProject: "shop", composeService: "db", composeNumber: "2"}
+	if key := ContainerKey("shop-db-2", labels); key != "compose:shop/db/2" {
+		t.Fatalf("compose key = %q", key)
+	}
+	if key := ContainerKey("/adminer", nil); key != "name:adminer" {
+		t.Fatalf("name key = %q", key)
 	}
 }

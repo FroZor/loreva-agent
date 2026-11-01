@@ -16,8 +16,6 @@ import (
 )
 
 const (
-	// maxQueryRange bounds one metrics.query; the store keeps a week anyway.
-	maxQueryRange     = 8 * 24 * time.Hour
 	nodeRequestWrites = 10 * time.Second
 	// maxRequestAnswer bounds one answer frame, like a node report.
 	maxRequestAnswer = 512 * 1024
@@ -43,10 +41,12 @@ func (x *exchange) handleRequest(
 	reject rejectFunc,
 ) (bool, error) {
 	switch messageType {
-	case protocol.MetricsQueryType:
-		return true, x.answerMetricsQuery(ctx, conn, data, reject)
-	case protocol.MetricsSubscribeType:
-		return true, x.subscribeMetrics(ctx, conn, data, reject)
+	case protocol.MetricsWatchType:
+		return true, x.watchMetrics(ctx, conn, data, reject)
+	case protocol.MetricsHistoryType:
+		return true, x.answerMetricsHistory(ctx, conn, data, reject)
+	case protocol.MetricsEventsType:
+		return true, x.answerMetricsEvents(ctx, conn, data, reject)
 	case protocol.NodeNetworkRefreshType:
 		return true, x.refreshNetwork(ctx, data, reject)
 	case protocol.NodeProcessInspectType:
@@ -58,59 +58,6 @@ func (x *exchange) handleRequest(
 	default:
 		return false, nil
 	}
-}
-
-// subscribeMetrics applies the reader's delivery settings and sends what
-// they allow right away.
-func (x *exchange) subscribeMetrics(ctx context.Context, conn *websocket.Conn, data []byte, reject rejectFunc) error {
-	var request protocol.MetricsSubscribe
-	if err := protocol.DecodeStrict(data, &request); err != nil || !agentcrypto.ValidUUID(request.RequestID) ||
-		request.Window < 1 || request.Window > protocol.MaxMetricsWindow {
-		return reject(ctx, request.RequestID, "invalid_message",
-			fmt.Sprintf("metrics.subscribe needs a UUID request_id, live, and a window of 1 to %d", protocol.MaxMetricsWindow))
-	}
-	if x.collectors.Metrics == nil {
-		return reject(ctx, request.RequestID, "metrics_unavailable", "this node keeps no metrics")
-	}
-
-	x.metrics.subscribe(request.Live, request.Window)
-
-	writeCtx, cancel := context.WithTimeout(ctx, nodeRequestWrites)
-	err := wsframe.WriteJSON(writeCtx, conn, protocol.MetricsSubscribeAccepted{
-		Type:      protocol.MetricsSubscribeAcceptedType,
-		RequestID: request.RequestID,
-		Live:      request.Live,
-		Window:    request.Window,
-	})
-	cancel()
-	if err != nil {
-		return fmt.Errorf("answer metrics subscription: %w", err)
-	}
-
-	return x.sendMetrics(ctx, conn)
-}
-
-func (x *exchange) answerMetricsQuery(ctx context.Context, conn *websocket.Conn, data []byte, reject rejectFunc) error {
-	var query protocol.MetricsQuery
-	if err := protocol.DecodeStrict(data, &query); err != nil || !agentcrypto.ValidUUID(query.RequestID) {
-		return reject(ctx, "", "invalid_message", "metrics.query needs a UUID request_id, from, and to")
-	}
-	if query.To.Before(query.From) || query.To.Sub(query.From) > maxQueryRange {
-		return reject(ctx, query.RequestID, "invalid_range", "to must not be before from, and the range must be at most 8 days")
-	}
-	if x.collectors.Metrics == nil {
-		return reject(ctx, query.RequestID, "metrics_unavailable", "this node keeps no metrics")
-	}
-
-	result, err := queryResult(x.collectors.Metrics, query.RequestID, query.From, query.To)
-	if err != nil {
-		return fmt.Errorf("answer metrics query: %w", err)
-	}
-
-	writeCtx, cancel := context.WithTimeout(ctx, nodeRequestWrites)
-	defer cancel()
-
-	return wsframe.WriteJSON(writeCtx, conn, result)
 }
 
 // refreshNetwork collects the network report again. The answer is a new
