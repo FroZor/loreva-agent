@@ -33,8 +33,8 @@ import (
 	"github.com/FroZor/loreva-agent/internal/enrollment"
 	"github.com/FroZor/loreva-agent/internal/networkinfo"
 	"github.com/FroZor/loreva-agent/internal/nodeapi"
+	portalsession "github.com/FroZor/loreva-agent/internal/portal"
 	"github.com/FroZor/loreva-agent/internal/protocol"
-	"github.com/FroZor/loreva-agent/internal/session"
 	"github.com/FroZor/loreva-agent/internal/specifications"
 	"github.com/FroZor/loreva-agent/internal/state"
 )
@@ -84,13 +84,13 @@ func TestEnrollThenConnect(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	runner, err := session.New(store, stored, nodeapi.Collectors{})
+	runner, err := portalsession.New(store, stored, nodeapi.Collectors{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	connected := make(chan struct{})
-	err = runner.Run(ctx, session.Events{Connected: func(string) {
+	err = runner.Run(ctx, portalsession.Events{Connected: func(string) {
 		close(connected)
 		cancel()
 	}})
@@ -349,14 +349,14 @@ func TestEnrollConnectAndRenewIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	runner, err := session.New(store, identity, nodeapi.Collectors{})
+	runner, err := portalsession.New(store, identity, nodeapi.Collectors{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	connections := 0
-	err = runner.Run(ctx, session.Events{Connected: func(string) {
+	err = runner.Run(ctx, portalsession.Events{Connected: func(string) {
 		connections++
 		if connections == 2 {
 			cancel()
@@ -395,14 +395,14 @@ func TestSourcesUpdateIsPersistedBeforeDrainReconnect(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	runner, err := session.New(store, identity, nodeapi.Collectors{})
+	runner, err := portalsession.New(store, identity, nodeapi.Collectors{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	connections := 0
-	err = runner.Run(ctx, session.Events{Connected: func(string) {
+	err = runner.Run(ctx, portalsession.Events{Connected: func(string) {
 		connections++
 		if connections == 2 {
 			cancel()
@@ -431,7 +431,7 @@ func TestConnectReportsSpecificationsThenNetwork(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	runner, err := session.New(store, identity, nodeapi.Collectors{
+	runner, err := portalsession.New(store, identity, nodeapi.Collectors{
 		Specifications: func(context.Context) (specifications.Snapshot, error) {
 			return specifications.Snapshot{
 				ObservationScope: protocol.ObservationScopeHost,
@@ -458,7 +458,7 @@ func TestConnectReportsSpecificationsThenNetwork(t *testing.T) {
 
 	result := make(chan error, 1)
 	go func() {
-		result <- runner.Run(ctx, session.Events{})
+		result <- runner.Run(ctx, portalsession.Events{})
 	}()
 
 	for _, want := range []string{protocol.NodeSpecificationsReportType, protocol.NodeNetworkReportType} {

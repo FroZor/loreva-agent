@@ -1,5 +1,5 @@
-// Package session maintains an enrolled node's portal connection lifecycle.
-package session
+// Package portal maintains an enrolled node's portal connection lifecycle.
+package portal
 
 import (
 	"context"

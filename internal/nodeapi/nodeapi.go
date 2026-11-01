@@ -1,8 +1,9 @@
 // Package nodeapi serves the node protocol that the portal session and
 // direct device sessions share: node reports, metrics with their
 // acknowledgements, node requests, and container logs, consoles, and files.
-// The session packages own the connection, authenticate the peer, and run
-// the loop around a Peer; this package never knows which peer it serves.
+// The portal and direct packages own the connection, authenticate the peer,
+// and run the loop around a Peer; this package never knows which peer it
+// serves.
 package nodeapi
 
 import (

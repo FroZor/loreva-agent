@@ -22,8 +22,8 @@ import (
 	"github.com/FroZor/loreva-agent/internal/metricstore"
 	"github.com/FroZor/loreva-agent/internal/networkinfo"
 	"github.com/FroZor/loreva-agent/internal/nodeapi"
+	"github.com/FroZor/loreva-agent/internal/portal"
 	"github.com/FroZor/loreva-agent/internal/publicip"
-	"github.com/FroZor/loreva-agent/internal/session"
 	"github.com/FroZor/loreva-agent/internal/specifications"
 	"github.com/FroZor/loreva-agent/internal/state"
 	"github.com/FroZor/loreva-agent/internal/workload"
@@ -150,7 +150,7 @@ func runAgent(arguments []string, logger *slog.Logger) error {
 	}
 	if identity != nil {
 		services = append(services, func(ctx context.Context) error {
-			return session.Supervise(ctx, store, collectors, logger)
+			return portal.Supervise(ctx, store, collectors, logger)
 		})
 	}
 
