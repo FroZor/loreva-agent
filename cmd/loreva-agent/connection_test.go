@@ -54,7 +54,7 @@ func TestWaitForConnectionRelease(t *testing.T) {
 		released <- waitForConnectionRelease(store, 2*time.Second)
 	}()
 
-	time.Sleep(2 * connectionStatePollInterval)
+	time.Sleep(500 * time.Millisecond)
 	if err := lock.Close(); err != nil {
 		t.Fatal(err)
 	}

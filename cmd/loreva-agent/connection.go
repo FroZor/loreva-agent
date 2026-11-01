@@ -13,8 +13,6 @@ import (
 	"github.com/FroZor/loreva-agent/internal/state"
 )
 
-const connectionStatePollInterval = 250 * time.Millisecond
-
 func runDisconnect(arguments []string, _ *slog.Logger) error {
 	store, err := connectionCommandStore("disconnect", arguments)
 	if err != nil {
@@ -76,7 +74,7 @@ func runStatus(arguments []string, _ *slog.Logger) error {
 		return err
 	}
 
-	running, err := agentProcessRunning(store)
+	running, err := store.AgentRunning()
 	if err != nil {
 		return err
 	}
@@ -132,34 +130,10 @@ func waitForConnectionRelease(store *state.Store, timeout time.Duration) error {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	ticker := time.NewTicker(connectionStatePollInterval)
-	defer ticker.Stop()
-
-	for {
-		lock, err := store.TryLockConnection()
-		if err == nil {
-			return lock.Close()
-		}
-		if !errors.Is(err, state.ErrConnectionActive) {
-			return err
-		}
-
-		select {
-		case <-ctx.Done():
-			return errors.New("agent did not stop its connection within 10 seconds")
-		case <-ticker.C:
-		}
-	}
-}
-
-func agentProcessRunning(store *state.Store) (bool, error) {
-	lock, err := store.TryLockProcess()
-	if err == nil {
-		return false, lock.Close()
-	}
-	if errors.Is(err, state.ErrAgentRunning) {
-		return true, nil
+	err := store.WaitUntilConnectionReleased(ctx)
+	if errors.Is(err, context.DeadlineExceeded) {
+		return errors.New("agent did not stop its connection within 10 seconds")
 	}
 
-	return false, err
+	return err
 }

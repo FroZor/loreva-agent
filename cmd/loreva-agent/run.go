@@ -227,7 +227,7 @@ func runServices(ctx context.Context, services []func(context.Context) error) er
 // enabled, pausing on disconnect and when the identity is rejected.
 func runPortal(ctx context.Context, store *state.Store, collectors session.Collectors, logger *slog.Logger) error {
 	for {
-		if err := waitUntilConnectionEnabled(ctx, store); err != nil {
+		if err := store.WaitUntilConnectionEnabled(ctx); err != nil {
 			if errors.Is(err, context.Canceled) {
 				return nil
 			}
@@ -235,7 +235,7 @@ func runPortal(ctx context.Context, store *state.Store, collectors session.Colle
 			return err
 		}
 
-		connectionLock, err := waitForConnectionLock(ctx, store)
+		connectionLock, err := store.LockConnection(ctx)
 		if err != nil {
 			if errors.Is(err, context.Canceled) {
 				return nil
@@ -339,76 +339,20 @@ func sessionEvents(identity *state.Identity, logger *slog.Logger) session.Events
 	}
 }
 
-func waitUntilConnectionEnabled(ctx context.Context, store *state.Store) error {
-	ticker := time.NewTicker(connectionStatePollInterval)
-	defer ticker.Stop()
-
-	for {
-		enabled, err := store.ConnectionEnabled()
-		if err != nil {
-			return err
-		}
-		if enabled {
-			return nil
-		}
-
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-ticker.C:
-		}
-	}
-}
-
-func waitForConnectionLock(ctx context.Context, store *state.Store) (*state.Lock, error) {
-	ticker := time.NewTicker(connectionStatePollInterval)
-	defer ticker.Stop()
-
-	for {
-		lock, err := store.TryLockConnection()
-		if err == nil {
-			return lock, nil
-		}
-		if !errors.Is(err, state.ErrConnectionActive) {
-			return nil, err
-		}
-
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		case <-ticker.C:
-		}
-	}
-}
-
 func watchConnectionPreference(
 	ctx context.Context,
 	store *state.Store,
 	cancelRun context.CancelFunc,
 	result chan<- error,
 ) {
-	ticker := time.NewTicker(connectionStatePollInterval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			result <- nil
-			return
-		case <-ticker.C:
-			enabled, err := store.ConnectionEnabled()
-			if err != nil {
-				cancelRun()
-				result <- err
-				return
-			}
-			if !enabled {
-				cancelRun()
-				result <- nil
-				return
-			}
-		}
+	err := store.WaitUntilConnectionDisabled(ctx)
+	if ctx.Err() != nil {
+		result <- nil
+		return
 	}
+
+	cancelRun()
+	result <- err
 }
 
 func closeStateLock(lock *state.Lock, operation string, logger *slog.Logger) {
