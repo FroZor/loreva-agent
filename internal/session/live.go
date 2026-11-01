@@ -133,16 +133,12 @@ func (r *Runner) maintain(
 			if err := live.retryReport(readCtx, conn); err != nil {
 				return err
 			}
-		case <-live.metrics.wake:
-			if err := live.metricsStored(readCtx, conn); err != nil {
+		case <-live.metrics.tick.C:
+			if err := live.metrics.send(readCtx, conn); err != nil {
 				return err
 			}
-		case <-live.metricsReplyTimer.C:
-			live.scheduleMetricsRetry(events, "", "ack_timeout")
-		case <-live.metricsRetryTimer.C:
-			if err := live.retryMetrics(readCtx, conn); err != nil {
-				return err
-			}
+		case <-live.metrics.leaseEnd.C:
+			live.metrics.end()
 		case <-renewTimer.C:
 			if live.renewal != nil {
 				return &permanentError{Err: errors.New("renewal timer fired while a request is pending")}

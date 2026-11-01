@@ -273,7 +273,7 @@ func expect(ctx context.Context, t *testing.T, session *client.Session, wantType
 	}
 }
 
-// acknowledge accepts a node report or metrics report, as the app does.
+// acknowledge accepts a node report, as the app does.
 func acknowledge(ctx context.Context, t *testing.T, session *client.Session, messageType string, data []byte, wantType string) {
 	t.Helper()
 
@@ -289,8 +289,6 @@ func acknowledge(ctx context.Context, t *testing.T, session *client.Session, mes
 		send(ctx, t, session, protocol.NodeSpecificationsAccepted{Type: protocol.NodeSpecificationsAcceptedType, RequestID: report.RequestID})
 	case protocol.NodeNetworkReportType:
 		send(ctx, t, session, protocol.NodeNetworkAccepted{Type: protocol.NodeNetworkAcceptedType, RequestID: report.RequestID})
-	case protocol.MetricsReportType:
-		send(ctx, t, session, protocol.MetricsAccepted{Type: protocol.MetricsAcceptedType, RequestID: report.RequestID})
 	default:
 		t.Fatalf("got %s while waiting for %s: %s", messageType, wantType, data)
 	}
@@ -348,7 +346,7 @@ func TestPairAndUseSession(t *testing.T) {
 	}
 
 	// The device receives the same node reports as the portal and
-	// acknowledges them the same way; metrics follow the reports.
+	// acknowledges them the same way.
 	var specs protocol.NodeSpecificationsReport
 	expect(ctx, t, session, protocol.NodeSpecificationsReportType, &specs)
 	if specs.ObservationScope != "host" {
@@ -360,12 +358,31 @@ func TestPairAndUseSession(t *testing.T) {
 	expect(ctx, t, session, protocol.NodeNetworkReportType, &network)
 	send(ctx, t, session, protocol.NodeNetworkAccepted{Type: protocol.NodeNetworkAcceptedType, RequestID: network.RequestID})
 
-	var report protocol.MetricsReport
-	expect(ctx, t, session, protocol.MetricsReportType, &report)
-	if report.Metric.Type != protocol.MetricTypeNode {
-		t.Fatalf("first metrics report = %+v", report.Metric)
+	// Watching the overview returns the current values at once; an empty
+	// watch stops it.
+	send(ctx, t, session, protocol.MetricsWatch{
+		Type: protocol.MetricsWatchType, RequestID: "5b0d0f7e-3a51-4c43-9d2b-6c1f0e7a8b90",
+		Views: []protocol.MetricsView{{Scope: protocol.MetricsScopeOverview}},
+	})
+	var watching protocol.MetricsWatchAccepted
+	expect(ctx, t, session, protocol.MetricsWatchAcceptedType, &watching)
+	if watching.IntervalMS != protocol.MetricsIntervalDefaultMS || watching.LeaseS != protocol.MetricsLeaseDefaultS {
+		t.Fatalf("watch = %+v", watching)
 	}
-	send(ctx, t, session, protocol.MetricsAccepted{Type: protocol.MetricsAcceptedType, RequestID: report.RequestID})
+	var schema protocol.MetricsSchema
+	expect(ctx, t, session, protocol.MetricsSchemaType, &schema)
+	if !schema.Full || len(schema.Columns) == 0 || schema.Columns[0].Key != "cpu.usage_percent" {
+		t.Fatalf("schema = %+v", schema)
+	}
+	var tick protocol.MetricsTick
+	expect(ctx, t, session, protocol.MetricsTickType, &tick)
+	if tick.Version != schema.Version || len(tick.Values) != len(schema.Columns) {
+		t.Fatalf("tick = %+v", tick)
+	}
+	send(ctx, t, session, protocol.MetricsWatch{
+		Type: protocol.MetricsWatchType, RequestID: "6c1e1f8f-4b62-4d54-8e3c-7d2f1f8b9ca1", Views: []protocol.MetricsView{},
+	})
+	expect(ctx, t, session, protocol.MetricsWatchAcceptedType, &watching)
 
 	send(ctx, t, session, protocol.DevicesList{Type: protocol.DevicesListType, RequestID: "2ab9d734-7434-4cdf-bca4-6ce7a46cdd65"})
 	var devices protocol.DevicesListResult

@@ -10,17 +10,16 @@ import (
 	"github.com/FroZor/loreva-agent/internal/protocol"
 )
 
-// exchange sends node reports and metrics and tracks their acknowledgements.
+// exchange sends node reports, tracks their acknowledgements, and serves
+// the metrics a peer watches.
 // The portal session and direct device sessions run the same exchange; only
 // the loop around it and the way the peer authenticated differ.
 type exchange struct {
-	collectors        Collectors
-	reports           *nodeReporter
-	reportReplyTimer  *time.Timer
-	reportRetryTimer  *time.Timer
-	metrics           *metricReporter
-	metricsReplyTimer *time.Timer
-	metricsRetryTimer *time.Timer
+	collectors       Collectors
+	reports          *nodeReporter
+	reportReplyTimer *time.Timer
+	reportRetryTimer *time.Timer
+	metrics          *metricWatch
 	// inventorySlots bounds the container inventory calls a session runs
 	// at once.
 	inventorySlots chan struct{}
@@ -32,26 +31,23 @@ type identityRejection struct{ err error }
 func (rejection *identityRejection) Error() string { return rejection.err.Error() }
 func (rejection *identityRejection) Unwrap() error { return rejection.err }
 
-// newExchange starts the exchange for one peer. reader names the peer's
-// cursor in the metrics store.
+// newExchange starts the exchange for one peer. reader names the peer in
+// the metrics store's demand.
 func newExchange(ctx context.Context, collectors Collectors, reports *nodeReportState, reader string) *exchange {
 	return &exchange{
-		collectors:        collectors,
-		reports:           newNodeReporter(ctx, collectors, reports),
-		reportReplyTimer:  newStoppedTimer(),
-		reportRetryTimer:  newStoppedTimer(),
-		metrics:           newMetricReporter(collectors.Metrics, reader),
-		metricsReplyTimer: newStoppedTimer(),
-		metricsRetryTimer: newStoppedTimer(),
-		inventorySlots:    make(chan struct{}, maxInventoryCalls),
+		collectors:       collectors,
+		reports:          newNodeReporter(ctx, collectors, reports),
+		reportReplyTimer: newStoppedTimer(),
+		reportRetryTimer: newStoppedTimer(),
+		metrics:          newMetricWatch(collectors.Metrics, reader),
+		inventorySlots:   make(chan struct{}, maxInventoryCalls),
 	}
 }
 
 func (x *exchange) stop() {
 	x.reportReplyTimer.Stop()
 	x.reportRetryTimer.Stop()
-	x.metricsReplyTimer.Stop()
-	x.metricsRetryTimer.Stop()
+	x.metrics.stop()
 }
 
 func (x *exchange) reportCollected(ctx context.Context, conn *websocket.Conn, report collectedNodeReport) error {
@@ -78,51 +74,6 @@ func (x *exchange) retryReport(ctx context.Context, conn *websocket.Conn) error 
 	return nil
 }
 
-// metricsStored sends newly stored metrics once the node reports are done.
-func (x *exchange) metricsStored(ctx context.Context, conn *websocket.Conn) error {
-	x.metrics.woke()
-
-	return x.sendMetrics(ctx, conn)
-}
-
-// sendMetrics fills the reader's window with history, then sends the newest
-// sample live if history has not reached it. Metrics start after both node
-// reports.
-func (x *exchange) sendMetrics(ctx context.Context, conn *websocket.Conn) error {
-	if !x.reports.state.complete {
-		return nil
-	}
-
-	sent, err := x.metrics.writeNext(ctx, conn)
-	if err != nil {
-		return err
-	}
-	if sent {
-		x.armMetricsReplyTimer()
-	}
-
-	return x.metrics.writeLive(ctx, conn)
-}
-
-// armMetricsReplyTimer waits for the next acknowledgement while written
-// frames await one; the wait restarts on every acknowledgement.
-func (x *exchange) armMetricsReplyTimer() {
-	stopTimer(x.metricsReplyTimer)
-	if x.metrics.awaiting() && !x.metrics.retrying {
-		x.metricsReplyTimer.Reset(metricsReplyTimeout)
-	}
-}
-
-func (x *exchange) retryMetrics(ctx context.Context, conn *websocket.Conn) error {
-	if err := x.metrics.resend(ctx, conn); err != nil {
-		return err
-	}
-
-	x.armMetricsReplyTimer()
-
-	return x.sendMetrics(ctx, conn)
-}
-
 func (x *exchange) scheduleNodeReportRetry(events Events, code string) {
 	delay := x.reports.retryDelay()
 	stopTimer(x.reportRetryTimer)
@@ -136,27 +87,7 @@ func (x *exchange) scheduleNodeReportRetry(events Events, code string) {
 	})
 }
 
-// scheduleMetricsRetry sends the unacknowledged frames again after a
-// backoff. requestID names the rejected frame, or is empty after a timeout.
-func (x *exchange) scheduleMetricsRetry(events Events, requestID, code string) {
-	delay, scheduled := x.metrics.scheduleRetry()
-	if !scheduled {
-		return
-	}
-
-	stopTimer(x.metricsReplyTimer)
-	stopTimer(x.metricsRetryTimer)
-	x.metricsRetryTimer.Reset(delay)
-
-	notifyNodeReportRejection(events, NodeReportRejection{
-		Type:      x.metrics.frameType(requestID),
-		Code:      code,
-		RetryIn:   delay,
-		Retryable: true,
-	})
-}
-
-// handleAcknowledgement processes a report or metrics response. It reports
+// handleAcknowledgement processes a node report response. It reports
 // false for any other message type. An *identityRejection error means the
 // peer rejected the node itself.
 func (x *exchange) handleAcknowledgement(
@@ -171,15 +102,13 @@ func (x *exchange) handleAcknowledgement(
 		protocol.NodeSpecificationsRejectedType,
 		protocol.NodeNetworkAcceptedType,
 		protocol.NodeNetworkRejectedType:
-		return true, x.handleReportResponse(ctx, conn, data, events)
-	case protocol.MetricsAcceptedType, protocol.MetricsRejectedType:
-		return true, x.handleMetricsResponse(ctx, conn, data, events)
+		return true, x.handleReportResponse(ctx, data, events)
 	default:
 		return false, nil
 	}
 }
 
-func (x *exchange) handleReportResponse(ctx context.Context, conn *websocket.Conn, data []byte, events Events) error {
+func (x *exchange) handleReportResponse(ctx context.Context, data []byte, events Events) error {
 	reportType := x.reports.activeType()
 	if err := x.reports.handleResponse(ctx, data); err != nil {
 		if errors.Is(err, errDuplicateNodeReportAcknowledgement) {
@@ -208,55 +137,13 @@ func (x *exchange) handleReportResponse(ctx context.Context, conn *websocket.Con
 			Code: rejection.code,
 		})
 
-		return x.startMetricsAfterReports(ctx, conn)
+		return nil
 	}
 
 	stopTimer(x.reportReplyTimer)
 	stopTimer(x.reportRetryTimer)
 
-	return x.startMetricsAfterReports(ctx, conn)
-}
-
-func (x *exchange) startMetricsAfterReports(ctx context.Context, conn *websocket.Conn) error {
-	return x.sendMetrics(ctx, conn)
-}
-
-func (x *exchange) handleMetricsResponse(ctx context.Context, conn *websocket.Conn, data []byte, events Events) error {
-	if err := x.metrics.handleResponse(data); err != nil {
-		if errors.Is(err, errDuplicateMetricsAcknowledgement) {
-			return nil
-		}
-
-		rejection, ok := errors.AsType[*metricRejection](err)
-		if !ok {
-			return err
-		}
-
-		if identityNodeReportRejection(rejection.code) {
-			stopTimer(x.metricsReplyTimer)
-			stopTimer(x.metricsRetryTimer)
-
-			return &identityRejection{err: rejection}
-		}
-		if !terminalNodeReportRejection(rejection.code) {
-			x.scheduleMetricsRetry(events, rejection.requestID, rejection.code)
-			return nil
-		}
-
-		metricType := x.metrics.frameType(rejection.requestID)
-		x.metrics.discard(rejection.requestID)
-		notifyNodeReportRejection(events, NodeReportRejection{
-			Type: metricType,
-			Code: rejection.code,
-		})
-	}
-
-	if x.metrics.cancelRetry() {
-		stopTimer(x.metricsRetryTimer)
-	}
-	x.armMetricsReplyTimer()
-
-	return x.sendMetrics(ctx, conn)
+	return nil
 }
 
 func notifyNodeReportRejection(events Events, rejection NodeReportRejection) {
