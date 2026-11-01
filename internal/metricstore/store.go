@@ -6,9 +6,9 @@
 //
 // Retention, as in monitoring systems such as Zabbix:
 //   - the last hour: every sample;
-//   - up to a day: one rollup per minute, except minutes with a spike, which
-//     keep one rollup per 10 seconds; neighbouring minutes that differ only
-//     by noise are merged;
+//   - up to a day: one rollup per minute; neighbouring minutes that differ
+//     only by noise are merged, a minute with a spike stays on its own (its
+//     rollup keeps the peak and when it happened);
 //   - up to a week: one rollup per hour, with each series' min, average,
 //     max, and the time of the max.
 package metricstore
@@ -369,32 +369,24 @@ func (s *Store) compactRaw(now time.Time) {
 	}
 }
 
-// spikeWindow is the resolution kept for a minute with a spike: the shape of
-// the spike survives without keeping every sample.
-const spikeWindow = 10 * time.Second
-
+// compactMinute adds one minute of samples to the minute tier. A minute with
+// a spike stays on its own: its rollup already keeps each series' peak and
+// when it happened. Keeping finer windows for such minutes multiplied the
+// tier several times over, because with hundreds of series almost every
+// minute has a spike somewhere.
 func (s *Store) compactMinute(records []*Record) {
 	minute := rollupRecords(records)
 	hourKey := records[0].ObservedAt.Truncate(time.Hour).Unix()
 	s.dirtyMinute[hourKey] = struct{}{}
 
 	if hasSpike(*minute.Node) || hasSpike(*minute.Container) {
-		start := 0
-		for start < len(records) {
-			window := records[start].ObservedAt.Truncate(spikeWindow)
-			end := start
-			for end < len(records) && records[end].ObservedAt.Truncate(spikeWindow).Equal(window) {
-				end++
-			}
-
-			s.minute = append(s.minute, rollupRecords(records[start:end]))
-			start = end
-		}
+		s.minute = append(s.minute, minute)
 		return
 	}
 
 	if last := len(s.minute) - 1; last >= 0 && s.minute[last].Record == nil &&
 		s.minute[last].Node.End.Truncate(time.Hour).Equal(minute.Node.Start.Truncate(time.Hour)) &&
+		!hasSpike(*s.minute[last].Node) && !hasSpike(*s.minute[last].Container) &&
 		similar(*s.minute[last].Node, *minute.Node) && similar(*s.minute[last].Container, *minute.Container) {
 		s.minute[last] = mergeItems(s.minute[last], minute)
 		return
@@ -492,13 +484,23 @@ type writePlan struct {
 func (s *Store) planWritesLocked(now time.Time, flushAll bool) writePlan {
 	plan := writePlan{rawFloor: s.oldestRawMinute(now)}
 	current := now.UTC().Truncate(time.Minute).Unix()
+	// The minute tier file of an hour is written once, when compaction has
+	// moved the whole hour out of the raw tier. Rewriting it on every pass
+	// wrote the growing file again every 30 seconds; until it is written,
+	// the raw files of that hour stay on disk, so a crash loses nothing.
+	compactedUntil := now.Add(-rawRetention).Truncate(time.Minute).Unix()
 
 	for day := range s.dirtyHour {
 		plan.add(s.tierJob("hour", day, s.itemsIn(s.hour, day, 24*time.Hour), s.dirtyHour))
 		delete(s.dirtyHour, day)
 	}
 	for hour := range s.dirtyMinute {
-		plan.add(s.tierJob("minute", hour, s.itemsIn(s.minute, hour, time.Hour), s.dirtyMinute))
+		items := s.itemsIn(s.minute, hour, time.Hour)
+		if !flushAll && items != nil && hour+int64(time.Hour/time.Second) > compactedUntil {
+			plan.rawFloor = min(plan.rawFloor, hour)
+			continue
+		}
+		plan.add(s.tierJob("minute", hour, items, s.dirtyMinute))
 		delete(s.dirtyMinute, hour)
 	}
 
@@ -716,6 +718,8 @@ func (s *Store) load() error {
 			if item.Record == nil && (item.Node == nil || item.Container == nil) {
 				return errors.New("metrics item has no content")
 			}
+			internSeries(item.Node)
+			internSeries(item.Container)
 			*target = append(*target, item)
 
 			return nil

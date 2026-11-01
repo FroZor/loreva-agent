@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unique"
 
 	"github.com/FroZor/loreva-agent/internal/protocol"
 )
@@ -206,7 +207,7 @@ func walk(prefix string, value any, series map[string]float64) {
 	switch typed := value.(type) {
 	case float64:
 		if prefix != "" && !math.IsNaN(typed) && !math.IsInf(typed, 0) {
-			series[prefix] = typed
+			series[intern(prefix)] = typed
 		}
 	case map[string]any:
 		for key, child := range typed {
@@ -251,6 +252,25 @@ func join(prefix, key string) string {
 	}
 
 	return prefix + "." + key
+}
+
+// intern returns the one shared copy of a series name. The minute and hour
+// tiers hold thousands of rollups with the same few hundred names; without
+// sharing, every rollup carried its own copy of every name.
+func intern(name string) string { return unique.Make(name).Value() }
+
+// internSeries replaces the series names of a rollup read from disk with
+// their shared copies.
+func internSeries(rollup *Rollup) {
+	if rollup == nil {
+		return
+	}
+
+	series := make(map[string]Aggregate, len(rollup.Series))
+	for name, aggregate := range rollup.Series {
+		series[intern(name)] = aggregate
+	}
+	rollup.Series = series
 }
 
 func itoa(value int) string { return strconv.Itoa(value) }
