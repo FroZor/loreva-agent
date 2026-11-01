@@ -1,4 +1,4 @@
-package session
+package nodeapi
 
 import (
 	"context"
@@ -12,7 +12,6 @@ import (
 	"github.com/FroZor/loreva-agent/internal/containerio"
 	"github.com/FroZor/loreva-agent/internal/fileops"
 	"github.com/FroZor/loreva-agent/internal/protocol"
-	"github.com/FroZor/loreva-agent/internal/state"
 	"github.com/FroZor/loreva-agent/internal/wsframe"
 )
 
@@ -61,20 +60,20 @@ func (f *helperFiles) Start(_ context.Context, _ string, request fileops.Request
 	return f.client.Start(request)
 }
 
-// The portal session serves the same container frames as a device session;
-// only how the peer authenticated differs.
-func TestPortalSessionServesContainerConsole(t *testing.T) {
+// A peer serves container consoles, logs, and files whoever it is.
+func TestPeerServesContainerFrames(t *testing.T) {
 	agentSide, portalSide := newWebSocketPair(t)
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 
-	runner := &Runner{
-		masterEndpoint: "wss://master.example/agent/v1/connect",
-		identity:       &state.Identity{PortalID: "d1b181c1-52ec-4d55-b2c9-b1428305b294"},
-	}
 	files := newHelperFiles(t)
-	live := &liveState{containers: newContainerStreams(ctx, echoConsole{}, files, agentSide, slog.New(slog.DiscardHandler))}
-	defer live.containers.close()
+	peer := &Peer{
+		conn:       agentSide,
+		exchange:   &exchange{},
+		containers: newContainerStreams(ctx, echoConsole{}, files, agentSide, slog.New(slog.DiscardHandler)),
+		reject:     Reject(agentSide),
+	}
+	defer peer.containers.close()
 
 	containerID := strings.Repeat("ab", 32)
 	tests := []struct {
@@ -87,8 +86,13 @@ func TestPortalSessionServesContainerConsole(t *testing.T) {
 	}
 
 	for _, test := range tests {
-		if err := runner.handleWorkingMessage(ctx, agentSide, "", runner.masterEndpoint, []byte(test.frame), live, Events{}); err != nil {
-			t.Fatalf("handleWorkingMessage(%s) error = %v", test.frame, err)
+		messageType, err := protocol.MessageType([]byte(test.frame))
+		if err != nil {
+			t.Fatal(err)
+		}
+		handled, err := peer.HandleMessage(ctx, messageType, []byte(test.frame))
+		if err != nil || !handled {
+			t.Fatalf("HandleMessage(%s) = %v, %v", test.frame, handled, err)
 		}
 
 		data, err := wsframe.ReadRawJSON(ctx, portalSide)

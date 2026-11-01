@@ -1,4 +1,4 @@
-package session
+package nodeapi
 
 import (
 	"context"
@@ -85,7 +85,7 @@ func (c *containerStreams) close() {
 // handle serves a container log, console, or file manager frame. It reports
 // false for any other message type, so every session type routes the same
 // frames here.
-func (c *containerStreams) handle(ctx context.Context, messageType string, data []byte, reject rejectFunc) (bool, error) {
+func (c *containerStreams) handle(ctx context.Context, messageType string, data []byte, reject RejectFunc) (bool, error) {
 	switch messageType {
 	case protocol.ContainerLogsOpenType:
 		return true, c.handleLogsOpen(ctx, data, reject)
@@ -108,7 +108,7 @@ func (c *containerStreams) streamFinished(id uint32) {
 	delete(c.uploads, id)
 }
 
-func (c *containerStreams) handleLogsOpen(ctx context.Context, data []byte, reject rejectFunc) error {
+func (c *containerStreams) handleLogsOpen(ctx context.Context, data []byte, reject RejectFunc) error {
 	var request protocol.ContainerLogsOpen
 	if err := protocol.DecodeStrict(data, &request); err != nil || !agentcrypto.ValidUUID(request.RequestID) {
 		return reject(ctx, "", "invalid_message", "container.logs.open does not match the protocol")
@@ -142,7 +142,7 @@ func (c *containerStreams) runLogs(ctx context.Context, stream *outStream, reque
 	log, err := c.io.Logs(ctx, request.ContainerID, options)
 	if err != nil {
 		code, message := containerErrorCode(err)
-		c.writeFrame(ctx, protocol.Error{Type: protocol.ErrorType, RequestID: request.RequestID, Code: code, Message: boundedMessage(message)})
+		c.writeFrame(ctx, protocol.Error{Type: protocol.ErrorType, RequestID: request.RequestID, Code: code, Message: BoundedMessage(message)})
 		return
 	}
 	defer log.Close()
@@ -178,7 +178,7 @@ func (c *containerStreams) runLogs(ctx context.Context, stream *outStream, reque
 	c.writeFrame(ctx, closing)
 }
 
-func (c *containerStreams) handleCredit(ctx context.Context, data []byte, reject rejectFunc) error {
+func (c *containerStreams) handleCredit(ctx context.Context, data []byte, reject RejectFunc) error {
 	var credit protocol.StreamCredit
 	if err := protocol.DecodeStrict(data, &credit); err != nil {
 		return reject(ctx, "", "invalid_message", "stream.credit does not match the protocol")
@@ -196,7 +196,7 @@ func (c *containerStreams) handleCredit(ctx context.Context, data []byte, reject
 	return nil
 }
 
-func (c *containerStreams) handleClose(ctx context.Context, data []byte, reject rejectFunc) error {
+func (c *containerStreams) handleClose(ctx context.Context, data []byte, reject RejectFunc) error {
 	var closing protocol.StreamClose
 	if err := protocol.DecodeStrict(data, &closing); err != nil || closing.Reason != protocol.StreamCancelled {
 		return reject(ctx, "", "invalid_message", "a device closes a stream with reason cancelled")
@@ -212,7 +212,7 @@ func (c *containerStreams) handleClose(ctx context.Context, data []byte, reject 
 	return nil
 }
 
-func (c *containerStreams) handleConsoleInfo(ctx context.Context, data []byte, reject rejectFunc) error {
+func (c *containerStreams) handleConsoleInfo(ctx context.Context, data []byte, reject RejectFunc) error {
 	var request protocol.ContainerConsoleInfo
 	if err := protocol.DecodeStrict(data, &request); err != nil || !agentcrypto.ValidUUID(request.RequestID) {
 		return reject(ctx, "", "invalid_message", "container.console.info does not match the protocol")
@@ -244,7 +244,7 @@ func (c *containerStreams) handleConsoleInfo(ctx context.Context, data []byte, r
 	return nil
 }
 
-func (c *containerStreams) handleConsoleSend(ctx context.Context, data []byte, reject rejectFunc) error {
+func (c *containerStreams) handleConsoleSend(ctx context.Context, data []byte, reject RejectFunc) error {
 	var request protocol.ContainerConsoleSend
 	if err := protocol.DecodeStrict(data, &request); err != nil || !agentcrypto.ValidUUID(request.RequestID) {
 		return reject(ctx, "", "invalid_message", "container.console.send does not match the protocol")
@@ -324,14 +324,14 @@ func (c *containerStreams) endRequest() {
 
 func (c *containerStreams) writeError(ctx context.Context, requestID string, err error) {
 	code, message := fileErrorCode(err)
-	c.writeFrame(ctx, protocol.Error{Type: protocol.ErrorType, RequestID: requestID, Code: code, Message: boundedMessage(message)})
+	c.writeFrame(ctx, protocol.Error{Type: protocol.ErrorType, RequestID: requestID, Code: code, Message: BoundedMessage(message)})
 }
 
 // writeFrame writes a JSON frame and reports whether it was written. A
 // failed write ends the stream; the session loop notices the broken
 // connection on its next read.
 func (c *containerStreams) writeFrame(ctx context.Context, frame any) bool {
-	return writeDeviceFrame(ctx, c.conn, frame) == nil
+	return WriteFrame(ctx, c.conn, frame) == nil
 }
 
 func (c *containerStreams) writeChunk(ctx context.Context, id uint32, source containerio.Stream, data []byte) error {
@@ -350,7 +350,7 @@ func (c *containerStreams) writeBinary(ctx context.Context, channel byte, id uin
 	binary.BigEndian.PutUint32(frame[1:protocol.StreamFrameHeaderBytes], id)
 	copy(frame[protocol.StreamFrameHeaderBytes:], data)
 
-	writeCtx, cancel := context.WithTimeout(ctx, deviceWriteTimeout)
+	writeCtx, cancel := context.WithTimeout(ctx, WriteTimeout)
 	defer cancel()
 
 	return c.conn.Write(writeCtx, websocket.MessageBinary, frame)
@@ -386,8 +386,6 @@ func truncate(text string, limit int) string {
 
 	return text[:limit]
 }
-
-type rejectFunc func(ctx context.Context, requestID, code, message string) error
 
 // outStream is a node-to-device stream with credit-based flow control.
 type outStream struct {

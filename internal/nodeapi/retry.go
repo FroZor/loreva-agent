@@ -1,4 +1,4 @@
-package session
+package nodeapi
 
 import (
 	"crypto/rand"
@@ -8,7 +8,9 @@ import (
 
 const maximumBackoff = 5 * time.Minute
 
-func retryDelay(attempt int) time.Duration {
+// RetryDelay is a random backoff for the given attempt, growing from 5
+// seconds to maximumBackoff.
+func RetryDelay(attempt int) time.Duration {
 	maximum := 5 * time.Second
 
 	for index := 1; index < attempt && maximum < maximumBackoff; index++ {
@@ -18,10 +20,11 @@ func retryDelay(attempt int) time.Duration {
 		}
 	}
 
-	return randomDuration(maximum + 1)
+	return RandomDuration(maximum + 1)
 }
 
-func randomDuration(maximum time.Duration) time.Duration {
+// RandomDuration returns a uniformly random duration in [0, maximum).
+func RandomDuration(maximum time.Duration) time.Duration {
 	if maximum <= 1 {
 		return 0
 	}
@@ -34,7 +37,8 @@ func randomDuration(maximum time.Duration) time.Duration {
 	return time.Duration(binary.LittleEndian.Uint64(raw[:]) % uint64(maximum))
 }
 
-func randomInt(maximum int) int {
+// RandomInt returns a uniformly random integer in [0, maximum).
+func RandomInt(maximum int) int {
 	if maximum <= 1 {
 		return 0
 	}

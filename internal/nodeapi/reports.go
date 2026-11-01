@@ -1,4 +1,4 @@
-package session
+package nodeapi
 
 import (
 	"context"
@@ -29,7 +29,9 @@ const (
 	nodeReportNetwork
 )
 
-type collectedNodeReport struct {
+// CollectedReport is a node report ready to send, or the error that kept
+// it from being collected.
+type CollectedReport struct {
 	kind           nodeReportKind
 	specifications specifications.Snapshot
 	network        networkinfo.Snapshot
@@ -43,7 +45,10 @@ type activeNodeReport struct {
 	payload   []byte
 }
 
-type nodeReportState struct {
+// ReportState is the node report progress of one peer. It outlives a
+// connection, so a reconnect resends the report the peer did not
+// acknowledge.
+type ReportState struct {
 	next   nodeReportKind
 	active *activeNodeReport
 	// collecting is set while a report is being collected, before it
@@ -60,8 +65,8 @@ type nodeReportState struct {
 
 type nodeReporter struct {
 	collectors Collectors
-	results    chan collectedNodeReport
-	state      *nodeReportState
+	results    chan CollectedReport
+	state      *ReportState
 }
 
 type nodeReportRejection struct {
@@ -79,9 +84,9 @@ func (rejection *nodeReportRejection) Error() string {
 	return "portal rejected node report: " + rejection.code + ": " + rejection.message
 }
 
-func newNodeReporter(ctx context.Context, collectors Collectors, state *nodeReportState) *nodeReporter {
+func newNodeReporter(ctx context.Context, collectors Collectors, state *ReportState) *nodeReporter {
 	if state.complete {
-		*state = nodeReportState{}
+		*state = ReportState{}
 	}
 	if state.next == 0 {
 		state.next = nodeReportSpecifications
@@ -89,7 +94,7 @@ func newNodeReporter(ctx context.Context, collectors Collectors, state *nodeRepo
 
 	reporter := &nodeReporter{
 		collectors: collectors,
-		results:    make(chan collectedNodeReport, 1),
+		results:    make(chan CollectedReport, 1),
 		state:      state,
 	}
 	reporter.startNext(ctx)
@@ -99,7 +104,7 @@ func newNodeReporter(ctx context.Context, collectors Collectors, state *nodeRepo
 
 func (reporter *nodeReporter) startNext(ctx context.Context) {
 	if reporter.state.active != nil {
-		reporter.sendResult(ctx, collectedNodeReport{
+		reporter.sendResult(ctx, CollectedReport{
 			kind:  reporter.state.active.kind,
 			retry: true,
 		})
@@ -159,7 +164,7 @@ func (reporter *nodeReporter) collectSpecifications(ctx context.Context) {
 	snapshot, err := reporter.collectors.Specifications(collectionCtx)
 	cancel()
 
-	reporter.sendResult(ctx, collectedNodeReport{
+	reporter.sendResult(ctx, CollectedReport{
 		kind:           nodeReportSpecifications,
 		specifications: snapshot,
 		err:            err,
@@ -171,14 +176,14 @@ func (reporter *nodeReporter) collectNetwork(ctx context.Context) {
 	snapshot, err := reporter.collectors.Network(collectionCtx)
 	cancel()
 
-	reporter.sendResult(ctx, collectedNodeReport{
+	reporter.sendResult(ctx, CollectedReport{
 		kind:    nodeReportNetwork,
 		network: snapshot,
 		err:     err,
 	})
 }
 
-func (reporter *nodeReporter) sendResult(ctx context.Context, result collectedNodeReport) {
+func (reporter *nodeReporter) sendResult(ctx context.Context, result CollectedReport) {
 	select {
 	case reporter.results <- result:
 	case <-ctx.Done():
@@ -188,7 +193,7 @@ func (reporter *nodeReporter) sendResult(ctx context.Context, result collectedNo
 func (reporter *nodeReporter) writeResult(
 	ctx context.Context,
 	conn *websocket.Conn,
-	result collectedNodeReport,
+	result CollectedReport,
 ) error {
 	if result.err != nil {
 		return fmt.Errorf("collect node report: %w", result.err)
@@ -337,7 +342,7 @@ func (reporter *nodeReporter) lastAcceptedType() string {
 func (reporter *nodeReporter) retryDelay() time.Duration {
 	reporter.state.retryAttempt++
 
-	return retryDelay(reporter.state.retryAttempt)
+	return RetryDelay(reporter.state.retryAttempt)
 }
 
 func (reporter *nodeReporter) skip(ctx context.Context) {

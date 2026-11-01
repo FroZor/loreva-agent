@@ -2,9 +2,7 @@ package main
 
 import (
 	"bufio"
-	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -20,12 +18,7 @@ import (
 	"github.com/FroZor/loreva-agent/internal/pairing"
 )
 
-const (
-	maxInviteLine = 8 * 1024
-	// maxFrameLine bounds one frame on standard input; the node accepts
-	// frames up to 64 KiB.
-	maxFrameLine = 64 * 1024
-)
+const maxInviteLine = 8 * 1024
 
 // runDevice is the reference device client, for testing and scripting. Loreva
 // App implements the same protocol itself:
@@ -147,9 +140,6 @@ func runDeviceConnect(ctx context.Context, arguments []string) error {
 		return errors.New("usage: loreva-agent device connect --credentials FILE")
 	}
 
-	input := bufio.NewScanner(os.Stdin)
-	input.Buffer(make([]byte, 0, 4096), maxFrameLine)
-
 	credentials, err := client.LoadCredentials(*credentialsPath)
 	if err != nil {
 		return err
@@ -161,71 +151,5 @@ func runDeviceConnect(ctx context.Context, arguments []string) error {
 	}
 	defer session.Close()
 
-	return bridge(ctx, session, input, os.Stdout)
-}
-
-// bridge copies frames in both directions until either side closes.
-func bridge(ctx context.Context, session *client.Session, input *bufio.Scanner, output io.Writer) error {
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-
-	hello, err := json.Marshal(session.Hello)
-	if err != nil {
-		return err
-	}
-	if _, err := output.Write(append(hello, '\n')); err != nil {
-		return err
-	}
-
-	inputDone := make(chan error, 1)
-	go func() {
-		for input.Scan() {
-			if err := session.Write(ctx, input.Bytes()); err != nil {
-				inputDone <- err
-				return
-			}
-		}
-
-		inputDone <- input.Err()
-	}()
-
-	frames := make(chan []byte)
-	readDone := make(chan error, 1)
-	go func() {
-		for {
-			frame, err := session.Read(ctx)
-			if err != nil {
-				readDone <- err
-				return
-			}
-
-			select {
-			case frames <- frame:
-			case <-ctx.Done():
-				return
-			}
-		}
-	}()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return nil
-		case err := <-inputDone:
-			// The app closed standard input: it is done with the session.
-			return err
-		case err := <-readDone:
-			return fmt.Errorf("node session ended: %w", err)
-		case frame := <-frames:
-			var line bytes.Buffer
-			if err := json.Compact(&line, frame); err != nil {
-				return fmt.Errorf("node sent a frame that is not valid JSON: %w", err)
-			}
-			line.WriteByte('\n')
-
-			if _, err := output.Write(line.Bytes()); err != nil {
-				return err
-			}
-		}
-	}
+	return session.Bridge(ctx, os.Stdin, os.Stdout)
 }

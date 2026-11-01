@@ -1,4 +1,4 @@
-package session
+package nodeapi
 
 import (
 	"context"

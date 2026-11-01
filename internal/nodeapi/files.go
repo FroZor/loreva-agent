@@ -1,4 +1,4 @@
-package session
+package nodeapi
 
 import (
 	"context"
@@ -77,7 +77,7 @@ type inStream struct {
 
 // handleFile serves a file manager frame and reports false for any other
 // message type.
-func (c *containerStreams) handleFile(ctx context.Context, messageType string, data []byte, reject rejectFunc) (bool, error) {
+func (c *containerStreams) handleFile(ctx context.Context, messageType string, data []byte, reject RejectFunc) (bool, error) {
 	switch messageType {
 	case protocol.FSListType:
 		return true, c.handleFSList(ctx, data, reject)
@@ -106,7 +106,7 @@ func (c *containerStreams) handleFile(ctx context.Context, messageType string, d
 	}
 }
 
-func (c *containerStreams) handleFSList(ctx context.Context, data []byte, reject rejectFunc) error {
+func (c *containerStreams) handleFSList(ctx context.Context, data []byte, reject RejectFunc) error {
 	var request protocol.FSList
 	if err := protocol.DecodeStrict(data, &request); err != nil || !agentcrypto.ValidUUID(request.RequestID) {
 		return reject(ctx, "", "invalid_message", "fs.list does not match the protocol")
@@ -125,7 +125,7 @@ func (c *containerStreams) handleFSList(ctx context.Context, data []byte, reject
 		})
 }
 
-func (c *containerStreams) handleFSPath(ctx context.Context, messageType string, data []byte, reject rejectFunc) error {
+func (c *containerStreams) handleFSPath(ctx context.Context, messageType string, data []byte, reject RejectFunc) error {
 	var request protocol.FSPathRequest
 	if err := protocol.DecodeStrict(data, &request); err != nil || !agentcrypto.ValidUUID(request.RequestID) {
 		return reject(ctx, "", "invalid_message", messageType+" does not match the protocol")
@@ -146,7 +146,7 @@ func (c *containerStreams) handleFSPath(ctx context.Context, messageType string,
 	})
 }
 
-func (c *containerStreams) handleFSChmod(ctx context.Context, data []byte, reject rejectFunc) error {
+func (c *containerStreams) handleFSChmod(ctx context.Context, data []byte, reject RejectFunc) error {
 	var request protocol.FSChmod
 	if err := protocol.DecodeStrict(data, &request); err != nil || !agentcrypto.ValidUUID(request.RequestID) {
 		return reject(ctx, "", "invalid_message", "fs.chmod does not match the protocol")
@@ -159,7 +159,7 @@ func (c *containerStreams) handleFSChmod(ctx context.Context, data []byte, rejec
 	})
 }
 
-func (c *containerStreams) handleFSRename(ctx context.Context, data []byte, reject rejectFunc) error {
+func (c *containerStreams) handleFSRename(ctx context.Context, data []byte, reject RejectFunc) error {
 	var request protocol.FSRename
 	if err := protocol.DecodeStrict(data, &request); err != nil || !agentcrypto.ValidUUID(request.RequestID) {
 		return reject(ctx, "", "invalid_message", "fs.rename does not match the protocol")
@@ -172,7 +172,7 @@ func (c *containerStreams) handleFSRename(ctx context.Context, data []byte, reje
 	})
 }
 
-func (c *containerStreams) handleFSDelete(ctx context.Context, data []byte, reject rejectFunc) error {
+func (c *containerStreams) handleFSDelete(ctx context.Context, data []byte, reject RejectFunc) error {
 	var request protocol.FSDelete
 	if err := protocol.DecodeStrict(data, &request); err != nil || !agentcrypto.ValidUUID(request.RequestID) {
 		return reject(ctx, "", "invalid_message", "fs.delete does not match the protocol")
@@ -181,7 +181,7 @@ func (c *containerStreams) handleFSDelete(ctx context.Context, data []byte, reje
 	return c.longFileOp(ctx, request.RequestID, request.ContainerID, fileops.Request{Op: fileops.OpDelete, Paths: request.Paths}, reject)
 }
 
-func (c *containerStreams) handleFSCopy(ctx context.Context, data []byte, reject rejectFunc) error {
+func (c *containerStreams) handleFSCopy(ctx context.Context, data []byte, reject RejectFunc) error {
 	var request protocol.FSCopy
 	if err := protocol.DecodeStrict(data, &request); err != nil || !agentcrypto.ValidUUID(request.RequestID) {
 		return reject(ctx, "", "invalid_message", "fs.copy does not match the protocol")
@@ -190,7 +190,7 @@ func (c *containerStreams) handleFSCopy(ctx context.Context, data []byte, reject
 	return c.longFileOp(ctx, request.RequestID, request.ContainerID, fileops.Request{Op: fileops.OpCopy, Paths: request.Paths, To: request.To}, reject)
 }
 
-func (c *containerStreams) handleFSArchive(ctx context.Context, data []byte, reject rejectFunc) error {
+func (c *containerStreams) handleFSArchive(ctx context.Context, data []byte, reject RejectFunc) error {
 	var request protocol.FSArchive
 	if err := protocol.DecodeStrict(data, &request); err != nil || !agentcrypto.ValidUUID(request.RequestID) {
 		return reject(ctx, "", "invalid_message", "fs.archive does not match the protocol")
@@ -201,7 +201,7 @@ func (c *containerStreams) handleFSArchive(ctx context.Context, data []byte, rej
 	return c.longFileOp(ctx, request.RequestID, request.ContainerID, operation, reject)
 }
 
-func (c *containerStreams) handleFSExtract(ctx context.Context, data []byte, reject rejectFunc) error {
+func (c *containerStreams) handleFSExtract(ctx context.Context, data []byte, reject RejectFunc) error {
 	var request protocol.FSExtract
 	if err := protocol.DecodeStrict(data, &request); err != nil || !agentcrypto.ValidUUID(request.RequestID) {
 		return reject(ctx, "", "invalid_message", "fs.extract does not match the protocol")
@@ -212,7 +212,7 @@ func (c *containerStreams) handleFSExtract(ctx context.Context, data []byte, rej
 	return c.longFileOp(ctx, request.RequestID, request.ContainerID, operation, reject)
 }
 
-func (c *containerStreams) handleFSCancel(ctx context.Context, data []byte, reject rejectFunc) error {
+func (c *containerStreams) handleFSCancel(ctx context.Context, data []byte, reject RejectFunc) error {
 	var request protocol.FSCancel
 	if err := protocol.DecodeStrict(data, &request); err != nil {
 		return reject(ctx, "", "invalid_message", "fs.cancel does not match the protocol")
@@ -226,7 +226,7 @@ func (c *containerStreams) handleFSCancel(ctx context.Context, data []byte, reje
 
 // quickFileOp runs an operation that answers at once and writes the frame
 // result builds from its response.
-func (c *containerStreams) quickFileOp(ctx context.Context, requestID, containerID string, operation fileops.Request, reject rejectFunc, result func(fileops.Response) any) error {
+func (c *containerStreams) quickFileOp(ctx context.Context, requestID, containerID string, operation fileops.Request, reject RejectFunc, result func(fileops.Response) any) error {
 	if c.files == nil {
 		return reject(ctx, requestID, "containers_unavailable", "this node has no container runtime")
 	}
@@ -258,7 +258,7 @@ func (c *containerStreams) quickFileOp(ctx context.Context, requestID, container
 }
 
 // longFileOp runs an operation that reports progress and can be cancelled.
-func (c *containerStreams) longFileOp(ctx context.Context, requestID, containerID string, operation fileops.Request, reject rejectFunc) error {
+func (c *containerStreams) longFileOp(ctx context.Context, requestID, containerID string, operation fileops.Request, reject RejectFunc) error {
 	if c.files == nil {
 		return reject(ctx, requestID, "containers_unavailable", "this node has no container runtime")
 	}
@@ -320,7 +320,7 @@ func (c *containerStreams) runFileOp(ctx context.Context, containerID string, op
 	}
 }
 
-func (c *containerStreams) handleFSReadOpen(ctx context.Context, data []byte, reject rejectFunc) error {
+func (c *containerStreams) handleFSReadOpen(ctx context.Context, data []byte, reject RejectFunc) error {
 	var request protocol.FSReadOpen
 	if err := protocol.DecodeStrict(data, &request); err != nil || !agentcrypto.ValidUUID(request.RequestID) {
 		return reject(ctx, "", "invalid_message", "fs.read.open does not match the protocol")
@@ -416,7 +416,7 @@ func (c *containerStreams) forwardDownload(ctx context.Context, stream *outStrea
 	}
 }
 
-func (c *containerStreams) handleFSWriteOpen(ctx context.Context, data []byte, reject rejectFunc) error {
+func (c *containerStreams) handleFSWriteOpen(ctx context.Context, data []byte, reject RejectFunc) error {
 	var request protocol.FSWriteOpen
 	if err := protocol.DecodeStrict(data, &request); err != nil || !agentcrypto.ValidUUID(request.RequestID) {
 		return reject(ctx, "", "invalid_message", "fs.write.open does not match the protocol")
@@ -525,7 +525,7 @@ func (c *containerStreams) forwardUpload(ctx context.Context, upload *inStream, 
 }
 
 // handleBinary queues upload data the device sends on channel 3.
-func (c *containerStreams) handleBinary(ctx context.Context, data []byte, reject rejectFunc) error {
+func (c *containerStreams) handleBinary(ctx context.Context, data []byte, reject RejectFunc) error {
 	if len(data) <= protocol.StreamFrameHeaderBytes || len(data) > protocol.StreamFrameHeaderBytes+protocol.MaxStreamChunkBytes || data[0] != protocol.StreamChannelFile {
 		return reject(ctx, "", "invalid_frame", "a device sends binary frames only on channel 3 with 1 to 32768 bytes of data")
 	}

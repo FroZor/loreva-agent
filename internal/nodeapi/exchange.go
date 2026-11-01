@@ -1,4 +1,4 @@
-package session
+package nodeapi
 
 import (
 	"context"
@@ -26,23 +26,17 @@ type exchange struct {
 	inventorySlots chan struct{}
 }
 
-// identityRejection means the peer no longer recognizes this node.
-type identityRejection struct{ err error }
-
-func (rejection *identityRejection) Error() string { return rejection.err.Error() }
-func (rejection *identityRejection) Unwrap() error { return rejection.err }
-
 // newExchange starts the exchange for one peer. reader names the peer's
 // cursor in the metrics store.
-func newExchange(ctx context.Context, collectors Collectors, reports *nodeReportState, reader string) *exchange {
+func newExchange(ctx context.Context, collectors Collectors, reports *ReportState, reader string) *exchange {
 	return &exchange{
 		collectors:        collectors,
 		reports:           newNodeReporter(ctx, collectors, reports),
-		reportReplyTimer:  newStoppedTimer(),
-		reportRetryTimer:  newStoppedTimer(),
+		reportReplyTimer:  NewStoppedTimer(),
+		reportRetryTimer:  NewStoppedTimer(),
 		metrics:           newMetricReporter(collectors.Metrics, reader),
-		metricsReplyTimer: newStoppedTimer(),
-		metricsRetryTimer: newStoppedTimer(),
+		metricsReplyTimer: NewStoppedTimer(),
+		metricsRetryTimer: NewStoppedTimer(),
 		inventorySlots:    make(chan struct{}, maxInventoryCalls),
 	}
 }
@@ -54,7 +48,7 @@ func (x *exchange) stop() {
 	x.metricsRetryTimer.Stop()
 }
 
-func (x *exchange) reportCollected(ctx context.Context, conn *websocket.Conn, report collectedNodeReport) error {
+func (x *exchange) reportCollected(ctx context.Context, conn *websocket.Conn, report CollectedReport) error {
 	if err := x.reports.writeResult(ctx, conn, report); err != nil {
 		return err
 	}
@@ -108,7 +102,7 @@ func (x *exchange) retryMetrics(ctx context.Context, conn *websocket.Conn) error
 
 func (x *exchange) scheduleNodeReportRetry(events Events, code string) {
 	delay := x.reports.retryDelay()
-	stopTimer(x.reportRetryTimer)
+	StopTimer(x.reportRetryTimer)
 	x.reportRetryTimer.Reset(delay)
 
 	notifyNodeReportRejection(events, NodeReportRejection{
@@ -121,7 +115,7 @@ func (x *exchange) scheduleNodeReportRetry(events Events, code string) {
 
 func (x *exchange) scheduleMetricsRetry(events Events, code string) {
 	delay := x.metrics.retryDelay()
-	stopTimer(x.metricsRetryTimer)
+	StopTimer(x.metricsRetryTimer)
 	x.metricsRetryTimer.Reset(delay)
 
 	notifyNodeReportRejection(events, NodeReportRejection{
@@ -133,7 +127,7 @@ func (x *exchange) scheduleMetricsRetry(events Events, code string) {
 }
 
 // handleAcknowledgement processes a report or metrics response. It reports
-// false for any other message type. An *identityRejection error means the
+// false for any other message type. An *IdentityRejection error means the
 // peer rejected the node itself.
 func (x *exchange) handleAcknowledgement(
 	ctx context.Context,
@@ -167,11 +161,11 @@ func (x *exchange) handleReportResponse(ctx context.Context, conn *websocket.Con
 			return err
 		}
 
-		stopTimer(x.reportReplyTimer)
-		stopTimer(x.reportRetryTimer)
+		StopTimer(x.reportReplyTimer)
+		StopTimer(x.reportRetryTimer)
 
 		if identityNodeReportRejection(rejection.code) {
-			return &identityRejection{err: rejection}
+			return &IdentityRejection{Err: rejection}
 		}
 		if !terminalNodeReportRejection(rejection.code) {
 			x.scheduleNodeReportRetry(events, rejection.code)
@@ -187,8 +181,8 @@ func (x *exchange) handleReportResponse(ctx context.Context, conn *websocket.Con
 		return x.startMetricsAfterReports(ctx, conn)
 	}
 
-	stopTimer(x.reportReplyTimer)
-	stopTimer(x.reportRetryTimer)
+	StopTimer(x.reportReplyTimer)
+	StopTimer(x.reportRetryTimer)
 
 	return x.startMetricsAfterReports(ctx, conn)
 }
@@ -220,11 +214,11 @@ func (x *exchange) handleMetricsResponse(ctx context.Context, conn *websocket.Co
 			return err
 		}
 
-		stopTimer(x.metricsReplyTimer)
-		stopTimer(x.metricsRetryTimer)
+		StopTimer(x.metricsReplyTimer)
+		StopTimer(x.metricsRetryTimer)
 
 		if identityNodeReportRejection(rejection.code) {
-			return &identityRejection{err: rejection}
+			return &IdentityRejection{Err: rejection}
 		}
 		if !terminalNodeReportRejection(rejection.code) {
 			x.scheduleMetricsRetry(events, rejection.code)
@@ -238,8 +232,8 @@ func (x *exchange) handleMetricsResponse(ctx context.Context, conn *websocket.Co
 			Code: rejection.code,
 		})
 	} else {
-		stopTimer(x.metricsReplyTimer)
-		stopTimer(x.metricsRetryTimer)
+		StopTimer(x.metricsReplyTimer)
+		StopTimer(x.metricsRetryTimer)
 	}
 
 	sent, err := x.metrics.writeNext(ctx, conn)

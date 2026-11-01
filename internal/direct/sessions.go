@@ -14,9 +14,9 @@ import (
 
 	"github.com/FroZor/loreva-agent/internal/agentcrypto"
 	"github.com/FroZor/loreva-agent/internal/certpin"
+	"github.com/FroZor/loreva-agent/internal/nodeapi"
 	"github.com/FroZor/loreva-agent/internal/pairing"
 	"github.com/FroZor/loreva-agent/internal/protocol"
-	"github.com/FroZor/loreva-agent/internal/session"
 	"github.com/FroZor/loreva-agent/internal/state"
 	"github.com/FroZor/loreva-agent/internal/wsframe"
 )
@@ -172,7 +172,7 @@ func (s *sessions) hello(peer, deviceID string) protocol.SessionHello {
 
 // servePairing runs the pairing exchange for a device key that is not paired.
 func (s *sessions) servePairing(ctx context.Context, conn *websocket.Conn, pin string, exporter []byte) {
-	if err := writeFrame(ctx, conn, s.hello(protocol.SessionPeerInvite, "")); err != nil {
+	if err := nodeapi.WriteFrame(ctx, conn, s.hello(protocol.SessionPeerInvite, "")); err != nil {
 		return
 	}
 
@@ -201,7 +201,7 @@ func (s *sessions) servePairing(ctx context.Context, conn *websocket.Conn, pin s
 			Status:    status,
 			DeviceID:  deviceID,
 		}
-		if err := writeFrame(ctx, conn, result); err != nil {
+		if err := nodeapi.WriteFrame(ctx, conn, result); err != nil {
 			return
 		}
 
@@ -233,7 +233,7 @@ func (s *sessions) readPairingRequest(ctx context.Context, conn *websocket.Conn,
 
 		started, err := s.pairings.start(request, pin, exporter)
 		if err == nil {
-			return started, writeFrame(ctx, conn, started)
+			return started, nodeapi.WriteFrame(ctx, conn, started)
 		}
 
 		if writeErr := writeError(ctx, conn, "", err); writeErr != nil {
@@ -257,15 +257,11 @@ func (s *sessions) serveDevice(ctx context.Context, conn *websocket.Conn, device
 	}
 	defer s.untrack(device.ID, tracked)
 
-	collectors := s.options.Collectors.session()
-	collectors.Containers = s.options.Containers
-	collectors.Files = s.options.Files
-	collectors.Inventory = s.options.Inventory
-	err := session.ServeDevice(sessionCtx, conn, session.DeviceConfig{
+	err := serveDevice(sessionCtx, conn, deviceConfig{
 		Hello:           s.hello(protocol.SessionPeerDevice, device.ID),
 		NodeID:          s.node.id,
-		Collectors:      collectors,
-		Workloads:       s.options.Workloads,
+		Collectors:      s.options.Collectors,
+		Workloads:       s.options.Collectors.Workloads,
 		WorkloadResults: tracked.results,
 		Devices:         directory{sessions: s},
 		Logger:          s.logger.With("device_id", device.ID),
@@ -357,9 +353,6 @@ func (s *sessions) fanOut(ctx context.Context, results <-chan any) {
 // for selfRevokeDelay so it can read the answer; other sessions end now.
 func (s *sessions) revoke(deviceID, callerID string) error {
 	removed, err := s.registry.remove(deviceID)
-	if errors.Is(err, errDeviceNotFound) {
-		return session.ErrDeviceNotFound
-	}
 	if err != nil {
 		return err
 	}
@@ -420,17 +413,10 @@ func (d directory) List(currentID string) []protocol.Device {
 
 func (d directory) Remove(currentID, deviceID string) error {
 	if !agentcrypto.ValidUUID(deviceID) {
-		return session.ErrDeviceNotFound
+		return errDeviceNotFound
 	}
 
 	return d.sessions.revoke(deviceID, currentID)
-}
-
-func writeFrame(ctx context.Context, conn *websocket.Conn, frame any) error {
-	writeCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
-
-	return wsframe.WriteJSON(writeCtx, conn, frame)
 }
 
 func writeError(ctx context.Context, conn *websocket.Conn, requestID string, err error) error {
@@ -439,7 +425,7 @@ func writeError(ctx context.Context, conn *websocket.Conn, requestID string, err
 		refusal = newSessionError("internal", "internal error")
 	}
 
-	return writeFrame(ctx, conn, protocol.Error{
+	return nodeapi.WriteFrame(ctx, conn, protocol.Error{
 		Type:      protocol.ErrorType,
 		RequestID: requestID,
 		Code:      refusal.code,

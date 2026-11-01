@@ -1,4 +1,4 @@
-package session
+package portal
 
 import (
 	"errors"
@@ -6,6 +6,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/FroZor/loreva-agent/internal/nodeapi"
 	"github.com/FroZor/loreva-agent/internal/protocol"
 	"github.com/FroZor/loreva-agent/internal/sources"
 )
@@ -54,7 +55,7 @@ func weightedSourceIndex(items []protocol.SourceItem) int {
 		totalWeight += item.Weight
 	}
 
-	selectedWeight := randomInt(totalWeight)
+	selectedWeight := nodeapi.RandomInt(totalWeight)
 
 	for index := 0; index < len(items)-1; index++ {
 		if selectedWeight < items[index].Weight {

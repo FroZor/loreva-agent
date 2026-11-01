@@ -1,4 +1,4 @@
-package session
+package nodeapi
 
 import (
 	"context"
@@ -40,7 +40,7 @@ func (x *exchange) handleRequest(
 	conn *websocket.Conn,
 	messageType string,
 	data []byte,
-	reject rejectFunc,
+	reject RejectFunc,
 ) (bool, error) {
 	switch messageType {
 	case protocol.MetricsQueryType:
@@ -58,7 +58,7 @@ func (x *exchange) handleRequest(
 	}
 }
 
-func (x *exchange) answerMetricsQuery(ctx context.Context, conn *websocket.Conn, data []byte, reject rejectFunc) error {
+func (x *exchange) answerMetricsQuery(ctx context.Context, conn *websocket.Conn, data []byte, reject RejectFunc) error {
 	var query protocol.MetricsQuery
 	if err := protocol.DecodeStrict(data, &query); err != nil || !agentcrypto.ValidUUID(query.RequestID) {
 		return reject(ctx, "", "invalid_message", "metrics.query needs a UUID request_id, from, and to")
@@ -83,7 +83,7 @@ func (x *exchange) answerMetricsQuery(ctx context.Context, conn *websocket.Conn,
 
 // refreshNetwork collects the network report again. The answer is a new
 // node.network.report, acknowledged like the first one.
-func (x *exchange) refreshNetwork(ctx context.Context, data []byte, reject rejectFunc) error {
+func (x *exchange) refreshNetwork(ctx context.Context, data []byte, reject RejectFunc) error {
 	var request protocol.NodeNetworkRefresh
 	if err := protocol.DecodeStrict(data, &request); err != nil || !agentcrypto.ValidUUID(request.RequestID) {
 		return reject(ctx, "", "invalid_message", "node.network.refresh needs a UUID request_id")
@@ -97,7 +97,7 @@ func (x *exchange) refreshNetwork(ctx context.Context, data []byte, reject rejec
 	return nil
 }
 
-func (x *exchange) inspectProcess(ctx context.Context, conn *websocket.Conn, data []byte, reject rejectFunc) error {
+func (x *exchange) inspectProcess(ctx context.Context, conn *websocket.Conn, data []byte, reject RejectFunc) error {
 	var request protocol.NodeProcessInspect
 	if err := protocol.DecodeStrict(data, &request); err != nil || !agentcrypto.ValidUUID(request.RequestID) || request.PID <= 0 {
 		return reject(ctx, "", "invalid_message", "node.process.inspect needs a UUID request_id, pid, and started_at")
@@ -124,7 +124,7 @@ func (x *exchange) inspectProcess(ctx context.Context, conn *websocket.Conn, dat
 	})
 }
 
-func (x *exchange) listContainers(ctx context.Context, conn *websocket.Conn, data []byte, reject rejectFunc) error {
+func (x *exchange) listContainers(ctx context.Context, conn *websocket.Conn, data []byte, reject RejectFunc) error {
 	var request protocol.ContainersList
 	if err := protocol.DecodeStrict(data, &request); err != nil || !agentcrypto.ValidUUID(request.RequestID) {
 		return reject(ctx, "", "invalid_message", "containers.list needs a UUID request_id")
@@ -142,7 +142,7 @@ func (x *exchange) listContainers(ctx context.Context, conn *websocket.Conn, dat
 	})
 }
 
-func (x *exchange) inspectContainer(ctx context.Context, conn *websocket.Conn, data []byte, reject rejectFunc) error {
+func (x *exchange) inspectContainer(ctx context.Context, conn *websocket.Conn, data []byte, reject RejectFunc) error {
 	var request protocol.ContainerInspect
 	if err := protocol.DecodeStrict(data, &request); err != nil || !agentcrypto.ValidUUID(request.RequestID) {
 		return reject(ctx, "", "invalid_message", "container.inspect needs a UUID request_id and container_id")
@@ -169,7 +169,7 @@ func (x *exchange) runInventory(
 	ctx context.Context,
 	conn *websocket.Conn,
 	requestID string,
-	reject rejectFunc,
+	reject RejectFunc,
 	call func(context.Context) (any, error),
 ) error {
 	select {
@@ -199,7 +199,7 @@ func (x *exchange) runInventory(
 
 // writeAnswer sends one answer frame, or too_large when it would exceed
 // the frame bound.
-func (x *exchange) writeAnswer(ctx context.Context, conn *websocket.Conn, requestID string, answer any, reject rejectFunc) error {
+func (x *exchange) writeAnswer(ctx context.Context, conn *websocket.Conn, requestID string, answer any, reject RejectFunc) error {
 	payload, err := json.Marshal(answer)
 	if err != nil {
 		return fmt.Errorf("encode answer: %w", err)
