@@ -79,8 +79,8 @@ func TestQuietMinutesBecomeMergedRollupsAndSpikesStay(t *testing.T) {
 	if quiet != 1 {
 		t.Fatalf("quiet minutes became %d rollups, want 1 merged rollup", quiet)
 	}
-	if spike != 6 {
-		t.Fatalf("spike minute became %d windows, want six 10-second rollups", spike)
+	if spike != 1 {
+		t.Fatalf("spike minute became %d windows, want one rollup of its own", spike)
 	}
 }
 
@@ -214,5 +214,54 @@ func TestUnreadableFileIsSetAside(t *testing.T) {
 	}
 	if _, err := os.Stat(broken + ".bad"); err != nil {
 		t.Fatalf("broken file was not set aside: %v", err)
+	}
+}
+
+// The minute tier file of an hour is written once the hour is fully
+// compacted, not on every pass; until then its raw files stay on disk, and a
+// restart rebuilds the minutes from them.
+func TestMinuteFileWaitsForTheWholeHourAndRawFilesCoverIt(t *testing.T) {
+	dir := t.TempDir()
+	store, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	fill(t, store, base, 2*3600, func(second int) float64 { return float64(10 + second%7*3) })
+	minuteFile := filepath.Join(dir, "minute", key(base.Unix()))
+
+	// Half of the first hour is compacted: no minute file yet, raw kept.
+	if err := store.Maintain(base.Add(90*time.Minute), false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(minuteFile); !os.IsNotExist(err) {
+		t.Fatalf("minute file written before its hour was complete: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "raw", key(base.Unix()))); err != nil {
+		t.Fatalf("raw file of a minute not yet on disk in the minute tier was removed: %v", err)
+	}
+
+	// A crash here loses nothing: the reopened store rebuilds the minutes.
+	reopened, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := reopened.Maintain(base.Add(90*time.Minute), false); err != nil {
+		t.Fatal(err)
+	}
+	if items := reopened.After(0, 100000); len(items) == 0 || items[0].FirstSequence() != 1 {
+		t.Fatalf("reopened store lost the oldest samples: %d items", len(items))
+	}
+
+	// The whole hour is compacted: the minute file is written and the raw
+	// files of that hour go.
+	if err := store.Maintain(base.Add(2*time.Hour), false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(minuteFile); err != nil {
+		t.Fatalf("minute file of a complete hour is missing: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "raw", key(base.Unix()))); !os.IsNotExist(err) {
+		t.Fatalf("raw file of a stored minute was kept: %v", err)
 	}
 }

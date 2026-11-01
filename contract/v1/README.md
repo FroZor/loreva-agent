@@ -373,7 +373,7 @@ The agent writes every metrics sample into a store on disk and serves every read
 | Age | Kept as |
 | --- | --- |
 | Up to 1 hour | Every sample (process lists only for the last 5 minutes) |
-| 1 hour to 1 day | One rollup per minute. Neighbouring minutes that differ only by noise (under 2 percentage points for `*_percent` series, under 2 % otherwise) are merged. A minute with a spike (a `*_percent` series moving 10 points or more, or another series moving by half its average) keeps all its samples |
+| 1 hour to 1 day | One rollup per minute. Neighbouring minutes that differ only by noise (under 2 percentage points for `*_percent` series, under 2 % otherwise) are merged. A minute with a spike (a `*_percent` series moving 10 points or more, or another series moving by half its average) is never merged with its neighbours; its rollup keeps the peak and its `max_at` |
 | 1 day to 7 days | One rollup per hour |
 | Older | Removed; the store also drops its oldest data above 200 MB |
 
