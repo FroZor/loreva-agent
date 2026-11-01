@@ -3,6 +3,7 @@ package metricstore
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -172,6 +173,7 @@ func TestFlattenKeysArraysByIdentifier(t *testing.T) {
 	series := flatten(protocol.NodeMetrics{
 		Network: []protocol.NetworkMetrics{{InterfaceID: "network:2", RXBytesPerSecond: 7}},
 		Processes: protocol.ProcessMetrics{
+			Total: 84, Zombie: 1,
 			Items: []protocol.ProcessMetric{{Name: "x", CPUPercent: 50}},
 		},
 	})
@@ -179,9 +181,12 @@ func TestFlattenKeysArraysByIdentifier(t *testing.T) {
 	if series["network.network:2.rx_bytes_per_second"] != 7 {
 		t.Fatalf("network series = %v", series)
 	}
+	if series["processes.total"] != 84 || series["processes.zombie"] != 1 {
+		t.Fatalf("process counts are missing from the series: %v", series)
+	}
 	for key := range series {
-		if len(key) >= 9 && key[:9] == "processes" {
-			t.Fatalf("process data leaked into series: %s", key)
+		if strings.HasPrefix(key, "processes.items") {
+			t.Fatalf("the process list leaked into series: %s", key)
 		}
 	}
 }

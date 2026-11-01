@@ -183,8 +183,8 @@ func isPercent(key string) bool {
 
 // flatten returns every numeric field of value keyed by its path. Arrays of
 // objects are keyed by each element's identifier field, so a series keeps
-// its key when array order changes. Process lists are skipped: they belong
-// only to recent full samples.
+// its key when array order changes. The process list is skipped: it belongs
+// only to recent full samples; process counts are kept.
 func flatten(value any) map[string]float64 {
 	data, err := json.Marshal(value)
 	if err != nil {
@@ -210,7 +210,7 @@ func walk(prefix string, value any, series map[string]float64) {
 		}
 	case map[string]any:
 		for key, child := range typed {
-			if key == "processes" || key == "collection_issues" {
+			if key == "collection_issues" || (prefix == "processes" && key == "items") {
 				continue
 			}
 			walk(join(prefix, key), child, series)

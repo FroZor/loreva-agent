@@ -31,6 +31,9 @@ import (
 
 const (
 	maxProcessItems = 256
+	// maxNetworkInterfaces bounds the interfaces of one sample, as the
+	// contract does; a Docker host has one veth interface per container.
+	maxNetworkInterfaces = 256
 )
 
 // Snapshot contains one measured interval and the scope visible to the agent.
@@ -247,14 +250,26 @@ func collectCPU(
 		result.Total = cpuUtilization(previous.cpuTotal[0], current.cpuTotal[0])
 	}
 
-	if len(previous.cpuPerCPU) == 0 || len(previous.cpuPerCPU) != len(current.cpuPerCPU) {
+	if len(previous.cpuPerCPU) == 0 || len(current.cpuPerCPU) == 0 {
 		*issues = append(*issues, issue("cpu.logical", "collection_failed"))
 	} else {
+		// A processor is matched by its number, not its position: the list
+		// skips offline processors and changes when one goes on or off line.
+		before := make(map[string]cpu.TimesStat, len(previous.cpuPerCPU))
+		for _, previousCPU := range previous.cpuPerCPU {
+			before[previousCPU.CPU] = previousCPU
+		}
+
 		result.Logical = make([]protocol.LogicalProcessorMetrics, 0, len(current.cpuPerCPU))
 		for index, currentCPU := range current.cpuPerCPU {
-			utilization := cpuUtilization(previous.cpuPerCPU[index], currentCPU)
+			previousCPU, exists := before[currentCPU.CPU]
+			if !exists {
+				continue
+			}
+
+			utilization := cpuUtilization(previousCPU, currentCPU)
 			result.Logical = append(result.Logical, protocol.LogicalProcessorMetrics{
-				ID:            "cpu:" + strconv.Itoa(index),
+				ID:            logicalCPUID(currentCPU.CPU, index),
 				UsagePercent:  utilization.UsagePercent,
 				UserPercent:   utilization.UserPercent,
 				SystemPercent: utilization.SystemPercent,
@@ -367,9 +382,11 @@ func collectStorage(
 			ReadOperationsPerSecond:  rate(previousDevice.ReadCount, currentDevice.ReadCount, seconds),
 			WriteOperationsPerSecond: rate(previousDevice.WriteCount, currentDevice.WriteCount, seconds),
 			IOUtilizationPercent:     percent(float64(counterDeltaUint(previousDevice.IoTime, currentDevice.IoTime)) / interval.Seconds() / 10),
-			QueueDepth:               float64(currentDevice.IopsInProgress),
-			ReadBytesTotal:           currentDevice.ReadBytes,
-			WriteBytesTotal:          currentDevice.WriteBytes,
+			// The average queue over the interval, as aqu-sz of iostat:
+			// weighted I/O milliseconds per elapsed millisecond.
+			QueueDepth:      float64(counterDeltaUint(previousDevice.WeightedIO, currentDevice.WeightedIO)) / (seconds * 1000),
+			ReadBytesTotal:  currentDevice.ReadBytes,
+			WriteBytesTotal: currentDevice.WriteBytes,
 		})
 	}
 
@@ -380,6 +397,7 @@ func collectStorage(
 	}
 
 	seen := make(map[string]struct{}, len(partitions))
+	ids := make(map[string]int, len(partitions))
 	unreadable := 0
 	for _, partition := range partitions {
 		if _, exists := seen[partition.Mountpoint]; exists {
@@ -393,8 +411,16 @@ func collectStorage(
 			continue
 		}
 
+		// One device can be mounted several times (btrfs subvolumes, bind
+		// mounts), so the mount point names the file system.
+		filesystemID := "filesystem:" + sanitizeID(partition.Mountpoint)
+		ids[filesystemID]++
+		if count := ids[filesystemID]; count > 1 {
+			filesystemID += ":" + strconv.Itoa(count)
+		}
+
 		filesystem := protocol.FilesystemMetrics{
-			FilesystemID:   "filesystem:" + sanitizeID(partition.Device),
+			FilesystemID:   filesystemID,
 			Mountpoint:     sanitize(partition.Mountpoint, 1024),
 			Device:         sanitize(partition.Device, 1024),
 			FilesystemType: sanitize(partition.Fstype, 64),
@@ -446,12 +472,16 @@ func collectNetwork(
 	}
 	sort.Strings(names)
 
-	result := make([]protocol.NetworkMetrics, 0, len(names))
+	result := make([]protocol.NetworkMetrics, 0, min(len(names), maxNetworkInterfaces))
 	for _, name := range names {
 		currentInterface := current[name]
 		previousInterface, exists := previous[name]
 		if !exists {
 			continue
+		}
+		if len(result) == maxNetworkInterfaces {
+			*issues = append(*issues, issue("network", "truncated"))
+			break
 		}
 
 		interfaceID := interfaceIDs[name]
@@ -475,6 +505,18 @@ func collectNetwork(
 	}
 
 	return result
+}
+
+// logicalCPUID names a processor as the specifications do, "cpu:<number>",
+// from its kernel name such as "cpu5"; index is the fallback for a name
+// without a number.
+func logicalCPUID(name string, index int) string {
+	number, err := strconv.Atoi(strings.TrimPrefix(name, "cpu"))
+	if err != nil || number < 0 {
+		number = index
+	}
+
+	return "cpu:" + strconv.Itoa(number)
 }
 
 func counterDelta(previous, current float64) float64 {

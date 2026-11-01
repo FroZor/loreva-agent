@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 	"time"
@@ -23,6 +24,11 @@ const (
 	// maxMetricBatch is the most samples or rollups one frame carries; the
 	// contract allows 60 samples per metrics.report.
 	maxMetricBatch = 60
+	// maxRollupSeries is the most series one rollup point carries; the
+	// contract allows 4096.
+	maxRollupSeries = 4096
+	// frameEnvelope is room for the fields of a frame around its points.
+	frameEnvelope = 1024
 	// recentAnswers is how many answered request IDs a reporter remembers,
 	// so a second answer to a resent frame is ignored.
 	recentAnswers = 4 * protocol.MaxMetricsWindow
@@ -241,40 +247,71 @@ var errMetricsFrameTooLarge = errors.New("metrics frame is too large")
 
 func (reporter *metricReporter) encodeBatch(items []metricstore.Item, rollup bool) ([]metricFrame, error) {
 	streamID := reporter.source.StreamID()
-	last := items[len(items)-1].LastSequence()
 
 	var frames []metricFrame
-	for index, metricType := range []string{protocol.MetricTypeNode, protocol.MetricTypeContainer} {
+	for _, metricType := range []string{protocol.MetricTypeNode, protocol.MetricTypeContainer} {
+		typed, err := encodeType(streamID, metricType, items, rollup)
+		if err != nil {
+			return nil, err
+		}
+		frames = append(frames, typed...)
+	}
+	frames[len(frames)-1].commit = items[len(items)-1].LastSequence()
+
+	return frames, nil
+}
+
+// encodeType encodes the frames of one metric type. A single compacted
+// window too large for one frame, for example on a node with many
+// containers, is sent as several points that each carry part of its series.
+func encodeType(streamID, metricType string, items []metricstore.Item, rollup bool) ([]metricFrame, error) {
+	if !rollup {
 		requestID, err := agentcrypto.NewUUID()
 		if err != nil {
 			return nil, fmt.Errorf("create metrics request ID: %w", err)
 		}
 
-		var payload []byte
-		if rollup {
-			payload, err = json.Marshal(rollupFrame(requestID, streamID, metricType, items))
-		} else {
-			frame := &protocol.MetricsReport{
-				Type:          protocol.MetricsReportType,
-				SchemaVersion: protocol.MetricsSchemaVersion,
-				RequestID:     requestID,
-				StreamID:      streamID,
-				Metric:        sampleSeries(metricType, items),
-			}
-			payload, err = encodeSampleFrame(frame, &frame.Metric)
+		frame := &protocol.MetricsReport{
+			Type:          protocol.MetricsReportType,
+			SchemaVersion: protocol.MetricsSchemaVersion,
+			RequestID:     requestID,
+			StreamID:      streamID,
+			Metric:        sampleSeries(metricType, items),
 		}
+		payload, err := encodeSampleFrame(frame, &frame.Metric)
 		if err != nil {
 			return nil, err
 		}
-		if len(payload) > maxMetricsReportSize {
+
+		return []metricFrame{{requestID: requestID, metricType: metricType, payload: payload}}, nil
+	}
+
+	points := rollupPoints(metricType, items)
+	batches := [][]protocol.MetricRollup{points}
+	if len(points) == 1 {
+		batches = nil
+		for _, part := range splitRollup(points[0], maxMetricsReportSize-frameEnvelope) {
+			batches = append(batches, []protocol.MetricRollup{part})
+		}
+	}
+
+	var frames []metricFrame
+	for _, batch := range batches {
+		requestID, err := agentcrypto.NewUUID()
+		if err != nil {
+			return nil, fmt.Errorf("create metrics request ID: %w", err)
+		}
+		payload, err := json.Marshal(rollupFrame(requestID, streamID, metricType, batch))
+		if err != nil {
+			return nil, fmt.Errorf("encode metrics frame: %w", err)
+		}
+		if len(payload) > maxMetricsReportSize || slices.ContainsFunc(batch, func(point protocol.MetricRollup) bool {
+			return len(point.Series) > maxRollupSeries
+		}) {
 			return nil, errMetricsFrameTooLarge
 		}
 
-		frame := metricFrame{requestID: requestID, metricType: metricType, payload: payload}
-		if index == 1 {
-			frame.commit = last
-		}
-		frames = append(frames, frame)
+		frames = append(frames, metricFrame{requestID: requestID, metricType: metricType, payload: payload})
 	}
 
 	return frames, nil
@@ -307,7 +344,8 @@ func sampleSeries(metricType string, items []metricstore.Item) protocol.MetricSe
 	return protocol.MetricSeries{Type: metricType, Samples: samples}
 }
 
-func rollupFrame(requestID, streamID, metricType string, items []metricstore.Item) *protocol.MetricsRollupReport {
+// rollupPoints returns the node or the container rollups of compacted items.
+func rollupPoints(metricType string, items []metricstore.Item) []protocol.MetricRollup {
 	points := make([]protocol.MetricRollup, 0, len(items))
 	for _, item := range items {
 		if metricType == protocol.MetricTypeNode {
@@ -317,6 +355,10 @@ func rollupFrame(requestID, streamID, metricType string, items []metricstore.Ite
 		}
 	}
 
+	return points
+}
+
+func rollupFrame(requestID, streamID, metricType string, points []protocol.MetricRollup) *protocol.MetricsRollupReport {
 	return &protocol.MetricsRollupReport{
 		Type:          protocol.MetricsRollupType,
 		SchemaVersion: protocol.MetricsSchemaVersion,
@@ -324,6 +366,40 @@ func rollupFrame(requestID, streamID, metricType string, items []metricstore.Ite
 		StreamID:      streamID,
 		Metric:        protocol.MetricRollupSeries{Type: metricType, Points: points},
 	}
+}
+
+// splitRollup divides the series of one window into points of at most
+// budget encoded bytes and maxRollupSeries series. Every part keeps the
+// window's sequences and times, so a reader merges them by first_sequence.
+// A window that fits is returned as is.
+func splitRollup(point protocol.MetricRollup, budget int) []protocol.MetricRollup {
+	empty := point
+	empty.Series = map[string]protocol.MetricAggregate{}
+	header, err := json.Marshal(empty)
+	if err != nil {
+		return []protocol.MetricRollup{point}
+	}
+
+	var parts []protocol.MetricRollup
+	current := empty
+	size := len(header)
+	for _, key := range slices.Sorted(maps.Keys(point.Series)) {
+		entry, err := json.Marshal(map[string]protocol.MetricAggregate{key: point.Series[key]})
+		if err != nil {
+			continue
+		}
+
+		if len(current.Series) > 0 && (size+len(entry) > budget || len(current.Series) == maxRollupSeries) {
+			parts = append(parts, current)
+			current = empty
+			current.Series = map[string]protocol.MetricAggregate{}
+			size = len(header)
+		}
+		current.Series[key] = point.Series[key]
+		size += len(entry)
+	}
+
+	return append(parts, current)
 }
 
 // encodeSampleFrame marshals a frame of samples. A frame of one oversized
@@ -545,7 +621,7 @@ func queryResult(source MetricsSource, requestID string, from, to time.Time) (pr
 		if err != nil {
 			return result, err
 		}
-		if size+len(data) > maxMetricsReportSize-1024 {
+		if size+len(data) > maxMetricsReportSize-frameEnvelope {
 			// An item that alone exceeds the frame is skipped, so paging
 			// still moves forward.
 			if len(result.Items) == 0 {

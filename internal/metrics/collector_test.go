@@ -1,12 +1,16 @@
 package metrics
 
 import (
+	"fmt"
 	"math"
+	"slices"
 	"testing"
 	"time"
 
 	"github.com/moby/moby/api/types/container"
 	"github.com/shirou/gopsutil/v4/cpu"
+	"github.com/shirou/gopsutil/v4/disk"
+	gnet "github.com/shirou/gopsutil/v4/net"
 
 	"github.com/FroZor/loreva-agent/internal/protocol"
 )
@@ -129,5 +133,64 @@ func TestContainerLimitCoresOnlyBelowOnlineCPUs(t *testing.T) {
 				t.Fatalf("containerLimitCores() = %v, want %v", got, test.want)
 			}
 		})
+	}
+}
+
+func TestCollectCPUNamesLogicalProcessorsByNumber(t *testing.T) {
+	total := []cpu.TimesStat{{CPU: "cpu-total", User: 10, Idle: 90}}
+	previous := rawCounters{cpuTotal: total, cpuPerCPU: []cpu.TimesStat{
+		{CPU: "cpu0", User: 1, Idle: 9}, {CPU: "cpu2", User: 1, Idle: 9},
+	}}
+	// Processor 1 is offline and processor 3 comes online between samples.
+	current := rawCounters{cpuTotal: total, cpuPerCPU: []cpu.TimesStat{
+		{CPU: "cpu0", User: 2, Idle: 18}, {CPU: "cpu2", User: 6, Idle: 14}, {CPU: "cpu3", User: 1, Idle: 1},
+	}}
+
+	var issues []protocol.CollectionIssue
+	metrics := collectCPU(t.Context(), previous, current, &issues)
+
+	if len(metrics.Logical) != 2 || metrics.Logical[0].ID != "cpu:0" || metrics.Logical[1].ID != "cpu:2" {
+		t.Fatalf("logical processors = %+v", metrics.Logical)
+	}
+	assertClose(t, "cpu:2 usage", metrics.Logical[1].UsagePercent, 50)
+}
+
+func TestCollectStorageAveragesTheQueue(t *testing.T) {
+	previous := map[string]disk.IOCountersStat{"sda": {WeightedIO: 1000, IopsInProgress: 0}}
+	current := map[string]disk.IOCountersStat{"sda": {WeightedIO: 3500, IopsInProgress: 0}}
+
+	var issues []protocol.CollectionIssue
+	storage := collectStorage(t.Context(), previous, current, time.Second, &issues)
+
+	assertClose(t, "queue depth", storage.Devices[0].QueueDepth, 2.5)
+
+	// File systems come from the host this test runs on; whatever it
+	// mounts, every file system keeps its own identifier.
+	seen := make(map[string]bool, len(storage.Filesystems))
+	for _, filesystem := range storage.Filesystems {
+		if seen[filesystem.FilesystemID] {
+			t.Fatalf("file system ID %s is used twice", filesystem.FilesystemID)
+		}
+		seen[filesystem.FilesystemID] = true
+	}
+}
+
+func TestCollectNetworkBoundsInterfaces(t *testing.T) {
+	previous := make(map[string]gnet.IOCountersStat)
+	current := make(map[string]gnet.IOCountersStat)
+	for index := range maxNetworkInterfaces + 10 {
+		name := fmt.Sprintf("veth%03d", index)
+		previous[name] = gnet.IOCountersStat{Name: name}
+		current[name] = gnet.IOCountersStat{Name: name}
+	}
+
+	var issues []protocol.CollectionIssue
+	network := collectNetwork(previous, current, time.Second, &issues)
+
+	if len(network) != maxNetworkInterfaces {
+		t.Fatalf("%d interfaces, want %d", len(network), maxNetworkInterfaces)
+	}
+	if !slices.Contains(issues, protocol.CollectionIssue{Component: "network", Code: "truncated"}) {
+		t.Fatalf("issues = %+v, want network truncated", issues)
 	}
 }

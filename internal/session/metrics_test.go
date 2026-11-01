@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -487,5 +488,69 @@ func TestMetricFramesSendAnEmptyProcessListAfterTheStoreDroppedIt(t *testing.T) 
 	item := toProtocolItem(items[0])
 	if series.Samples[0].Node.Processes.Items == nil || item.Sample.Node.Processes.Items == nil {
 		t.Fatal("a stored sample without a process list is sent with processes.items null")
+	}
+}
+
+func TestMetricReporterSplitsAWindowTooLargeForOneFrame(t *testing.T) {
+	store, err := metricstore.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	containers := make([]protocol.ContainerMetrics, 300)
+	for index := range containers {
+		containers[index] = protocol.ContainerMetrics{ContainerID: fmt.Sprintf("container:%d", index), Name: "web", State: "running"}
+	}
+	start := time.Now().UTC().Add(-3 * time.Hour).Truncate(time.Hour)
+	for index := range 60 {
+		err := store.Append(metrics.Snapshot{
+			ObservedAt: start.Add(time.Duration(index) * time.Second), Interval: time.Second,
+			ObservationScope: protocol.ObservationScopeHost, Containers: containers,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := store.Maintain(time.Now(), true); err != nil {
+		t.Fatal(err)
+	}
+
+	reporter := newMetricReporter(store, "device:a")
+	reporter.subscribe(false, protocol.MaxMetricsWindow)
+	agent, peer := newWebSocketPair(t)
+	if _, err := reporter.writeNext(t.Context(), agent); err != nil {
+		t.Fatal(err)
+	}
+
+	series := 0
+	containerFrames := 0
+	for len(reporter.inflight) > 0 {
+		_, requestID, data := readFrame(t, peer)
+		if len(data) > maxMetricsReportSize {
+			t.Fatalf("frame of %d bytes exceeds the limit", len(data))
+		}
+		var frame protocol.MetricsRollupReport
+		if err := protocol.DecodeStrict(data, &frame); err != nil {
+			t.Fatal(err)
+		}
+		point := frame.Metric.Points[0]
+		if len(frame.Metric.Points) != 1 || point.FirstSequence != 1 || point.LastSequence != 60 || len(point.Series) > maxRollupSeries {
+			t.Fatalf("part has %d points, sequences %d-%d, %d series", len(frame.Metric.Points), point.FirstSequence, point.LastSequence, len(point.Series))
+		}
+		if frame.Metric.Type == protocol.MetricTypeContainer {
+			containerFrames++
+			series += len(point.Series)
+		}
+
+		accept(t, reporter, requestID)
+		if _, err := reporter.writeNext(t.Context(), agent); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if containerFrames < 2 || series != len(store.After(0, 1)[0].Container.Series) {
+		t.Fatalf("%d container parts carry %d series", containerFrames, series)
+	}
+	if store.Cursor("device:a") != 60 {
+		t.Fatalf("cursor = %d after every part, want 60", store.Cursor("device:a"))
 	}
 }
