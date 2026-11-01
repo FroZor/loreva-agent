@@ -21,6 +21,7 @@ import (
 	"github.com/FroZor/loreva-agent/internal/metrics"
 	"github.com/FroZor/loreva-agent/internal/metricstore"
 	"github.com/FroZor/loreva-agent/internal/networkinfo"
+	"github.com/FroZor/loreva-agent/internal/nodeapi"
 	"github.com/FroZor/loreva-agent/internal/publicip"
 	"github.com/FroZor/loreva-agent/internal/session"
 	"github.com/FroZor/loreva-agent/internal/specifications"
@@ -124,7 +125,7 @@ func runAgent(arguments []string, logger *slog.Logger) error {
 	containers := openContainerServices(ctx, logger)
 	defer containers.close()
 
-	collectors := session.Collectors{
+	collectors := nodeapi.Collectors{
 		Specifications: specifications.Collect,
 		Network:        networkinfo.NewCollector(publicip.NewResolver(publicip.SettingsFromEnvironment())).Collect,
 		Metrics:        metricStore,
@@ -142,17 +143,8 @@ func runAgent(arguments []string, logger *slog.Logger) error {
 			return direct.Run(ctx, store, node, direct.Options{
 				Version:        version,
 				PortalEnrolled: identity != nil,
-				Collectors: direct.Collectors{
-					Specifications: collectors.Specifications,
-					Network:        collectors.Network,
-					Metrics:        collectors.Metrics,
-					Processes:      collectors.Processes,
-				},
-				Workloads:  workloadManager,
-				Containers: containers.io,
-				Files:      containers.files,
-				Inventory:  containers.inventory,
-				Logger:     logger,
+				Collectors:     collectors,
+				Logger:         logger,
 			})
 		})
 	}
@@ -168,9 +160,9 @@ func runAgent(arguments []string, logger *slog.Logger) error {
 // containerServices are the Docker-backed services of a session; they are
 // nil when the node has no Docker.
 type containerServices struct {
-	io        session.ContainerIO
-	files     session.ContainerFiles
-	inventory session.ContainerInventory
+	io        nodeapi.ContainerIO
+	files     nodeapi.ContainerFiles
+	inventory nodeapi.ContainerInventory
 	close     func()
 }
 

@@ -1,4 +1,4 @@
-package session
+package direct
 
 import (
 	"context"
@@ -12,48 +12,42 @@ import (
 	"github.com/coder/websocket"
 
 	"github.com/FroZor/loreva-agent/internal/agentcrypto"
+	"github.com/FroZor/loreva-agent/internal/nodeapi"
 	"github.com/FroZor/loreva-agent/internal/protocol"
 	"github.com/FroZor/loreva-agent/internal/workload"
-	"github.com/FroZor/loreva-agent/internal/wsframe"
 )
 
-const (
-	deviceWriteTimeout = 10 * time.Second
-	// uploadIdleTimeout ends an upload whose next chunk does not arrive.
-	uploadIdleTimeout = 30 * time.Second
-)
+// uploadIdleTimeout ends an upload whose next chunk does not arrive.
+const uploadIdleTimeout = 30 * time.Second
 
-// ErrDeviceNotFound is returned by a DeviceDirectory for an unknown device.
-var ErrDeviceNotFound = errors.New("device not found")
-
-// DeviceDirectory lists and revokes the node's paired devices. currentID is
+// deviceDirectory lists and revokes the node's paired devices. currentID is
 // the device of the calling session.
-type DeviceDirectory interface {
+type deviceDirectory interface {
 	List(currentID string) []protocol.Device
 	Remove(currentID, deviceID string) error
 }
 
-// DeviceConfig is what a direct device session needs from the node.
-type DeviceConfig struct {
+// deviceConfig is what a direct device session needs from the node.
+type deviceConfig struct {
 	// Hello is the first frame; it identifies the node and the device.
 	Hello protocol.SessionHello
 	// NodeID is the controller scope of every workload command the device sends.
 	NodeID     string
-	Collectors Collectors
+	Collectors nodeapi.Collectors
 	// Workloads may be nil when the node has no workload runtime.
-	Workloads WorkloadController
+	Workloads nodeapi.WorkloadController
 	// WorkloadResults carries responses to commands of the node's devices.
 	WorkloadResults <-chan any
-	Devices         DeviceDirectory
+	Devices         deviceDirectory
 	Logger          *slog.Logger
 }
 
-// ServeDevice runs the node protocol for one paired device until the device
+// serveDevice runs the node protocol for one paired device until the device
 // disconnects or ctx is cancelled. The device receives the same node
 // reports, metrics, and workload responses as the portal and acknowledges
 // them the same way. Instead of signed portal commands it sends workload
 // requests directly, uploads artifacts, and manages paired devices.
-func ServeDevice(ctx context.Context, conn *websocket.Conn, config DeviceConfig) error {
+func serveDevice(ctx context.Context, conn *websocket.Conn, config deviceConfig) error {
 	if config.Logger == nil {
 		config.Logger = slog.New(slog.DiscardHandler)
 	}
@@ -61,86 +55,89 @@ func ServeDevice(ctx context.Context, conn *websocket.Conn, config DeviceConfig)
 	readCtx, cancelRead := context.WithCancel(ctx)
 	defer cancelRead()
 
-	if err := writeDeviceFrame(readCtx, conn, config.Hello); err != nil {
+	if err := nodeapi.WriteFrame(readCtx, conn, config.Hello); err != nil {
 		return fmt.Errorf("write session hello: %w", err)
 	}
 
-	reads := startFrameReader(readCtx, conn)
+	reads := nodeapi.ReadFrames(readCtx, conn)
 
-	data := newExchange(readCtx, config.Collectors, &nodeReportState{}, "device:"+config.Hello.DeviceID)
-	defer data.stop()
+	peer := nodeapi.NewPeer(readCtx, nodeapi.PeerConfig{
+		Conn:       conn,
+		Collectors: config.Collectors,
+		Reader:     "device:" + config.Hello.DeviceID,
+		Reject:     nodeapi.Reject(conn),
+		Events: nodeapi.Events{ReportRejected: func(rejection nodeapi.NodeReportRejection) {
+			config.Logger.Warn("device rejected a node report", "type", rejection.Type, "code", rejection.Code)
+		}},
+		Logger: config.Logger,
+	})
+	defer peer.Close()
 
-	pingTimer := time.NewTimer(nextPingDelay())
+	pingTimer := time.NewTimer(nodeapi.NextPingDelay())
 	defer pingTimer.Stop()
 
-	uploadTimer := newStoppedTimer()
+	uploadTimer := nodeapi.NewStoppedTimer()
 	defer uploadTimer.Stop()
 
 	session := &deviceSession{
 		config:      config,
 		conn:        conn,
-		exchange:    data,
+		peer:        peer,
 		uploadTimer: uploadTimer,
-		containers:  newContainerStreams(readCtx, config.Collectors.Containers, config.Collectors.Files, conn, config.Logger),
 	}
 	defer session.cancelUpload()
-	defer session.containers.close()
-
-	events := Events{ReportRejected: func(rejection NodeReportRejection) {
-		config.Logger.Warn("device rejected a node report", "type", rejection.Type, "code", rejection.Code)
-	}}
 
 	for {
 		select {
 		case <-ctx.Done():
 			closeErr := conn.Close(websocket.StatusNormalClosure, "shutdown")
 			return errors.Join(ctx.Err(), closeErr)
-		case result := <-reads:
-			if result.err != nil {
-				return result.err
+		case frame := <-reads:
+			if frame.Err != nil {
+				return frame.Err
 			}
 
-			if result.binary {
-				if err := session.containers.handleBinary(readCtx, result.data, session.reject); err != nil {
+			if frame.Binary {
+				if err := peer.HandleBinary(readCtx, frame.Data); err != nil {
 					return err
 				}
 				continue
 			}
-			if err := session.handle(readCtx, result.data, events); err != nil {
+			if err := session.handle(readCtx, frame.Data); err != nil {
 				return err
 			}
-		case id := <-session.containers.finished:
-			session.containers.streamFinished(id)
+		case id := <-peer.StreamFinished():
+			peer.FinishStream(id)
 		case response := <-config.WorkloadResults:
-			if err := writeDeviceFrame(readCtx, conn, response); err != nil {
+			if err := nodeapi.WriteFrame(readCtx, conn, response); err != nil {
 				return fmt.Errorf("write workload response: %w", err)
 			}
-		case report := <-data.reports.results:
-			if err := data.reportCollected(readCtx, conn, report); err != nil {
+		case report := <-peer.ReportCollected():
+			if err := peer.SendReport(readCtx, report); err != nil {
 				return err
 			}
-		case <-data.reportReplyTimer.C:
-			data.scheduleNodeReportRetry(events, "ack_timeout")
-		case <-data.reportRetryTimer.C:
-			if err := data.retryReport(readCtx, conn); err != nil {
+		case <-peer.ReportReplyTimeout():
+			peer.ReportTimedOut()
+		case <-peer.ReportRetry():
+			if err := peer.RetryReport(readCtx); err != nil {
 				return err
 			}
-		case <-data.metrics.wake:
-			if err := data.metricsStored(readCtx, conn); err != nil {
+		case <-peer.MetricsChanged():
+			if err := peer.SendMetrics(readCtx); err != nil {
 				return err
 			}
-		case <-data.metricsReplyTimer.C:
-			data.scheduleMetricsRetry(events, "ack_timeout")
-		case <-data.metricsRetryTimer.C:
-			if err := data.retryMetrics(readCtx, conn); err != nil {
+		case <-peer.MetricsReplyTimeout():
+			peer.MetricsTimedOut()
+		case <-peer.MetricsRetry():
+			if err := peer.RetryMetrics(readCtx); err != nil {
 				return err
 			}
 		case <-pingTimer.C:
-			if err := ping(ctx, conn); err != nil {
+			if err := nodeapi.Ping(ctx, conn); err != nil {
 				return err
 			}
 
-			pingTimer.Reset(nextPingDelay())
+			pingTimer.Reset(nodeapi.NextPingDelay())
 		case <-uploadTimer.C:
 			if session.upload != nil {
 				if err := session.failUpload(readCtx, "upload_timeout", errors.New("no chunk arrived in time")); err != nil {
@@ -152,12 +149,11 @@ func ServeDevice(ctx context.Context, conn *websocket.Conn, config DeviceConfig)
 }
 
 type deviceSession struct {
-	config      DeviceConfig
+	config      deviceConfig
 	conn        *websocket.Conn
-	exchange    *exchange
+	peer        *nodeapi.Peer
 	upload      *artifactUpload
 	uploadTimer *time.Timer
-	containers  *containerStreams
 }
 
 // artifactUpload streams announced chunks into the workload artifact cache.
@@ -171,21 +167,13 @@ type artifactUpload struct {
 
 // handle processes one frame. A returned error ends the session; requests
 // the agent cannot accept are answered with an error frame instead.
-func (s *deviceSession) handle(ctx context.Context, data []byte, events Events) error {
+func (s *deviceSession) handle(ctx context.Context, data []byte) error {
 	messageType, err := protocol.MessageType(data)
 	if err != nil {
 		return errors.New("device sent a message that is not valid JSON")
 	}
 
-	handled, err := s.exchange.handleAcknowledgement(ctx, s.conn, messageType, data, events)
-	if handled {
-		return err
-	}
-
-	if handled, err := s.exchange.handleRequest(ctx, s.conn, messageType, data, s.reject); handled {
-		return err
-	}
-	if handled, err := s.containers.handle(ctx, messageType, data, s.reject); handled {
+	if handled, err := s.peer.HandleMessage(ctx, messageType, data); handled {
 		return err
 	}
 
@@ -220,10 +208,10 @@ func (s *deviceSession) handleWorkload(ctx context.Context, data []byte) error {
 		return s.reject(ctx, request.RequestID, "invalid_command", err.Error())
 	}
 	if s.config.Workloads == nil {
-		return writeWorkloadRejected(ctx, s.conn, command, "workload_runtime_unavailable")
+		return nodeapi.WriteWorkloadRejected(ctx, s.conn, command, "workload_runtime_unavailable")
 	}
 	if err := s.config.Workloads.Submit(command, nil); err != nil {
-		return writeWorkloadRejected(ctx, s.conn, command, "workload_queue_full")
+		return nodeapi.WriteWorkloadRejected(ctx, s.conn, command, "workload_queue_full")
 	}
 
 	return nil
@@ -235,7 +223,7 @@ func (s *deviceSession) handleDevicesList(ctx context.Context, data []byte) erro
 		return s.reject(ctx, "", "invalid_message", "devices.list needs a UUID request_id")
 	}
 
-	return writeDeviceFrame(ctx, s.conn, protocol.DevicesListResult{
+	return nodeapi.WriteFrame(ctx, s.conn, protocol.DevicesListResult{
 		Type:      protocol.DevicesListResultType,
 		RequestID: request.RequestID,
 		Devices:   s.config.Devices.List(s.config.Hello.DeviceID),
@@ -252,14 +240,14 @@ func (s *deviceSession) handleDeviceRemove(ctx context.Context, data []byte) err
 	}
 
 	if err := s.config.Devices.Remove(s.config.Hello.DeviceID, request.DeviceID); err != nil {
-		if errors.Is(err, ErrDeviceNotFound) {
+		if errors.Is(err, errDeviceNotFound) {
 			return s.reject(ctx, request.RequestID, "not_found", "device not found")
 		}
 
 		return fmt.Errorf("remove device: %w", err)
 	}
 
-	return writeDeviceFrame(ctx, s.conn, protocol.DeviceRemoveResult{
+	return nodeapi.WriteFrame(ctx, s.conn, protocol.DeviceRemoveResult{
 		Type:      protocol.DeviceRemoveResultType,
 		RequestID: request.RequestID,
 		DeviceID:  request.DeviceID,
@@ -336,7 +324,7 @@ func (s *deviceSession) handleUploadChunk(ctx context.Context, data []byte) erro
 	}
 	upload.next += int64(len(decoded))
 	if upload.next < upload.size {
-		stopTimer(s.uploadTimer)
+		nodeapi.StopTimer(s.uploadTimer)
 		s.uploadTimer.Reset(uploadIdleTimeout)
 
 		return nil
@@ -347,7 +335,7 @@ func (s *deviceSession) handleUploadChunk(ctx context.Context, data []byte) erro
 	}
 
 	s.upload = nil
-	stopTimer(s.uploadTimer)
+	nodeapi.StopTimer(s.uploadTimer)
 
 	return s.uploadResult(ctx, upload.requestID, "invalid_artifact", storedError(<-upload.stored))
 }
@@ -356,7 +344,7 @@ func (s *deviceSession) handleUploadChunk(ctx context.Context, data []byte) erro
 func (s *deviceSession) failUpload(ctx context.Context, code string, cause error) error {
 	upload := s.upload
 	s.upload = nil
-	stopTimer(s.uploadTimer)
+	nodeapi.StopTimer(s.uploadTimer)
 	upload.writer.CloseWithError(cause)
 
 	// The store sees the closed pipe; the device learns the cause it caused.
@@ -394,40 +382,12 @@ func (s *deviceSession) uploadResult(ctx context.Context, requestID, code string
 	if cause != nil {
 		result.State = protocol.ArtifactRejected
 		result.Code = code
-		result.Message = boundedMessage(cause.Error())
+		result.Message = nodeapi.BoundedMessage(cause.Error())
 	}
 
-	return writeDeviceFrame(ctx, s.conn, result)
+	return nodeapi.WriteFrame(ctx, s.conn, result)
 }
 
 func (s *deviceSession) reject(ctx context.Context, requestID, code, message string) error {
-	// Echo only a well-formed request ID, so the frame stays bounded.
-	if !agentcrypto.ValidUUID(requestID) {
-		requestID = ""
-	}
-
-	return writeDeviceFrame(ctx, s.conn, protocol.Error{
-		Type:      protocol.ErrorType,
-		RequestID: requestID,
-		Code:      code,
-		Message:   boundedMessage(message),
-	})
-}
-
-func writeDeviceFrame(ctx context.Context, conn *websocket.Conn, frame any) error {
-	writeCtx, cancel := context.WithTimeout(ctx, deviceWriteTimeout)
-	defer cancel()
-
-	return wsframe.WriteJSON(writeCtx, conn, frame)
-}
-
-// boundedMessage keeps error text short; it never carries secrets, but a
-// device should not receive unbounded internal detail.
-func boundedMessage(message string) string {
-	const limit = 512
-	if len(message) > limit {
-		return message[:limit]
-	}
-
-	return message
+	return nodeapi.Reject(s.conn)(ctx, requestID, code, message)
 }

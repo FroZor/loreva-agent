@@ -1,4 +1,4 @@
-package session
+package nodeapi
 
 import (
 	"context"
@@ -379,7 +379,7 @@ func (reporter *metricReporter) complete() {
 func (reporter *metricReporter) retryDelay() time.Duration {
 	reporter.retryAttempt++
 
-	return retryDelay(reporter.retryAttempt)
+	return RetryDelay(reporter.retryAttempt)
 }
 
 // discardActive skips a frame the peer rejected for good, so one bad frame

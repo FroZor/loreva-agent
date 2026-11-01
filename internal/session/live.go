@@ -10,16 +10,10 @@ import (
 	"github.com/coder/websocket"
 
 	"github.com/FroZor/loreva-agent/internal/agentcrypto"
+	"github.com/FroZor/loreva-agent/internal/nodeapi"
 	"github.com/FroZor/loreva-agent/internal/protocol"
 	"github.com/FroZor/loreva-agent/internal/workload"
 	"github.com/FroZor/loreva-agent/internal/wsframe"
-)
-
-const (
-	pingInterval         = 30 * time.Second
-	pingJitter           = 5 * time.Second
-	pongTimeout          = 10 * time.Second
-	workloadWriteTimeout = 10 * time.Second
 )
 
 var (
@@ -27,16 +21,8 @@ var (
 	errDrainRequested     = errors.New("portal requested drain")
 )
 
-type readResult struct {
-	data []byte
-	// binary marks a binary stream frame; every other frame is JSON text.
-	binary bool
-	err    error
-}
-
 type liveState struct {
-	*exchange
-	containers        *containerStreams
+	peer              *nodeapi.Peer
 	renewal           *activeRenewal
 	renewReplyTimer   *time.Timer
 	sourceExpiryTimer *time.Timer
@@ -53,7 +39,7 @@ func (r *Runner) maintain(
 	readCtx, cancelRead := context.WithCancel(ctx)
 	defer cancelRead()
 
-	reads := startFrameReader(readCtx, conn)
+	reads := nodeapi.ReadFrames(readCtx, conn)
 
 	renewDelay, err := r.renewalDelay(time.Now())
 	if err != nil {
@@ -63,10 +49,10 @@ func (r *Runner) maintain(
 	renewTimer := time.NewTimer(renewDelay)
 	defer renewTimer.Stop()
 
-	pingTimer := time.NewTimer(nextPingDelay())
+	pingTimer := time.NewTimer(nodeapi.NextPingDelay())
 	defer pingTimer.Stop()
 
-	renewReplyTimer := newStoppedTimer()
+	renewReplyTimer := nodeapi.NewStoppedTimer()
 	defer renewReplyTimer.Stop()
 
 	sourceExpiryTimer, sourceExpiry := r.newSourceExpiryTimer(endpoint)
@@ -74,19 +60,23 @@ func (r *Runner) maintain(
 		defer sourceExpiryTimer.Stop()
 	}
 
-	data := newExchange(readCtx, r.collectors, &r.reports, "portal:"+r.identity.PortalID)
-	defer data.stop()
-
 	logger := r.collectors.Logger
 	if logger == nil {
 		logger = slog.New(slog.DiscardHandler)
 	}
-	containers := newContainerStreams(readCtx, r.collectors.Containers, r.collectors.Files, conn, logger.With("portal_id", r.identity.PortalID))
-	defer containers.close()
+	peer := nodeapi.NewPeer(readCtx, nodeapi.PeerConfig{
+		Conn:       conn,
+		Collectors: r.collectors,
+		Reports:    &r.reports,
+		Reader:     "portal:" + r.identity.PortalID,
+		Reject:     nodeapi.Reject(conn),
+		Events:     nodeapi.Events{ReportRejected: events.ReportRejected},
+		Logger:     logger.With("portal_id", r.identity.PortalID),
+	})
+	defer peer.Close()
 
 	live := liveState{
-		exchange:          data,
-		containers:        containers,
+		peer:              peer,
 		renewReplyTimer:   renewReplyTimer,
 		sourceExpiryTimer: sourceExpiryTimer,
 	}
@@ -100,47 +90,44 @@ func (r *Runner) maintain(
 		case <-ctx.Done():
 			closeErr := conn.Close(websocket.StatusNormalClosure, "shutdown")
 			return errors.Join(ctx.Err(), closeErr)
-		case result := <-reads:
-			if result.err != nil {
-				return result.err
+		case frame := <-reads:
+			if frame.Err != nil {
+				return frame.Err
 			}
 
-			if result.binary {
-				if err := live.containers.handleBinary(readCtx, result.data, portalReject(conn)); err != nil {
+			if frame.Binary {
+				if err := peer.HandleBinary(readCtx, frame.Data); err != nil {
 					return err
 				}
 				continue
 			}
-			if err := r.handleWorkingMessage(readCtx, conn, sessionNonce, endpoint, result.data, &live, events); err != nil {
+			if err := r.handleWorkingMessage(readCtx, conn, sessionNonce, endpoint, frame.Data, &live); err != nil {
 				return err
 			}
 		case response := <-workloadResults:
-			writeCtx, cancel := context.WithTimeout(readCtx, workloadWriteTimeout)
-			err := wsframe.WriteJSON(writeCtx, conn, response)
-			cancel()
-			if err != nil {
+			if err := nodeapi.WriteFrame(readCtx, conn, response); err != nil {
 				return fmt.Errorf("write workload response: %w", err)
 			}
-		case id := <-live.containers.finished:
-			live.containers.streamFinished(id)
-		case report := <-live.reports.results:
-			if err := live.reportCollected(readCtx, conn, report); err != nil {
+		case id := <-peer.StreamFinished():
+			peer.FinishStream(id)
+		case report := <-peer.ReportCollected():
+			if err := peer.SendReport(readCtx, report); err != nil {
 				return err
 			}
-		case <-live.reportReplyTimer.C:
-			live.scheduleNodeReportRetry(events, "ack_timeout")
-		case <-live.reportRetryTimer.C:
-			if err := live.retryReport(readCtx, conn); err != nil {
+		case <-peer.ReportReplyTimeout():
+			peer.ReportTimedOut()
+		case <-peer.ReportRetry():
+			if err := peer.RetryReport(readCtx); err != nil {
 				return err
 			}
-		case <-live.metrics.wake:
-			if err := live.metricsStored(readCtx, conn); err != nil {
+		case <-peer.MetricsChanged():
+			if err := peer.SendMetrics(readCtx); err != nil {
 				return err
 			}
-		case <-live.metricsReplyTimer.C:
-			live.scheduleMetricsRetry(events, "ack_timeout")
-		case <-live.metricsRetryTimer.C:
-			if err := live.retryMetrics(readCtx, conn); err != nil {
+		case <-peer.MetricsReplyTimeout():
+			peer.MetricsTimedOut()
+		case <-peer.MetricsRetry():
+			if err := peer.RetryMetrics(readCtx); err != nil {
 				return err
 			}
 		case <-renewTimer.C:
@@ -160,41 +147,13 @@ func (r *Runner) maintain(
 			closeErr := conn.Close(websocket.StatusNormalClosure, "source pool expired")
 			return errors.Join(errReconnectRequested, closeErr)
 		case <-pingTimer.C:
-			if err := ping(ctx, conn); err != nil {
+			if err := nodeapi.Ping(ctx, conn); err != nil {
 				return err
 			}
 
 			*heartbeatHealthy = true
-			pingTimer.Reset(nextPingDelay())
+			pingTimer.Reset(nodeapi.NextPingDelay())
 		}
-	}
-}
-
-func startFrameReader(ctx context.Context, conn *websocket.Conn) <-chan readResult {
-	results := make(chan readResult, 1)
-
-	go func() {
-		for {
-			messageType, data, err := conn.Read(ctx)
-			if err != nil {
-				sendReadResult(ctx, results, readResult{err: err})
-				return
-			}
-			if !sendReadResult(ctx, results, readResult{data: data, binary: messageType == websocket.MessageBinary}) {
-				return
-			}
-		}
-	}()
-
-	return results
-}
-
-func sendReadResult(ctx context.Context, results chan<- readResult, result readResult) bool {
-	select {
-	case results <- result:
-		return true
-	case <-ctx.Done():
-		return false
 	}
 }
 
@@ -205,26 +164,14 @@ func (r *Runner) handleWorkingMessage(
 	endpoint string,
 	data []byte,
 	live *liveState,
-	events Events,
 ) error {
 	messageType, err := protocol.MessageType(data)
 	if err != nil {
 		return r.endpointFailure(endpoint, errors.New("working message is not valid JSON"))
 	}
 
-	handled, err := live.handleAcknowledgement(ctx, conn, messageType, data, events)
-	if rejection, ok := errors.AsType[*identityRejection](err); ok {
-		return r.endpointFailure(endpoint, rejection.err)
-	}
-	if handled {
-		return err
-	}
-
-	if handled, err := live.handleRequest(ctx, conn, messageType, data, portalReject(conn)); handled {
-		return err
-	}
-	if handled, err := live.containers.handle(ctx, messageType, data, portalReject(conn)); handled {
-		return err
+	if handled, err := live.peer.HandleMessage(ctx, messageType, data); handled {
+		return r.peerFailure(endpoint, err)
 	}
 
 	switch messageType {
@@ -239,7 +186,7 @@ func (r *Runner) handleWorkingMessage(
 			return r.endpointFailure(endpoint, errors.New("portal sent an unsolicited renewal result"))
 		}
 
-		stopTimer(live.renewReplyTimer)
+		nodeapi.StopTimer(live.renewReplyTimer)
 
 		return r.handleRenewalResponse(conn, endpoint, live.renewal, data)
 	default:
@@ -274,38 +221,13 @@ func (r *Runner) handlePortalCommand(
 		return r.endpointFailure(endpoint, err)
 	}
 	if r.workloads == nil {
-		return writeWorkloadRejected(ctx, conn, command, "workload_runtime_unavailable")
+		return nodeapi.WriteWorkloadRejected(ctx, conn, command, "workload_runtime_unavailable")
 	}
 	if err := r.workloads.Submit(command, r.artifacts); err != nil {
-		return writeWorkloadRejected(ctx, conn, command, "workload_queue_full")
+		return nodeapi.WriteWorkloadRejected(ctx, conn, command, "workload_queue_full")
 	}
 
 	return nil
-}
-
-// writeWorkloadRejected answers a command the agent could not queue.
-func writeWorkloadRejected(
-	ctx context.Context,
-	conn *websocket.Conn,
-	command protocol.WorkloadCommand,
-	code string,
-) error {
-	writeCtx, cancel := context.WithTimeout(ctx, workloadWriteTimeout)
-	err := wsframe.WriteJSON(writeCtx, conn, protocol.WorkloadOperationResult{
-		Type:          protocol.WorkloadOperationResultType,
-		SchemaVersion: protocol.WorkloadSchemaVersion,
-		RequestID:     command.RequestID,
-		PortalID:      command.PortalID,
-		NodeID:        command.NodeID,
-		WorkloadID:    command.WorkloadID,
-		OccurredAt:    time.Now().UTC(),
-		Payload: protocol.WorkloadOperationResultPayload{
-			State: "rejected", Code: code,
-		},
-	})
-	cancel()
-
-	return err
 }
 
 func (r *Runner) handleSourcesUpdate(conn *websocket.Conn, endpoint string, data []byte, expiryTimer *time.Timer) error {
@@ -389,25 +311,9 @@ func (r *Runner) newSourceExpiryTimer(endpoint string) (*time.Timer, <-chan time
 	return timer, timer.C
 }
 
-func newStoppedTimer() *time.Timer {
-	timer := time.NewTimer(time.Hour)
-	stopTimer(timer)
-
-	return timer
-}
-
 func resetTimerAt(timer *time.Timer, deadline time.Time) {
-	stopTimer(timer)
+	nodeapi.StopTimer(timer)
 	timer.Reset(durationUntil(deadline))
-}
-
-func stopTimer(timer *time.Timer) {
-	if !timer.Stop() {
-		select {
-		case <-timer.C:
-		default:
-		}
-	}
 }
 
 func durationUntil(deadline time.Time) time.Duration {
@@ -419,38 +325,12 @@ func durationUntil(deadline time.Time) time.Duration {
 	return delay
 }
 
-func ping(ctx context.Context, conn *websocket.Conn) error {
-	pingCtx, cancel := context.WithTimeout(ctx, pongTimeout)
-	err := conn.Ping(pingCtx)
-	cancel()
-
-	if err != nil {
-		return fmt.Errorf("portal heartbeat failed: %w", err)
+// peerFailure ends the endpoint when the portal no longer recognizes the
+// node; other errors from the shared protocol pass through unchanged.
+func (r *Runner) peerFailure(endpoint string, err error) error {
+	if rejection, ok := errors.AsType[*nodeapi.IdentityRejection](err); ok {
+		return r.endpointFailure(endpoint, rejection.Err)
 	}
 
-	return nil
-}
-
-func nextPingDelay() time.Duration {
-	return pingInterval - pingJitter + randomDuration(2*pingJitter+1)
-}
-
-// portalReject answers a portal request the node cannot accept with the
-// same error frame a device gets.
-func portalReject(conn *websocket.Conn) rejectFunc {
-	return func(ctx context.Context, requestID, code, message string) error {
-		if !agentcrypto.ValidUUID(requestID) {
-			requestID = ""
-		}
-
-		writeCtx, cancel := context.WithTimeout(ctx, workloadWriteTimeout)
-		defer cancel()
-
-		return wsframe.WriteJSON(writeCtx, conn, protocol.Error{
-			Type:      protocol.ErrorType,
-			RequestID: requestID,
-			Code:      code,
-			Message:   boundedMessage(message),
-		})
-	}
+	return err
 }

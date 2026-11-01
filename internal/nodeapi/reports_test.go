@@ -1,4 +1,4 @@
-package session
+package nodeapi
 
 import (
 	"context"
@@ -37,7 +37,7 @@ func TestNodeReporterSendsSpecificationsBeforeNetwork(t *testing.T) {
 				},
 			}, nil
 		},
-	}, &nodeReportState{})
+	}, &ReportState{})
 
 	first := waitForNodeReport(t, reporter.results)
 	if first.kind != nodeReportSpecifications {
@@ -89,7 +89,7 @@ func TestNodeReporterSendsSpecificationsBeforeNetwork(t *testing.T) {
 }
 
 func TestNodeReporterRejectsMismatchedAcknowledgement(t *testing.T) {
-	reporter := &nodeReporter{state: &nodeReportState{active: &activeNodeReport{
+	reporter := &nodeReporter{state: &ReportState{active: &activeNodeReport{
 		kind:      nodeReportSpecifications,
 		requestID: "2ab9d734-7434-4cdf-bca4-6ce7a46cdd65",
 	}}}
@@ -117,7 +117,7 @@ func TestNodeReporterRetriesSamePayloadAfterReconnect(t *testing.T) {
 			}, nil
 		},
 	}
-	state := &nodeReportState{}
+	state := &ReportState{}
 
 	firstClient, firstServer := newWebSocketPair(t)
 	firstReporter := newNodeReporter(t.Context(), collectors, state)
@@ -150,8 +150,8 @@ func TestNodeReporterRetriesSamePayloadAfterReconnect(t *testing.T) {
 }
 
 func TestNodeReporterRejectsOversizedReport(t *testing.T) {
-	reporter := &nodeReporter{state: &nodeReportState{}}
-	result := collectedNodeReport{
+	reporter := &nodeReporter{state: &ReportState{}}
+	result := CollectedReport{
 		kind: nodeReportSpecifications,
 		specifications: specifications.Snapshot{
 			ObservationScope: protocol.ObservationScopeHost,
@@ -168,34 +168,24 @@ func TestNodeReporterRejectsOversizedReport(t *testing.T) {
 }
 
 func TestTerminalNodeReportRejectionSkipsReportWithoutEndingSession(t *testing.T) {
-	live := newTestReportLiveState(t, nodeReportSpecifications)
-	live.reports.collectors.Network = func(context.Context) (networkinfo.Snapshot, error) {
+	peer := newTestReportPeer(t, nodeReportSpecifications)
+	peer.exchange.reports.collectors.Network = func(context.Context) (networkinfo.Snapshot, error) {
 		return networkinfo.Snapshot{ObservationScope: protocol.ObservationScopeHost}, nil
 	}
 	events := make(chan NodeReportRejection, 1)
-	runner := &Runner{masterEndpoint: "wss://portal.example/agent/v1/connect"}
-
-	err := runner.handleWorkingMessage(
-		t.Context(),
-		nil,
-		"",
-		runner.masterEndpoint,
-		[]byte(`{
+	err := handleTestFrame(t, peer, []byte(`{
             "type":"node.specifications.rejected",
             "request_id":"2ab9d734-7434-4cdf-bca4-6ce7a46cdd65",
             "code":"unsupported_schema_version"
-        }`),
-		live,
-		Events{ReportRejected: func(rejection NodeReportRejection) { events <- rejection }},
-	)
+        }`), Events{ReportRejected: func(rejection NodeReportRejection) { events <- rejection }})
 	if err != nil {
 		t.Fatalf("terminal report rejection ended session: %v", err)
 	}
-	if live.reports.state.complete || live.reports.state.active != nil {
+	if peer.exchange.reports.state.complete || peer.exchange.reports.state.active != nil {
 		t.Fatal("terminal report rejection did not disable the rejected report")
 	}
 
-	next := waitForNodeReport(t, live.reports.results)
+	next := waitForNodeReport(t, peer.exchange.reports.results)
 	if next.kind != nodeReportNetwork {
 		t.Fatalf("next report kind = %d, want network", next.kind)
 	}
@@ -208,27 +198,17 @@ func TestTerminalNodeReportRejectionSkipsReportWithoutEndingSession(t *testing.T
 }
 
 func TestTransientNodeReportRejectionSchedulesSameReport(t *testing.T) {
-	live := newTestReportLiveState(t, nodeReportSpecifications)
+	peer := newTestReportPeer(t, nodeReportSpecifications)
 	events := make(chan NodeReportRejection, 1)
-	runner := &Runner{masterEndpoint: "wss://portal.example/agent/v1/connect"}
-
-	err := runner.handleWorkingMessage(
-		t.Context(),
-		nil,
-		"",
-		runner.masterEndpoint,
-		[]byte(`{
+	err := handleTestFrame(t, peer, []byte(`{
             "type":"node.specifications.rejected",
             "request_id":"2ab9d734-7434-4cdf-bca4-6ce7a46cdd65",
             "code":"temporarily_unavailable"
-        }`),
-		live,
-		Events{ReportRejected: func(rejection NodeReportRejection) { events <- rejection }},
-	)
+        }`), Events{ReportRejected: func(rejection NodeReportRejection) { events <- rejection }})
 	if err != nil {
 		t.Fatalf("transient report rejection ended session: %v", err)
 	}
-	if live.reports.state.active == nil || live.reports.state.retryAttempt != 1 {
+	if peer.exchange.reports.state.active == nil || peer.exchange.reports.state.retryAttempt != 1 {
 		t.Fatal("transient report rejection did not preserve the active report")
 	}
 
@@ -239,104 +219,92 @@ func TestTransientNodeReportRejectionSchedulesSameReport(t *testing.T) {
 }
 
 func TestMalformedNodeReportRejectionReconnectsWithoutBecomingTerminal(t *testing.T) {
-	live := newTestReportLiveState(t, nodeReportSpecifications)
-	runner := &Runner{masterEndpoint: "wss://portal.example/agent/v1/connect"}
-
-	err := runner.handleWorkingMessage(
-		t.Context(),
-		nil,
-		"",
-		runner.masterEndpoint,
-		[]byte(`{
+	peer := newTestReportPeer(t, nodeReportSpecifications)
+	err := handleTestFrame(t, peer, []byte(`{
             "type":"node.specifications.rejected",
             "code":"internal_error"
-        }`),
-		live,
-		Events{},
-	)
+        }`), Events{})
 	if err == nil {
 		t.Fatal("malformed report rejection was accepted")
 	}
-	if IsTerminal(err) {
-		t.Fatalf("malformed report rejection became terminal: %v", err)
+	if _, ok := errors.AsType[*IdentityRejection](err); ok {
+		t.Fatalf("malformed report rejection became an identity rejection: %v", err)
 	}
-	if live.reports.state.active == nil {
+	if peer.exchange.reports.state.active == nil {
 		t.Fatal("malformed report rejection cleared the active report")
 	}
 }
 
 func TestMissingNodeIsTerminalIdentityFailure(t *testing.T) {
-	live := newTestReportLiveState(t, nodeReportSpecifications)
-	runner := &Runner{masterEndpoint: "wss://portal.example/agent/v1/connect"}
-
-	err := runner.handleWorkingMessage(
-		t.Context(),
-		nil,
-		"",
-		runner.masterEndpoint,
-		[]byte(`{
+	peer := newTestReportPeer(t, nodeReportSpecifications)
+	err := handleTestFrame(t, peer, []byte(`{
             "type":"node.specifications.rejected",
             "request_id":"2ab9d734-7434-4cdf-bca4-6ce7a46cdd65",
             "code":"node_not_registered"
-        }`),
-		live,
-		Events{},
-	)
-	if !IsTerminal(err) {
-		t.Fatalf("missing node rejection was not terminal: %v", err)
+        }`), Events{})
+	if _, ok := errors.AsType[*IdentityRejection](err); !ok {
+		t.Fatalf("missing node rejection was not an identity rejection: %v", err)
 	}
 }
 
 func TestDuplicateNodeReportAcknowledgementDoesNotAdvanceActiveReport(t *testing.T) {
-	live := newTestReportLiveState(t, nodeReportNetwork)
-	live.reports.state.lastAcceptedKind = nodeReportSpecifications
-	live.reports.state.lastAcceptedRequestID = "6e0c1d91-5145-440f-bf97-d84db4f83644"
-	runner := &Runner{masterEndpoint: "wss://portal.example/agent/v1/connect"}
-
-	err := runner.handleWorkingMessage(
-		t.Context(),
-		nil,
-		"",
-		runner.masterEndpoint,
-		[]byte(`{
+	peer := newTestReportPeer(t, nodeReportNetwork)
+	peer.exchange.reports.state.lastAcceptedKind = nodeReportSpecifications
+	peer.exchange.reports.state.lastAcceptedRequestID = "6e0c1d91-5145-440f-bf97-d84db4f83644"
+	err := handleTestFrame(t, peer, []byte(`{
             "type":"node.specifications.accepted",
             "request_id":"6e0c1d91-5145-440f-bf97-d84db4f83644"
-        }`),
-		live,
-		Events{},
-	)
+        }`), Events{})
 	if err != nil {
 		t.Fatalf("duplicate acknowledgement ended session: %v", err)
 	}
-	if live.reports.state.active == nil || live.reports.state.active.kind != nodeReportNetwork {
+	if peer.exchange.reports.state.active == nil || peer.exchange.reports.state.active.kind != nodeReportNetwork {
 		t.Fatal("duplicate acknowledgement advanced the active network report")
 	}
 }
 
-func newTestReportLiveState(t *testing.T, kind nodeReportKind) *liveState {
+func newTestReportPeer(t *testing.T, kind nodeReportKind) *Peer {
 	t.Helper()
 
-	replyTimer := newStoppedTimer()
-	retryTimer := newStoppedTimer()
+	replyTimer := NewStoppedTimer()
+	retryTimer := NewStoppedTimer()
 	t.Cleanup(func() {
 		replyTimer.Stop()
 		retryTimer.Stop()
 	})
 
-	state := &nodeReportState{active: &activeNodeReport{
+	state := &ReportState{active: &activeNodeReport{
 		kind:      kind,
 		requestID: "2ab9d734-7434-4cdf-bca4-6ce7a46cdd65",
 		payload:   []byte(`{"type":"node.specifications.report"}`),
 	}}
 
-	return &liveState{exchange: &exchange{
-		reports:          &nodeReporter{collectors: Collectors{}, results: make(chan collectedNodeReport, 1), state: state},
+	return &Peer{exchange: &exchange{
+		reports:          &nodeReporter{collectors: Collectors{}, results: make(chan CollectedReport, 1), state: state},
 		reportReplyTimer: replyTimer,
 		reportRetryTimer: retryTimer,
 	}}
 }
 
-func waitForNodeReport(t *testing.T, results <-chan collectedNodeReport) collectedNodeReport {
+// handleTestFrame passes one frame to the peer as a session loop would.
+func handleTestFrame(t *testing.T, peer *Peer, frame []byte, events Events) error {
+	t.Helper()
+
+	messageType, err := protocol.MessageType(frame)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	peer.events = events
+	handled, err := peer.HandleMessage(t.Context(), messageType, frame)
+	if !handled {
+		t.Fatalf("frame %s was not handled", frame)
+	}
+
+	return err
+}
+
+func waitForNodeReport(t *testing.T, results <-chan CollectedReport) CollectedReport {
 	t.Helper()
 
 	select {
@@ -344,7 +312,7 @@ func waitForNodeReport(t *testing.T, results <-chan collectedNodeReport) collect
 		return result
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for collected node report")
-		return collectedNodeReport{}
+		return CollectedReport{}
 	}
 }
 

@@ -6,15 +6,11 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
-	"io"
-	"log/slog"
 	"time"
 
 	"github.com/FroZor/loreva-agent/internal/agentcrypto"
 	"github.com/FroZor/loreva-agent/internal/connectivity"
-	"github.com/FroZor/loreva-agent/internal/networkinfo"
-	"github.com/FroZor/loreva-agent/internal/protocol"
-	"github.com/FroZor/loreva-agent/internal/specifications"
+	"github.com/FroZor/loreva-agent/internal/nodeapi"
 	"github.com/FroZor/loreva-agent/internal/state"
 	"github.com/FroZor/loreva-agent/internal/workload"
 )
@@ -46,21 +42,13 @@ type rejectedError struct {
 type Events struct {
 	Connected      func(endpoint string)
 	Retrying       func(ConnectionRetry)
-	ReportRejected func(NodeReportRejection)
+	ReportRejected func(nodeapi.NodeReportRejection)
 }
 
 // ConnectionRetry describes a failed endpoint pass and its retry delay.
 type ConnectionRetry struct {
 	Err     error
 	RetryIn time.Duration
-}
-
-// NodeReportRejection describes a correlated report rejection from the portal.
-type NodeReportRejection struct {
-	Type      string
-	Code      string
-	RetryIn   time.Duration
-	Retryable bool
 }
 
 func (e *rejectedError) Error() string {
@@ -77,45 +65,14 @@ type Runner struct {
 	material          *agentcrypto.KeyMaterial
 	clientCertificate tls.Certificate
 	masterEndpoint    string
-	collectors        Collectors
-	reports           nodeReportState
-	workloads         WorkloadController
+	collectors        nodeapi.Collectors
+	reports           nodeapi.ReportState
+	workloads         nodeapi.WorkloadController
 	artifacts         workload.ArtifactSource
 }
 
-// Collectors provide bounded system snapshots after a connection is accepted.
-type Collectors struct {
-	Specifications func(context.Context) (specifications.Snapshot, error)
-	Network        func(context.Context) (networkinfo.Snapshot, error)
-	Metrics        MetricsSource
-	// Processes returns the details of one process; nil when the node
-	// cannot read its process table.
-	Processes func(pid int32, startedAt time.Time) (protocol.ProcessDetails, error)
-	Workloads WorkloadController
-	// Containers serves container logs and consoles; it may be nil when
-	// the node has no container runtime.
-	Containers ContainerIO
-	// Files serves the file manager in container volumes; it may be nil
-	// when the node has no container runtime.
-	Files ContainerFiles
-	// Inventory lists and inspects containers; it may be nil when the
-	// node has no container runtime.
-	Inventory ContainerInventory
-	// Logger receives the audit log of console commands; nil discards it.
-	Logger *slog.Logger
-}
-
-// WorkloadController accepts authenticated commands and returns asynchronous
-// protocol responses per controller (the portal_id of the command). The
-// session remains the only writer of its WebSocket.
-type WorkloadController interface {
-	Submit(protocol.WorkloadCommand, workload.ArtifactSource) error
-	Results(controller string) <-chan any
-	StoreArtifact(protocol.ArtifactReference, io.Reader) error
-}
-
 // New validates the persisted identity and creates a session runner.
-func New(store *state.Store, identity *state.Identity, collectors Collectors) (*Runner, error) {
+func New(store *state.Store, identity *state.Identity, collectors nodeapi.Collectors) (*Runner, error) {
 	if store == nil {
 		return nil, errors.New("agent state store is required")
 	}
@@ -230,7 +187,7 @@ connectionLoop:
 		}
 
 		attempt++
-		delay := retryDelay(attempt)
+		delay := nodeapi.RetryDelay(attempt)
 		if events.Retrying != nil {
 			events.Retrying(ConnectionRetry{Err: lastErr, RetryIn: delay})
 		}

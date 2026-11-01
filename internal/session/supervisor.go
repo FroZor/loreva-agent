@@ -6,12 +6,13 @@ import (
 	"fmt"
 	"log/slog"
 
+	"github.com/FroZor/loreva-agent/internal/nodeapi"
 	"github.com/FroZor/loreva-agent/internal/state"
 )
 
 // Supervise keeps the portal session up while the connection preference is
 // enabled, pausing on disconnect and when the identity is rejected.
-func Supervise(ctx context.Context, store *state.Store, collectors Collectors, logger *slog.Logger) error {
+func Supervise(ctx context.Context, store *state.Store, collectors nodeapi.Collectors, logger *slog.Logger) error {
 	if logger == nil {
 		logger = slog.New(slog.DiscardHandler)
 	}
@@ -68,7 +69,7 @@ func Supervise(ctx context.Context, store *state.Store, collectors Collectors, l
 func runConnection(
 	ctx context.Context,
 	store *state.Store,
-	collectors Collectors,
+	collectors nodeapi.Collectors,
 	connectionLock *state.Lock,
 	logger *slog.Logger,
 ) error {
@@ -109,7 +110,7 @@ func sessionEvents(identity *state.Identity, logger *slog.Logger) Events {
 				"retry_in", retry.RetryIn,
 			)
 		},
-		ReportRejected: func(rejection NodeReportRejection) {
+		ReportRejected: func(rejection nodeapi.NodeReportRejection) {
 			if rejection.Retryable {
 				logger.Warn(
 					"node report rejected; retry scheduled",

@@ -22,6 +22,7 @@ import (
 	"github.com/FroZor/loreva-agent/internal/metrics"
 	"github.com/FroZor/loreva-agent/internal/metricstore"
 	"github.com/FroZor/loreva-agent/internal/networkinfo"
+	"github.com/FroZor/loreva-agent/internal/nodeapi"
 	"github.com/FroZor/loreva-agent/internal/pairing"
 	"github.com/FroZor/loreva-agent/internal/protocol"
 	"github.com/FroZor/loreva-agent/internal/specifications"
@@ -97,7 +98,7 @@ func (f *fakeWorkloads) StoreArtifact(reference protocol.ArtifactReference, data
 	return nil
 }
 
-func testCollectors(t *testing.T) direct.Collectors {
+func testCollectors(t *testing.T) nodeapi.Collectors {
 	t.Helper()
 
 	metricStore, err := metricstore.Open(t.TempDir())
@@ -108,7 +109,7 @@ func testCollectors(t *testing.T) direct.Collectors {
 		t.Fatal(err)
 	}
 
-	return direct.Collectors{
+	return nodeapi.Collectors{
 		Specifications: func(context.Context) (specifications.Snapshot, error) {
 			return specifications.Snapshot{ObservationScope: "host"}, nil
 		},
@@ -143,13 +144,14 @@ func startNode(t *testing.T) *testNode {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
+		collectors := testCollectors(t)
+		collectors.Workloads = workloads
+		collectors.Containers = containers
+		collectors.Files = files
+		collectors.Inventory = fakeInventory{}
 		done <- direct.Run(ctx, store, node, direct.Options{
 			Version:    "test",
-			Collectors: testCollectors(t),
-			Workloads:  workloads,
-			Containers: containers,
-			Files:      files,
-			Inventory:  fakeInventory{},
+			Collectors: collectors,
 		})
 	}()
 	t.Cleanup(func() {

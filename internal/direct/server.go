@@ -16,8 +16,7 @@ import (
 	"github.com/FroZor/loreva-agent/internal/certpin"
 	"github.com/FroZor/loreva-agent/internal/control"
 	"github.com/FroZor/loreva-agent/internal/networkinfo"
-	"github.com/FroZor/loreva-agent/internal/protocol"
-	"github.com/FroZor/loreva-agent/internal/session"
+	"github.com/FroZor/loreva-agent/internal/nodeapi"
 	"github.com/FroZor/loreva-agent/internal/specifications"
 	"github.com/FroZor/loreva-agent/internal/state"
 )
@@ -36,21 +35,9 @@ const (
 	idleTimeout = 15 * time.Second
 )
 
-// Collectors provide system snapshots and metrics for device sessions.
-type Collectors struct {
-	Specifications func(context.Context) (specifications.Snapshot, error)
-	Network        func(context.Context) (networkinfo.Snapshot, error)
-	Metrics        session.MetricsSource
-	Processes      func(pid int32, startedAt time.Time) (protocol.ProcessDetails, error)
-}
-
-func (c Collectors) session() session.Collectors {
-	return session.Collectors{Specifications: c.Specifications, Network: c.Network, Metrics: c.Metrics, Processes: c.Processes}
-}
-
 // serialized runs each snapshot collector at most once at a time, so devices
 // that open many sessions cannot pile up expensive collections.
-func (c Collectors) serialized() Collectors {
+func serialized(c nodeapi.Collectors) nodeapi.Collectors {
 	var specificationsMu, networkMu sync.Mutex
 
 	collectSpecifications, collectNetwork := c.Specifications, c.Network
@@ -74,16 +61,10 @@ func (c Collectors) serialized() Collectors {
 type Options struct {
 	Version        string
 	PortalEnrolled bool
-	Collectors     Collectors
-	// Workloads may be nil when the node has no workload runtime.
-	Workloads session.WorkloadController
-	// Containers may be nil when the node has no container runtime.
-	Containers session.ContainerIO
-	// Files may be nil when the node has no container runtime.
-	Files session.ContainerFiles
-	// Inventory may be nil when the node has no container runtime.
-	Inventory session.ContainerInventory
-	Logger    *slog.Logger
+	// Collectors serve device sessions. Specifications and Network are
+	// required; Collectors.Logger is unused, device sessions log to Logger.
+	Collectors nodeapi.Collectors
+	Logger     *slog.Logger
 }
 
 // localNode is the validated form of state.Node.
@@ -123,7 +104,7 @@ func Run(ctx context.Context, store *state.Store, node *state.Node, options Opti
 	if options.Collectors.Specifications == nil || options.Collectors.Network == nil {
 		return errors.New("direct server collectors are required")
 	}
-	options.Collectors = options.Collectors.serialized()
+	options.Collectors = serialized(options.Collectors)
 
 	local, err := parseNode(node)
 	if err != nil {
@@ -161,11 +142,11 @@ func Run(ctx context.Context, store *state.Store, node *state.Node, options Opti
 	service := newSessions(local, options, pending, devices)
 	controller := &controlServer{pairings: pending, sessions: service, logger: options.Logger}
 
-	if options.Workloads != nil {
+	if options.Collectors.Workloads != nil {
 		fanOutCtx, cancel := context.WithCancel(ctx)
 		defer cancel()
 
-		go service.fanOut(fanOutCtx, options.Workloads.Results(local.id))
+		go service.fanOut(fanOutCtx, options.Collectors.Workloads.Results(local.id))
 	}
 
 	return serve(ctx, service, sessionListener, controller, controlListener, options.Logger, local)

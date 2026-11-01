@@ -32,6 +32,7 @@ import (
 	"github.com/FroZor/loreva-agent/internal/agentcrypto"
 	"github.com/FroZor/loreva-agent/internal/enrollment"
 	"github.com/FroZor/loreva-agent/internal/networkinfo"
+	"github.com/FroZor/loreva-agent/internal/nodeapi"
 	"github.com/FroZor/loreva-agent/internal/protocol"
 	"github.com/FroZor/loreva-agent/internal/session"
 	"github.com/FroZor/loreva-agent/internal/specifications"
@@ -83,7 +84,7 @@ func TestEnrollThenConnect(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	runner, err := session.New(store, stored, session.Collectors{})
+	runner, err := session.New(store, stored, nodeapi.Collectors{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -348,7 +349,7 @@ func TestEnrollConnectAndRenewIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	runner, err := session.New(store, identity, session.Collectors{})
+	runner, err := session.New(store, identity, nodeapi.Collectors{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -394,7 +395,7 @@ func TestSourcesUpdateIsPersistedBeforeDrainReconnect(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	runner, err := session.New(store, identity, session.Collectors{})
+	runner, err := session.New(store, identity, nodeapi.Collectors{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -430,7 +431,7 @@ func TestConnectReportsSpecificationsThenNetwork(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	runner, err := session.New(store, identity, session.Collectors{
+	runner, err := session.New(store, identity, nodeapi.Collectors{
 		Specifications: func(context.Context) (specifications.Snapshot, error) {
 			return specifications.Snapshot{
 				ObservationScope: protocol.ObservationScopeHost,
